@@ -3,7 +3,9 @@ HTTP-facing chat orchestration: onboarding + LangGraph agent (server-side sessio
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 from typing import Any, Literal, Optional
 
@@ -18,6 +20,37 @@ logger = logging.getLogger(__name__)
 
 _sessions_lock = threading.Lock()
 _agents: dict[str, TrailerAgentLG] = {}
+
+
+def _max_log_chars() -> int:
+    try:
+        return int((os.getenv("TRAILERPLACE_CHAT_LOG_MAX_CHARS") or "8000").strip())
+    except ValueError:
+        return 8000
+
+
+def _truncate_for_log(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "…[truncated]"
+
+
+def _log_chat_user(session_id: str, user_text: str) -> None:
+    """Log user turn start (before LLM / tools)."""
+    payload = {
+        "session_id": session_id,
+        "user": _truncate_for_log(user_text or "", _max_log_chars()),
+    }
+    logger.info("%s", json.dumps(payload, ensure_ascii=True))
+
+
+def _log_chatbot(session_id: str, reply_text: str) -> None:
+    """Log assistant reply after it is fully generated."""
+    payload = {
+        "session_id": session_id,
+        "chatbot": _truncate_for_log(reply_text or "", _max_log_chars()),
+    }
+    logger.info("%s", json.dumps(payload, ensure_ascii=True))
 
 
 def reset_server_session(session_id: str) -> None:
@@ -64,6 +97,8 @@ class ChatResponse(BaseModel):
 
 
 def run_chat(req: ChatRequest) -> ChatResponse:
+    _log_chat_user(req.session_id, req.message)
+
     if req.sales_phase == "onboarding":
         new_hist, text, customer_done = run_contact_onboarding_turn(
             api_messages=list(req.onboarding_api_messages),
@@ -97,6 +132,7 @@ def run_chat(req: ChatRequest) -> ChatResponse:
                     logger.exception(
                         "save_turn failed (onboarding complete) session_id=%s", req.session_id
                     )
+        _log_chatbot(req.session_id, text)
         return out
 
     fn = (req.customer_full_name or "").strip()
@@ -138,6 +174,8 @@ def run_chat(req: ChatRequest) -> ChatResponse:
             )
         except Exception:
             logger.exception("save_turn failed (main) session_id=%s", req.session_id)
+
+    _log_chatbot(req.session_id, reply)
 
     return ChatResponse(
         assistant_text=reply,
