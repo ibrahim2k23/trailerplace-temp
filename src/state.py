@@ -41,7 +41,7 @@ class SessionState(TypedDict):
     is_interested: bool
     interested_item: Optional[str]
 
-    # ── Customer info ─────────────────────────────────────────────────────────
+    # ── Customer info (optional; may be filled from onboarding or API) ───────
     customer_full_name: Optional[str]
     customer_email: Optional[str]
     customer_phone: Optional[str]

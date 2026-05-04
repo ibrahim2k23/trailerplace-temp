@@ -1,11 +1,10 @@
 """
 TrailerPlace AI Assistant — Streamlit frontend.
 
-Run from this folder (where pyproject.toml lives):
-    uv sync
-    uv run python -m streamlit run app.py
+Run from this folder (where pyproject.toml lives), using your venv:
+    .\\.venv\\Scripts\\streamlit.exe run app.py
 
-Or: .\\run_streamlit.ps1
+Requires the FastAPI backend (`python main.py` with the same venv) unless CHATBOT_API_URL points elsewhere.
 
 If you see imports using another project's .venv, deactivate it first
 (PowerShell: Remove-Item Env:\\VIRTUAL_ENV) or use run_streamlit.ps1.
@@ -18,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
@@ -27,17 +27,13 @@ from src.log_setup import configure_trailerplace_logging
 
 configure_trailerplace_logging()
 
-from src.agent_lg import TrailerAgentLG
-from src.agent import canonical_listing_key_from_listing
-from src.models import TrailerListing
-from src.contact_onboarding import run_contact_onboarding_turn
 from src.conversation_store import (
-    enqueue_save_turn,
     enqueue_save_user_feedback,
     persistence_enabled,
 )
+from src.agent import canonical_listing_key_from_listing
+from src.models import TrailerListing
 from src.shown_listings_store import add_shown_keys_and_urls
-from src.models import CustomerContact, TrailerListing
 from src.thinking_agent import (
     generate_thinking_flow,
     log_thinking_flow,
@@ -50,6 +46,18 @@ _AUTH_PASS = (os.getenv("TRAILERPLACE_APP_PASSWORD") or "").strip()
 _AUTH_CONFIGURED = bool(_AUTH_USER and _AUTH_PASS)
 _THINKING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_thinking")
 _THINKING_POLL_MS = int((os.getenv("THINKING_AGENT_POLL_MS") or "700").strip())
+CHATBOT_API_URL = (os.getenv("CHATBOT_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
+
+
+def _reset_api_session(session_id: str) -> None:
+    try:
+        requests.post(
+            f"{CHATBOT_API_URL}/session/reset",
+            json={"session_id": session_id},
+            timeout=8,
+        )
+    except requests.RequestException:
+        pass
 
 
 def _password_matches(got: str, expected: str) -> bool:
@@ -57,30 +65,6 @@ def _password_matches(got: str, expected: str) -> bool:
     if len(ga) != len(ea):
         return False
     return secrets.compare_digest(ga, ea)
-
-
-def _prior_messages_from_onboarding(api_msgs: list) -> list[dict]:
-    """Strip tool turns; keep user/assistant text for main agent context."""
-    out: list[dict] = []
-    for m in api_msgs or []:
-        role = m.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        c = m.get("content")
-        if isinstance(c, str) and c.strip():
-            out.append({"role": role, "content": c.strip()})
-    return out
-
-
-def _make_trailer_agent_from_session() -> TrailerAgentLG:
-    raw_email = (st.session_state.get("customer_email") or "").strip()
-    return TrailerAgentLG(
-        customer=CustomerContact(
-            full_name=st.session_state.customer_full_name.strip(),
-            email=raw_email if raw_email else None,
-            phone=st.session_state.customer_phone.strip(),
-        ),
-    )
 
 
 def _run_thinking_job(session_id: str, payload: dict) -> dict:
@@ -313,15 +297,13 @@ if not st.session_state.auth_ok:
 
 if "chat_session_id" not in st.session_state:
     st.session_state.chat_session_id = str(uuid.uuid4())
-if st.session_state.sales_phase == "main" and "agent" not in st.session_state:
+if st.session_state.sales_phase == "main":
     if not (
         st.session_state.get("customer_full_name")
         and st.session_state.get("customer_phone")
     ):
         st.session_state.sales_phase = "onboarding"
         st.session_state.onboarding_api_messages = []
-    else:
-        st.session_state.agent = _make_trailer_agent_from_session()
 if "last_thinking_result" not in st.session_state:
     st.session_state.last_thinking_result = None
 if "thinking_status" not in st.session_state:
@@ -378,11 +360,12 @@ with st.sidebar:
     st.markdown("🚚 Delivery available")
     st.divider()
     if st.button("↺  New Conversation", use_container_width=True):
+        old_sid = st.session_state.get("chat_session_id")
+        if old_sid:
+            _reset_api_session(old_sid)
         st.session_state.sales_phase = "onboarding"
         st.session_state.onboarding_api_messages = []
         st.session_state.messages = []
-        if "agent" in st.session_state:
-            del st.session_state.agent
         for k in ("main_prior_messages", "customer_full_name", "customer_email", "customer_phone"):
             if k in st.session_state:
                 del st.session_state[k]
@@ -393,9 +376,10 @@ with st.sidebar:
         st.session_state.last_thinking_payload = None
         st.rerun()
     if st.button("Log out", use_container_width=True):
+        old_sid = st.session_state.get("chat_session_id")
+        if old_sid:
+            _reset_api_session(old_sid)
         st.session_state.auth_ok = False
-        if "agent" in st.session_state:
-            del st.session_state.agent
         st.session_state.messages = []
         for k in (
             "chat_session_id",
@@ -570,62 +554,88 @@ if prompt := st.chat_input(placeholder):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 3. Get response — onboarding (LLM contact) vs main sales agent
+    # 3. Chat via FastAPI backend
     with st.chat_message("assistant"):
         with st.spinner(""):
-            if st.session_state.sales_phase == "onboarding":
-                new_hist, response_text, customer_done = run_contact_onboarding_turn(
-                    api_messages=st.session_state.onboarding_api_messages,
-                    user_message=prompt,
+            listings = []
+            product_fetch = []
+            thinking_context = None
+            payload = {
+                "session_id": st.session_state.chat_session_id,
+                "sales_phase": st.session_state.sales_phase,
+                "message": prompt,
+                "onboarding_api_messages": st.session_state.onboarding_api_messages,
+                "customer_full_name": st.session_state.get("customer_full_name"),
+                "customer_email": st.session_state.get("customer_email"),
+                "customer_phone": st.session_state.get("customer_phone"),
+            }
+            try:
+                r = requests.post(
+                    f"{CHATBOT_API_URL}/chat",
+                    json=payload,
+                    timeout=180,
                 )
-                st.session_state.onboarding_api_messages = new_hist
-                listings = []
-                product_fetch = []
-                thinking_context = None
-                if customer_done is not None:
-                    st.session_state.customer_full_name = customer_done.full_name
-                    st.session_state.customer_email = customer_done.email
-                    st.session_state.customer_phone = customer_done.phone
-                    st.session_state.main_prior_messages = _prior_messages_from_onboarding(
-                        st.session_state.onboarding_api_messages
-                    )
-                    st.session_state.sales_phase = "main"
-                    st.session_state.agent = _make_trailer_agent_from_session()
+                r.raise_for_status()
+                data = r.json()
+            except requests.RequestException as exc:
+                response_text = (
+                    f"Sorry — the assistant service is unavailable ({exc!s}). "
+                    f"Start the API with `python main.py` (default {CHATBOT_API_URL})."
+                )
             else:
-                response_text, _result_dicts = st.session_state.agent.chat(
-                    prompt,
-                    session_id=st.session_state.get("chat_session_id"),
-                )
-                # Convert result dicts → TrailerListing objects for render_card
+                response_text = (data.get("assistant_text") or "").strip() or " "
+                st.session_state.onboarding_api_messages = data.get(
+                    "onboarding_api_messages"
+                ) or st.session_state.onboarding_api_messages
+                sp = data.get("sales_phase")
+                if sp in ("onboarding", "main"):
+                    st.session_state.sales_phase = sp
+                if data.get("customer_full_name"):
+                    st.session_state.customer_full_name = data["customer_full_name"]
+                if "customer_email" in data:
+                    st.session_state.customer_email = data.get("customer_email") or ""
+                if data.get("customer_phone"):
+                    st.session_state.customer_phone = data["customer_phone"]
+                if data.get("main_prior_messages") is not None:
+                    st.session_state.main_prior_messages = data["main_prior_messages"]
+
                 listings = []
-                for d in (_result_dicts or []):
+                for d in (data.get("listings") or []):
+                    if not isinstance(d, dict):
+                        continue
                     try:
-                        listings.append(TrailerListing(
-                            listing_id=str(d.get("url") or d.get("title") or ""),
-                            title=str(d.get("title") or ""),
-                            condition=str(d.get("condition") or "New"),
-                            price=float(d["price"].replace("$","").replace(",","")) if isinstance(d.get("price"), str) and d["price"] not in ("Call for price", None, "") else d.get("price"),
-                            price_display=str(d.get("price") or "") or None,
-                            payments_from=None,
-                            category_subcategory=str(d.get("category") or ""),
-                            make=str(d.get("make") or ""),
-                            color=str(d.get("color") or ""),
-                            hitch_type=d.get("hitch_type"),
-                            year=d.get("year"),
-                            length=d.get("length"),
-                            width=d.get("width"),
-                            axles=d.get("axles"),
-                            gvwr=d.get("gvwr"),
-                            payload_capacity=d.get("payload_capacity"),
-                            trailer_material=d.get("material"),
-                            floor=d.get("floor"),
-                            url=str(d.get("url") or ""),
-                            score=d.get("relevance_score"),
-                        ))
+                        listings.append(
+                            TrailerListing(
+                                listing_id=str(d.get("url") or d.get("title") or ""),
+                                title=str(d.get("title") or ""),
+                                condition=str(d.get("condition") or "New"),
+                                price=float(
+                                    d["price"].replace("$", "").replace(",", "")
+                                )
+                                if isinstance(d.get("price"), str)
+                                and d.get("price")
+                                not in ("Call for price", None, "")
+                                else d.get("price"),
+                                price_display=str(d.get("price") or "") or None,
+                                payments_from=None,
+                                category_subcategory=str(d.get("category") or ""),
+                                make=str(d.get("make") or ""),
+                                color=str(d.get("color") or ""),
+                                hitch_type=d.get("hitch_type"),
+                                year=d.get("year"),
+                                length=d.get("length"),
+                                width=d.get("width"),
+                                axles=d.get("axles"),
+                                gvwr=d.get("gvwr"),
+                                payload_capacity=d.get("payload_capacity"),
+                                trailer_material=d.get("material"),
+                                floor=d.get("floor"),
+                                url=str(d.get("url") or ""),
+                                score=d.get("relevance_score"),
+                            )
+                        )
                     except Exception:
                         pass
-                product_fetch = []
-                thinking_context = None
         st.markdown(response_text)
         for i, listing in enumerate(listings or [], 1):
             render_card(listing, i)
@@ -656,24 +666,7 @@ if prompt := st.chat_input(placeholder):
             [str(x.url or "") for x in listings if getattr(x, "url", None)],
         )
 
-    # 6. Async persist to Supabase (non-blocking)
-    if persistence_enabled() and st.session_state.get("chat_session_id"):
-        tool_call_db = None
-        tool_res_db = None
-        if product_fetch:
-            last = product_fetch[-1]
-            tool_res_db = last.get("recommendation_payload")
-            tool_call_db = {k: v for k, v in last.items() if k != "recommendation_payload"}
-        enqueue_save_turn(
-            st.session_state.chat_session_id,
-            prompt,
-            response_text,
-            tool_call_db,
-            tool_res_db,
-            search_runs=product_fetch if product_fetch else None,
-        )
-
-    # 7. Persist response
+    # 6. Persist assistant message in UI state
     st.session_state.messages.append({
         "role": "assistant",
         "content": response_text,

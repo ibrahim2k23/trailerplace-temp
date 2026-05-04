@@ -1,128 +1,142 @@
 """
-Append-only chat turns to Supabase/Postgres (conversation_history).
-Writes run in a thread pool so the Streamlit request path is not blocked.
+Append chat turns to Postgres (`chatbot_conversations` + `chatbot_leads`).
+Writes from Streamlit may use a thread pool; FastAPI may call sync helpers directly.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy import select
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_conv")
-_engine: Optional[Engine] = None
-_engine_lock = threading.Lock()
 
-_DEFAULT_URL_NAMES = (
-    "DATABASE_URL",
-    "TRAILERPLACE_DATABASE_URL",
-    "SUPABASE_DB_URL",
-)
-
-
-def _get_database_url() -> Optional[str]:
-    for n in _DEFAULT_URL_NAMES:
-        u = (os.getenv(n) or "").strip()
-        if u:
-            if u.startswith("postgres://"):
-                u = u.replace("postgres://", "postgresql+psycopg://", 1)
-            elif u.startswith("postgresql://") and "+" not in u.split("://", 1)[0]:
-                u = u.replace("postgresql://", "postgresql+psycopg://", 1)
-            return u
-    host = (os.getenv("SUPABASE_DB_HOST") or "").strip()
-    user = (os.getenv("SUPABASE_DB_USER") or os.getenv("PGUSER") or "").strip()
-    pw = os.getenv("SUPABASE_DB_PASSWORD") or os.getenv("PGPASSWORD")
-    port = (os.getenv("SUPABASE_DB_PORT") or "5432").strip()
-    db = (os.getenv("SUPABASE_DB_NAME") or os.getenv("PGDATABASE") or "postgres").strip()
-    if host and user and pw is not None:
-        from urllib.parse import quote_plus
-        return (
-            f"postgresql+psycopg://{quote_plus(user)}:{quote_plus(pw)}"
-            f"@{host}:{port}/{db}?sslmode=require"
-        )
-    return None
-
-
-def get_engine() -> Optional[Engine]:
-    global _engine
-    with _engine_lock:
-        if _engine is not None:
-            return _engine
-        url = _get_database_url()
-        if not url:
-            return None
-        _engine = create_engine(url, pool_pre_ping=True)
-        return _engine
+from src.db import get_engine, get_session_factory  # noqa: E402
+from src.db_models import ChatbotConversation, ChatbotLead  # noqa: E402
+from src.models import CustomerContact  # noqa: E402
 
 
 def persistence_enabled() -> bool:
     if (os.getenv("TRAILERPLACE_PERSIST_CHATS") or "1").strip().lower() in (
-        "0", "false", "no", "off",
+        "0",
+        "false",
+        "no",
+        "off",
     ):
         return False
     return get_engine() is not None
 
 
-def _upsert_turn(
-    session_id: str,
-    turn: dict[str, Any],
-    tool_call: Any,
-    tool_result: Any,
-    update_tool: bool,
-) -> None:
-    eng = get_engine()
-    if eng is None:
-        return
-    turn_s = json.dumps(turn, ensure_ascii=False, default=str)
-    tc = json.dumps(tool_call, ensure_ascii=False, default=str) if tool_call is not None else "null"
-    tr = json.dumps(tool_result, ensure_ascii=False, default=str) if tool_result is not None else "null"
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    stmt = text(
-        """
-        INSERT INTO conversation_history (session_id, messages, tool_call, tool_call_result, updated_at)
-        VALUES (
-            CAST(:session_id AS uuid),
-            jsonb_build_array(CAST(:turn AS jsonb)),
-            CASE WHEN :update_tool THEN CAST(:tool_call AS jsonb) ELSE NULL END,
-            CASE WHEN :update_tool THEN CAST(:tool_res AS jsonb) ELSE NULL END,
-            now()
-        )
-        ON CONFLICT (session_id) DO UPDATE SET
-            messages = conversation_history.messages
-                || jsonb_build_array(CAST(:turn AS jsonb)),
-            tool_call = CASE
-                WHEN :update_tool THEN CAST(:tool_call AS jsonb)
-                ELSE conversation_history.tool_call
-            END,
-            tool_call_result = CASE
-                WHEN :update_tool THEN CAST(:tool_res AS jsonb)
-                ELSE conversation_history.tool_call_result
-            END,
-            updated_at = now()
-        """
+
+def _parse_session_uuid(session_id: str) -> Optional[uuid.UUID]:
+    try:
+        return uuid.UUID(str(session_id).strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _ensure_soft_lead_and_conversation_row(
+    session: Any,
+    sid: uuid.UUID,
+    contact: CustomerContact,
+) -> ChatbotConversation:
+    row = session.execute(
+        select(ChatbotConversation).where(ChatbotConversation.session_id == sid)
+    ).scalar_one_or_none()
+    if row is not None:
+        return row
+
+    lead = ChatbotLead(
+        psid=None,
+        name=(contact.full_name or "Unknown")[:255],
+        phone_number=(contact.phone or "")[:64],
+        email=(contact.email or None),
+        lead_type="soft",
+        item_of_interest="General inquiry",
     )
-    with eng.connect() as conn:
-        conn.execute(
-            stmt,
-            {
-                "session_id": session_id,
-                "turn": turn_s,
-                "tool_call": tc,
-                "tool_res": tr,
-                "update_tool": update_tool,
-            },
-        )
-        conn.commit()
+    session.add(lead)
+    session.flush()
+
+    conv = ChatbotConversation(
+        session_id=sid,
+        lead_id=lead.lead_id,
+        conversation=[],
+    )
+    session.add(conv)
+    session.flush()
+    return conv
+
+
+def ensure_session_lead_bundle(session_id: str, contact: CustomerContact) -> None:
+    """
+    Ensure a soft lead + chatbot_conversations row exists before a main-phase agent turn
+    (so interest logging can update the lead even on the first message).
+    """
+    if not session_id or not persistence_enabled():
+        return
+    sid = _parse_session_uuid(session_id)
+    if sid is None:
+        return
+    sf = get_session_factory()
+    if sf is None:
+        return
+    db = sf()
+    try:
+        _ensure_soft_lead_and_conversation_row(db, sid, contact)
+        db.commit()
+    except Exception:
+        logger.exception("ensure_session_lead_bundle failed session_id=%s", session_id)
+        db.rollback()
+    finally:
+        db.close()
+
+
+def upsert_hard_lead_for_interest(session_id: str, item_name: str) -> None:
+    """
+    After a successful product-interest email, mark the session's lead as hard
+    and set item_of_interest.
+    """
+    if not session_id or not persistence_enabled():
+        return
+    sid = _parse_session_uuid(session_id)
+    if sid is None:
+        logger.warning("upsert_hard_lead_for_interest: invalid session_id=%r", session_id)
+        return
+    sf = get_session_factory()
+    if sf is None:
+        return
+    db = sf()
+    try:
+        row = db.execute(
+            select(ChatbotConversation).where(ChatbotConversation.session_id == sid)
+        ).scalar_one_or_none()
+        if row is None:
+            raise RuntimeError(f"No chatbot_conversations row for session_id={session_id}")
+        lead = db.get(ChatbotLead, row.lead_id)
+        if lead is None:
+            raise RuntimeError("Lead row missing for conversation")
+        lead.lead_type = "hard"
+        lead.item_of_interest = (item_name or "")[:8000]
+        row.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        logger.exception("upsert_hard_lead_for_interest failed session_id=%s", session_id)
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def save_turn(
@@ -132,9 +146,21 @@ def save_turn(
     tool_call: Any,
     tool_result: Any,
     search_runs: Any = None,
+    *,
+    customer_contact: Optional[CustomerContact] = None,
 ) -> None:
     if not session_id or not persistence_enabled():
         return
+    if customer_contact is None:
+        logger.debug(
+            "save_turn skipped (no customer_contact yet) session_id=%s", session_id
+        )
+        return
+    sid = _parse_session_uuid(session_id)
+    if sid is None:
+        logger.warning("save_turn: invalid session_id=%r", session_id)
+        return
+
     turn: dict[str, Any] = {
         "at": _utc_now_iso(),
         "user": user_text,
@@ -147,17 +173,22 @@ def save_turn(
     if search_runs is not None:
         turn["search_runs"] = search_runs
 
-    has_tool = tool_call is not None or tool_result is not None
+    sf = get_session_factory()
+    if sf is None:
+        return
+    db = sf()
     try:
-        _upsert_turn(session_id, turn, tool_call, tool_result, has_tool)
+        conv_row = _ensure_soft_lead_and_conversation_row(db, sid, customer_contact)
+        hist = list(conv_row.conversation or [])
+        hist.append(turn)
+        conv_row.conversation = hist
+        conv_row.updated_at = datetime.now(timezone.utc)
+        db.commit()
     except Exception:
-        logger.exception("conversation_history save failed (session_id=%s)", session_id)
-
-
-def _utc_now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        logger.exception("save_turn failed session_id=%s", session_id)
+        db.rollback()
+    finally:
+        db.close()
 
 
 def enqueue_save_turn(
@@ -167,64 +198,72 @@ def enqueue_save_turn(
     tool_call: Any,
     tool_result: Any,
     search_runs: Any = None,
+    *,
+    customer_contact: Optional[CustomerContact] = None,
 ) -> None:
     if not session_id or not persistence_enabled():
         return
-    _pool.submit(save_turn, session_id, user_text, assistant_text, tool_call, tool_result, search_runs)
+    _pool.submit(
+        save_turn,
+        session_id,
+        user_text,
+        assistant_text,
+        tool_call,
+        tool_result,
+        search_runs,
+        customer_contact=customer_contact,
+    )
 
 
 def get_messages_for_session(session_id: str) -> Optional[list]:
-    eng = get_engine()
-    if eng is None:
+    if not persistence_enabled():
         return None
+    sid = _parse_session_uuid(session_id)
+    if sid is None:
+        return None
+    sf = get_session_factory()
+    if sf is None:
+        return None
+    db = sf()
     try:
-        with eng.connect() as conn:
-            row = conn.execute(
-                text(
-                    "SELECT messages FROM conversation_history "
-                    "WHERE session_id = CAST(:sid AS uuid) LIMIT 1"
-                ),
-                {"sid": session_id},
-            ).mappings().first()
-            if not row or row.get("messages") is None:
-                return None
-            m = row["messages"]
-            if isinstance(m, list):
-                return m
-            if isinstance(m, str):
-                return json.loads(m)
-            return list(m) if m is not None else None
+        row = db.execute(
+            select(ChatbotConversation).where(ChatbotConversation.session_id == sid)
+        ).scalar_one_or_none()
+        if not row:
+            return None
+        return list(row.conversation or [])
     except Exception:
-        logger.exception("get_messages_for_session failed (session_id=%s)", session_id)
+        logger.exception("get_messages_for_session failed session_id=%s", session_id)
         return None
+    finally:
+        db.close()
 
 
-def _patch_turn_feedback(
+def save_user_feedback(
     session_id: str, turn_index: int, feedback_text: str, feedback_at: str
 ) -> None:
-    eng = get_engine()
-    if eng is None:
+    if not session_id or not persistence_enabled():
         return
-    with eng.connect() as conn:
-        row = conn.execute(
-            text(
-                "SELECT messages FROM conversation_history "
-                "WHERE session_id = CAST(:sid AS uuid) LIMIT 1"
-            ),
-            {"sid": session_id},
-        ).mappings().first()
+    sid = _parse_session_uuid(session_id)
+    if sid is None:
+        return
+    sf = get_session_factory()
+    if sf is None:
+        return
+    db = sf()
+    try:
+        row = db.execute(
+            select(ChatbotConversation).where(ChatbotConversation.session_id == sid)
+        ).scalar_one_or_none()
         if not row:
-            logger.warning("patch_turn_feedback: no row for session_id=%s", session_id)
+            logger.warning("save_user_feedback: no row session_id=%s", session_id)
             return
-        messages = row["messages"]
-        if isinstance(messages, str):
-            messages = json.loads(messages)
-        if not isinstance(messages, list) or turn_index < 0 or turn_index >= len(messages):
+        messages = list(row.conversation or [])
+        if turn_index < 0 or turn_index >= len(messages):
             logger.warning(
-                "patch_turn_feedback: bad turn_index %s (len=%s) session_id=%s",
+                "save_user_feedback: bad turn_index %s len=%s",
                 turn_index,
-                len(messages) if isinstance(messages, list) else "?",
-                session_id,
+                len(messages),
             )
             return
         turn = messages[turn_index]
@@ -234,66 +273,14 @@ def _patch_turn_feedback(
             turn["user_feedback"] = {"text": feedback_text, "at": feedback_at}
         else:
             turn.pop("user_feedback", None)
-        messages_json = json.dumps(messages, ensure_ascii=False)
-        if feedback_text:
-            log_entry = {
-                "turn_index": turn_index,
-                "text": feedback_text,
-                "at": feedback_at,
-            }
-            log_json = json.dumps([log_entry], ensure_ascii=False)
-            try:
-                conn.execute(
-                    text(
-                        """
-                        UPDATE conversation_history
-                        SET messages = CAST(:messages AS jsonb),
-                            response_feedback = COALESCE(response_feedback, '[]'::jsonb)
-                                || CAST(:add AS jsonb),
-                            updated_at = now()
-                        WHERE session_id = CAST(:sid AS uuid)
-                        """
-                    ),
-                    {"messages": messages_json, "add": log_json, "sid": session_id},
-                )
-            except Exception:
-                conn.rollback()
-                conn.execute(
-                    text(
-                        """
-                        UPDATE conversation_history
-                        SET messages = CAST(:messages AS jsonb),
-                            updated_at = now()
-                        WHERE session_id = CAST(:sid AS uuid)
-                        """
-                    ),
-                    {"messages": messages_json, "sid": session_id},
-                )
-        else:
-            conn.execute(
-                text(
-                    """
-                    UPDATE conversation_history
-                    SET messages = CAST(:messages AS jsonb), updated_at = now()
-                    WHERE session_id = CAST(:sid AS uuid)
-                    """
-                ),
-                {"messages": messages_json, "sid": session_id},
-            )
-        conn.commit()
-
-
-def save_user_feedback(
-    session_id: str, turn_index: int, feedback_text: str, feedback_at: str
-) -> None:
-    if not session_id or not persistence_enabled():
-        return
-    try:
-        _patch_turn_feedback(
-            session_id, turn_index, (feedback_text or "").strip(), feedback_at
-        )
+        row.conversation = messages
+        row.updated_at = datetime.now(timezone.utc)
+        db.commit()
     except Exception:
-        logger.exception("save_user_feedback failed (session_id=%s turn=%s)", session_id, turn_index)
+        logger.exception("save_user_feedback failed session_id=%s", session_id)
+        db.rollback()
+    finally:
+        db.close()
 
 
 def enqueue_save_user_feedback(
@@ -301,6 +288,4 @@ def enqueue_save_user_feedback(
 ) -> None:
     if not session_id or not persistence_enabled():
         return
-    _pool.submit(
-        save_user_feedback, session_id, turn_index, feedback_text, feedback_at
-    )
+    _pool.submit(save_user_feedback, session_id, turn_index, feedback_text, feedback_at)

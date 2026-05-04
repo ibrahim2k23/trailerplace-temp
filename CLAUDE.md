@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Conversational trailer recommendation chatbot for TrailerPlace (Wharton, TX). Customers chat naturally; the agent collects qualification slots, searches inventory via Pinecone vector DB, fit-aware reranks results, and returns matching trailers with full specs.
 
 ## Environment
-- **Runtime:** `conda` env `islam360` — Python 3.10, Streamlit 1.43 (`pyproject.toml`/`uv.lock` exist but `uv` is not installed; use conda commands)
-- **Working directory:** `E:/TrailerPlace/AGENT`
-- **Config:** `.env` in project root (loaded via `python-dotenv`; without it, dotenv walks up and picks up the wrong keys from `E:\TrailerPlace\.env`)
-- **`pyproject.toml` says `requires-python = ">=3.12"`** — ignore this; the actual runtime is 3.10 and the code must be compatible with it
+- **Runtime (preferred):** a local **venv** at `Chatbot/src/.venv/` — activate in PowerShell: `.\.venv\Scripts\Activate.ps1`, or call `.\.venv\Scripts\python.exe` directly (no activation needed).
+- **Alternate:** `conda` env `islam360` if you still use that machine layout.
+- **Working directory:** this repo’s `Chatbot/src` (where `app.py`, `main.py`, and `pyproject.toml` live).
+- **Config:** `.env` in that same folder (loaded via `python-dotenv`).
+- **`pyproject.toml` says `requires-python = ">=3.12"`** — ignore if your venv is 3.10; keep code compatible with the Python you actually run.
 
 ## Stack
 | Layer | Tech |
@@ -18,22 +19,34 @@ Conversational trailer recommendation chatbot for TrailerPlace (Wharton, TX). Cu
 | LLM | OpenAI `gpt-4o-mini` (override: `OPENAI_MODEL`) |
 | Embeddings | OpenAI `text-embedding-3-small` (dim: 1536) |
 | Vector DB | Pinecone — index `trailerplace-listings` |
-| Persistence | Supabase/Postgres (`conversation_history` table) |
+| Persistence | Postgres (`chatbot_leads`, `chatbot_conversations` via Alembic) |
 | Data | `listings_final_v6.xlsx` — latest source |
 
 ## Running the App
-```bash
-# One-time ingestion (skip if index is already populated)
-conda run -n islam360 python src/ingest.py
+From `Chatbot/src` with your venv (examples use explicit `python.exe`; adjust path if your venv lives elsewhere):
 
-# Force re-index after data changes
-conda run -n islam360 python src/ingest.py --force
+```powershell
+# Install deps (once)
+.\.venv\Scripts\python.exe -m pip install -e .
 
-# Launch app
-conda run -n islam360 streamlit run app.py --server.headless true --server.port 8501
+# DB migrations (once per environment)
+.\.venv\Scripts\alembic.exe upgrade head
+
+# API (Streamlit talks to this). Default listen port 8000; override with CHATBOT_API_PORT only
+# (do not reuse PORT=5432 from Postgres — that was binding the wrong port).
+.\.venv\Scripts\python.exe main.py
+
+# UI (second terminal)
+.\.venv\Scripts\streamlit.exe run app.py --server.port 8501
 ```
 
-Note: `conda run` can't pass multi-line `-c` scripts — write them to a `.py` file first.
+```powershell
+# One-time ingestion (skip if index is already populated)
+.\.venv\Scripts\python.exe src\ingest.py
+
+# Force re-index after data changes
+.\.venv\Scripts\python.exe src\ingest.py --force
+```
 
 ## Architecture
 

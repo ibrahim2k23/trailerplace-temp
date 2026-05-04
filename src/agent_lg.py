@@ -54,6 +54,7 @@ from src.normalizer import (
 from src.state import SessionState
 from src.trailer_fields import get_trailer_fields_as_dict, list_all_categories
 from src.shown_listings_store import load_shown_keys, load_shown_urls
+from src.conversation_store import upsert_hard_lead_for_interest
 
 # Re-use the search/rerank helpers from the original agent
 from src.agent import (
@@ -66,6 +67,8 @@ from src.agent import (
     _extract_weight_lbs_from_text,
     _infer_hitch_type_from_text,
     _is_clear_light_cargo_text,
+    _log_product_fetch_event,
+    _match_summary_for_log,
     _metadata_to_listing,
     SEARCH_MAX_RECOMMENDATIONS,
     SEARCH_TOP_K,
@@ -455,6 +458,34 @@ End with exactly ONE warm closing question (vary the wording each turn).
 # Pinecone helper (thin wrapper around agent.py search)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _log_lg_pinecone_attempt(
+    query: str,
+    pinecone_filter: Optional[dict],
+    relaxed: bool,
+    tk: int,
+    mlist: list[dict],
+) -> None:
+    """Structured + JSON log for each Pinecone query (parity with TrailerAgent._search)."""
+    phase = "relaxed" if relaxed else "strict"
+    logger.info(
+        "PINECONE_FILTER | phase=%s | top_k=%s | filter=%s",
+        phase,
+        tk,
+        json.dumps(pinecone_filter, ensure_ascii=True) if pinecone_filter else "None",
+    )
+    attempt: dict[str, Any] = {
+        "source": "langgraph",
+        "phase": phase,
+        "query": query,
+        "top_k": tk,
+        "pinecone_filter": pinecone_filter,
+        "match_count": len(mlist),
+        "matches": [_match_summary_for_log(x) for x in mlist],
+    }
+    _log_product_fetch_event(attempt)
+
+
 def _run_search(
     query: str,
     trailer_filter: TrailerFilter,
@@ -516,11 +547,13 @@ def _run_search(
     if not have_ex:
         result = pc.query(vector=vec, top_k=k0, include_metadata=True, filter=pf)
         matches = result.get("matches", [])
+        _log_lg_pinecone_attempt(query, pf, False, k0, matches)
         if not matches and pf:
             result = pc.query(
                 vector=vec, top_k=k0, include_metadata=True, filter=f_arg or None
             )
             matches = result.get("matches", [])
+            _log_lg_pinecone_attempt(query, f_arg, True, k0, matches)
     else:
         steps: list[tuple[Optional[dict], bool, int]] = [
             (pf, False, k0),
@@ -534,6 +567,7 @@ def _run_search(
             raw = pc.query(
                 vector=vec, top_k=tk, include_metadata=True, filter=filt
             ).get("matches", [])
+            _log_lg_pinecone_attempt(query, filt, is_relaxed, tk, raw)
             filtered = _filter_excluded(raw)
             logger.info(
                 "LG_PINECONE_EXCLUDE | raw=%s after=%s exclude_keys=%s exclude_urls=%s tk=%s relaxed=%s",
@@ -1070,6 +1104,9 @@ class TrailerAgentLG:
                 phone=self._customer.phone,
                 item_name=item_name,
             )
+            sid = (self._state.get("session_id") or "").strip()
+            if sid:
+                upsert_hard_lead_for_interest(sid, item_name)
             logger.info("INTEREST_LOGGED | item=%s", item_name)
             return json.dumps({"ok": True, "message": "interest_logged"})
         except Exception as exc:
