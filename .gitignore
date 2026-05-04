@@ -1,0 +1,26 @@
+# Virtual environment
+.venv/
+
+# Secrets / local env
+.env
+.env.local
+.env.*.local
+
+# Local daily logs
+log/
+
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+.claude/
+
+thinking_log/
+
+# Per-session "already shown" listing keys (Pinecone show-more)
+shown_listings/
+
+# Archives and local scripts
+*.zip
+*.ps1
