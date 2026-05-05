@@ -1,6 +1,11 @@
 """
-Per chat session, persist canonical listing keys and listing URLs already shown in the UI
-(for Pinecone exclude-on-more without repeating cards).
+Per chat session, persist listing URLs already shown in the UI (for Pinecone
+exclude-on-more without repeating cards).
+
+JSON shape:
+- Preferred: {"urls": ["https://...", ...]}
+- Legacy: {"keys": [...], "urls": [...]} — still read for backward compatibility;
+  updates via add_shown_urls() rewrite to URL-only.
 """
 from __future__ import annotations
 
@@ -71,10 +76,11 @@ def _write_store(session_id: str, keys: set[str], urls: set[str]) -> None:
     _store_dir().mkdir(parents=True, exist_ok=True)
     p = _path_for_session(sid)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    payload = {
-        "keys": sorted(keys),
-        "urls": sorted(urls),
-    }
+    # URL-only files when no keys (new default). Legacy callers may still write keys.
+    if keys:
+        payload: dict = {"keys": sorted(keys), "urls": sorted(urls)}
+    else:
+        payload = {"urls": sorted(urls)}
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True, indent=0)
     tmp.replace(p)
@@ -109,11 +115,12 @@ def add_shown_urls(session_id: str, urls: Iterable[str]) -> None:
         return
     sid = session_id.strip()
     with _get_lock(sid):
-        current_keys, current_urls = _read_store(sid)
+        _, current_urls = _read_store(sid)
         merged_urls = current_urls | to_add
         if merged_urls == current_urls:
             return
-        _write_store(sid, current_keys, merged_urls)
+        # URL-first persistence: drop legacy keys on next write (show-more uses URLs only).
+        _write_store(sid, set(), merged_urls)
 
 
 def add_shown_keys_and_urls(
@@ -121,7 +128,7 @@ def add_shown_keys_and_urls(
     keys: Iterable[str],
     urls: Iterable[str],
 ) -> None:
-    """Single atomic write for keys and URLs (used from app after each shown turn)."""
+    """Merge keys and URLs in one write. Prefer add_shown_urls() from UI (URL-only file)."""
     key_set = {k for k in keys if k}
     url_set = {_normalize_url(u) for u in urls if u}
     if (not key_set and not url_set) or not (session_id or "").strip():
@@ -133,4 +140,7 @@ def add_shown_keys_and_urls(
         merged_urls = current_urls | url_set
         if merged_keys == current_keys and merged_urls == current_urls:
             return
-        _write_store(sid, merged_keys, merged_urls)
+        if key_set:
+            _write_store(sid, merged_keys, merged_urls)
+        else:
+            _write_store(sid, set(), merged_urls)

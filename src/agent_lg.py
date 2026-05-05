@@ -53,7 +53,7 @@ from src.normalizer import (
 )
 from src.state import SessionState
 from src.trailer_fields import get_trailer_fields_as_dict, list_all_categories
-from src.shown_listings_store import load_shown_keys, load_shown_urls
+from src.shown_listings_store import load_shown_urls
 from src.conversation_store import upsert_hard_lead_for_interest
 
 # Re-use the search/rerank helpers from the original agent
@@ -510,9 +510,10 @@ def _run_search(
     def _effective_top_k(k: int) -> int:
         if not have_ex:
             return k
+        pool = len(ex_k) + len(ex_u)
         return min(
             SEARCH_TOP_K_MORE_MAX,
-            max(SEARCH_TOP_K_MORE, len(ex_k) + SEARCH_MAX_RECOMMENDATIONS * 2, k),
+            max(SEARCH_TOP_K_MORE, pool + SEARCH_MAX_RECOMMENDATIONS * 2, k),
         )
 
     def _match_excluded(match: dict) -> bool:
@@ -569,12 +570,19 @@ def _run_search(
             ).get("matches", [])
             _log_lg_pinecone_attempt(query, filt, is_relaxed, tk, raw)
             filtered = _filter_excluded(raw)
+            dropped_by_url = sum(
+                1
+                for m in raw
+                if str((m.get("metadata") or {}).get("url") or "").strip().lower() in ex_u
+            )
             logger.info(
-                "LG_PINECONE_EXCLUDE | raw=%s after=%s exclude_keys=%s exclude_urls=%s tk=%s relaxed=%s",
+                "LG_PINECONE_EXCLUDE | raw=%s after=%s exclude_keys=%s exclude_urls=%s "
+                "dropped_by_url=%s tk=%s relaxed=%s",
                 len(raw),
                 len(filtered),
                 len(ex_k),
                 len(ex_u),
+                dropped_by_url,
                 tk,
                 is_relaxed,
             )
@@ -625,6 +633,7 @@ class TrailerAgentLG:
             optional_slots=[],
             search_results=[],
             search_results_for_category=None,
+            api_listings_this_turn=[],
             is_interested=False,
             interested_item=None,
             customer_full_name=self._customer.full_name if self._customer else None,
@@ -916,22 +925,18 @@ class TrailerAgentLG:
         required_length_ft = _coerce_required_length_ft(args.get("required_length_ft"))
         required_gvwr_lbs = _coerce_required_payload_lbs(args.get("required_gvwr_lbs"))
 
-        exclude_keys: Optional[set[str]] = None
         exclude_urls: Optional[set[str]] = None
         if more_results:
             sid = (state.get("session_id") or "").strip()
             if sid:
                 try:
-                    exclude_keys = load_shown_keys(sid)
                     exclude_urls = load_shown_urls(sid)
                 except ValueError:
                     logger.warning("Invalid session_id for shown listings: %r", sid)
-                    exclude_keys = set()
                     exclude_urls = set()
                 logger.info(
-                    "LG_SHOW_MORE | session_id=%s exclude_keys=%s exclude_urls=%s",
+                    "LG_SHOW_MORE | session_id=%s exclude_urls=%s",
                     sid,
-                    len(exclude_keys),
                     len(exclude_urls),
                 )
             else:
@@ -985,8 +990,15 @@ class TrailerAgentLG:
             query,
             trailer_filter,
             top_k=SEARCH_TOP_K,
-            exclude_keys=exclude_keys,
             exclude_urls=exclude_urls,
+        )
+        logger.info(
+            "LG_RERANK_INPUT | listing_count=%s | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | more_results=%s",
+            len(listings),
+            required_payload_lbs,
+            required_length_ft,
+            required_gvwr_lbs,
+            more_results,
         )
 
         # Rerank using the staticmethod-equivalent helper from agent.py
@@ -1005,6 +1017,7 @@ class TrailerAgentLG:
         if not selected:
             extra["search_results"] = []
             extra["search_results_for_category"] = None
+            extra["api_listings_this_turn"] = []
             return "No trailers found matching those criteria.", extra
 
         result_dicts = []
@@ -1031,6 +1044,7 @@ class TrailerAgentLG:
             })
 
         extra["search_results"] = result_dicts
+        extra["api_listings_this_turn"] = list(result_dicts)
         tt = state.get("trailer_type")
         extra["search_results_for_category"] = tt
         logger.info("SEARCH_COMPLETE | trailer_type=%s | result_count=%s", tt, len(result_dicts))
@@ -1148,12 +1162,16 @@ class TrailerAgentLG:
 
         Returns
         -------
-        (assistant_text, search_results)
-            assistant_text  – The final text reply to show the user.
-            search_results  – List of trailer result dicts (may be empty).
+        (assistant_text, api_listings)
+            assistant_text – The final text reply to show the user.
+            api_listings   – Listings for the HTTP/UI for this turn only (empty unless
+            ``search_trailers`` ran this turn and returned matches). ``search_results``
+            in graph state may still hold prior results for prompting.
         """
         self._state["session_id"] = session_id
         self._state["messages"] = list(self._state["messages"]) + [HumanMessage(content=user_message)]
+        # Fresh HTTP/UI payload each turn — do not leak prior search_results to the API.
+        self._state["api_listings_this_turn"] = []
 
         # Run the graph; it returns the final state
         result_state = self._graph.invoke(self._state)
@@ -1169,7 +1187,7 @@ class TrailerAgentLG:
                 reply = str(msg.get("content", ""))
                 break
 
-        return reply, result_state.get("search_results", [])
+        return reply, list(result_state.get("api_listings_this_turn") or [])
 
     @property
     def trailer_type(self) -> Optional[str]:

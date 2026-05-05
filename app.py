@@ -31,7 +31,7 @@ from src.conversation_store import (
     enqueue_save_user_feedback,
     persistence_enabled,
 )
-from src.agent import canonical_listing_key_from_listing
+from src.shown_listings_store import add_shown_urls
 from src.models import TrailerListing
 from src.shown_listings_store import add_shown_keys_and_urls
 from src.thinking_agent import (
@@ -657,12 +657,11 @@ if prompt := st.chat_input(placeholder):
             st.session_state.thinking_status = "done" if _sync_thinking_result.get("status") == "ok" else "error"
             st.session_state.thinking_future = None
 
-    # 5. Remember listing cards shown this turn (Pinecone "show more" exclude list)
+    # 5. Remember listing URLs shown this turn (Pinecone "show more" exclude list)
     sid = st.session_state.get("chat_session_id")
     if sid and listings:
-        add_shown_keys_and_urls(
+        add_shown_urls(
             sid,
-            [canonical_listing_key_from_listing(x) for x in listings],
             [str(x.url or "") for x in listings if getattr(x, "url", None)],
         )
 

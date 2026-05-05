@@ -18,7 +18,7 @@ from pinecone import Pinecone
 from src.email_sender import send_ticket_notification
 from src.models import CustomerContact, TrailerFilter, TrailerListing
 from src.normalizer import normalize_make, normalize_color, normalize_hitch, normalize_category
-from src.shown_listings_store import load_shown_keys
+from src.shown_listings_store import load_shown_urls
 
 load_dotenv()
 
@@ -1026,18 +1026,22 @@ class TrailerAgent:
         trailer_filter: TrailerFilter,
         top_k: int = 5,
         exclude_keys: Optional[set[str]] = None,
+        exclude_urls: Optional[set[str]] = None,
     ) -> tuple[list[TrailerListing], list[dict[str, Any]]]:
         vector = self._embed(query)
         pf = _build_pinecone_filter(trailer_filter)
-        ex = set(exclude_keys) if exclude_keys else set()
+        ex_k = set(exclude_keys) if exclude_keys else set()
+        ex_u = set(exclude_urls) if exclude_urls else set()
+        have_ex = bool(ex_k or ex_u)
         search_attempts: list[dict[str, Any]] = []
 
         def _effective_top_k(k: int) -> int:
-            if not ex:
+            if not have_ex:
                 return k
+            pool = len(ex_k) + len(ex_u)
             return min(
                 SEARCH_TOP_K_MORE_MAX,
-                max(SEARCH_TOP_K_MORE, len(ex) + SEARCH_MAX_RECOMMENDATIONS * 2, k),
+                max(SEARCH_TOP_K_MORE, pool + SEARCH_MAX_RECOMMENDATIONS * 2, k),
             )
 
         k0 = _effective_top_k(top_k)
@@ -1074,9 +1078,18 @@ class TrailerAgent:
             return mlist
 
         def _filter_excluded(raw: list[dict]) -> list[dict]:
-            if not ex:
+            if not have_ex:
                 return raw
-            return [m for m in raw if _canonical_listing_key_from_match(m) not in ex]
+            out: list[dict] = []
+            for m in raw:
+                md = m.get("metadata", {}) or {}
+                url = str(md.get("url", "") or "").strip().lower()
+                if ex_u and url and url in ex_u:
+                    continue
+                if ex_k and _canonical_listing_key_from_match(m) in ex_k:
+                    continue
+                out.append(m)
+            return out
 
         relaxed_f: dict = {}
         f_arg: Optional[dict] = None
@@ -1085,7 +1098,7 @@ class TrailerAgent:
             f_arg = relaxed_f if relaxed_f else None
 
         matches: list[dict] = []
-        if not ex:
+        if not have_ex:
             matches = _one_query(pf, False, k0)
             if not matches and pf:
                 matches = _one_query(f_arg, True, k0)
@@ -1101,12 +1114,19 @@ class TrailerAgent:
             for filt, is_relaxed, tk in steps:
                 raw = _one_query(filt, is_relaxed, tk)
                 c = _filter_excluded(raw)
+                dropped_by_url = sum(
+                    1
+                    for m in raw
+                    if (str((m.get("metadata") or {}).get("url") or "").strip().lower() in ex_u)
+                )
                 logger.info(
                     "PINECONE_EXCLUDE | raw_matches=%s | after_exclusion=%s | "
-                    "exclude_set_size=%s | step_top_k=%s | relaxed=%s",
+                    "exclude_keys=%s exclude_urls=%s dropped_by_url=%s | step_top_k=%s | relaxed=%s",
                     len(raw),
                     len(c),
-                    len(ex),
+                    len(ex_k),
+                    len(ex_u),
+                    dropped_by_url,
                     tk,
                     is_relaxed,
                 )
@@ -1115,11 +1135,12 @@ class TrailerAgent:
                     break
             else:
                 matches = []
-        if ex:
+        if have_ex:
             logger.info(
-                "PINECONE_EXCLUDE | final_pre_dedupe_count=%s | exclude_set_size=%s",
+                "PINECONE_EXCLUDE | final_pre_dedupe_count=%s | exclude_keys=%s exclude_urls=%s",
                 len(matches),
-                len(ex),
+                len(ex_k),
+                len(ex_u),
             )
 
         deduped_matches, dedupe_debug = _dedupe_matches(matches)
@@ -1133,8 +1154,9 @@ class TrailerAgent:
         search_attempts.append({"dedupe": dedupe_debug})
         search_attempts.append(
             {
-                "exclude_shown": bool(ex),
-                "exclude_set_size": len(ex),
+                "exclude_shown": have_ex,
+                "exclude_key_count": len(ex_k),
+                "exclude_url_count": len(ex_u),
                 "candidates_pre_dedupe": len(matches),
             }
         )
@@ -1660,20 +1682,24 @@ class TrailerAgent:
         if normalized_fragments:
             query_for_search = f"{query} | normalized_requirements: {' '.join(normalized_fragments)}"
 
-        exclude_keys: Optional[set[str]] = None
+        exclude_urls: Optional[set[str]] = None
         if more_results:
             if self._current_session_id:
-                exclude_keys = load_shown_keys(self._current_session_id)
+                exclude_urls = load_shown_urls(self._current_session_id)
             else:
                 logger.warning(
                     "search_trailers more_results=True but no session_id; skipping exclude-shown"
                 )
 
         listings, search_attempts = self._search(
-            query_for_search, trailer_filter, top_k=SEARCH_TOP_K, exclude_keys=exclude_keys
+            query_for_search,
+            trailer_filter,
+            top_k=SEARCH_TOP_K,
+            exclude_urls=exclude_urls,
         )
         logger.info(
-            "RERANK_INPUT | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | source=%s",
+            "RERANK_INPUT | listing_count=%s | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | source=%s",
+            len(listings),
             required_payload_lbs,
             required_length_ft,
             required_gvwr_lbs,
@@ -1735,7 +1761,7 @@ class TrailerAgent:
             "query": query,
             "query_for_search": query_for_search,
             "more_results": more_results,
-            "excluded_stored_count": len(exclude_keys) if exclude_keys else 0,
+            "excluded_stored_url_count": len(exclude_urls) if exclude_urls else 0,
             "trailer_filter": tfilter,
             "hitch_type": hitch_type,
             "hitch_type_source": hitch_type_source,

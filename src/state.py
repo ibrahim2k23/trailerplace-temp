@@ -36,6 +36,9 @@ class SessionState(TypedDict):
     # Category that produced the current non-empty search_results (for routing).
     # Must match trailer_type to enter recommendation_node; cleared on category pivot.
     search_results_for_category: Optional[str]
+    # Listings to return to the HTTP API / Streamlit for this user turn only (cleared each chat()).
+    # Distinct from search_results, which stays in state for the recommendation node's prompt.
+    api_listings_this_turn: list[dict[str, Any]]
 
     # ── Interest logging ──────────────────────────────────────────────────────
     is_interested: bool
