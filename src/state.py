@@ -54,6 +54,8 @@ class SessionState(TypedDict):
 
     # ── Session tracking ──────────────────────────────────────────────────────
     session_id: Optional[str]
+    # URLs supplied by the HTTP client each turn (split UI/API); merged with disk store for show-more.
+    client_shown_urls: list[str]
 
     # ── Node routing helpers ──────────────────────────────────────────────────
     # Tracks which node should handle the next turn

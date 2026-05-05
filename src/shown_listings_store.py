@@ -14,7 +14,11 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+# Caps for HTTP `/chat` payloads and LangGraph state (split UI/API hosts).
+SHOWN_URLS_MAX_COUNT = 400
+SHOWN_URL_MAX_CHARS = 2048
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
@@ -44,8 +48,62 @@ def _get_lock(sid: str) -> threading.Lock:
         return _locks[sid]
 
 
+def normalize_shown_url(url: str) -> str:
+    """Normalize listing URL for exclude-on-more matching (strip, lower, cap length)."""
+    u = (url or "").strip().lower()
+    if len(u) > SHOWN_URL_MAX_CHARS:
+        return u[:SHOWN_URL_MAX_CHARS]
+    return u
+
+
 def _normalize_url(url: str) -> str:
-    return (url or "").strip().lower()
+    return normalize_shown_url(url)
+
+
+def accumulate_shown_urls_from_chat_messages(messages: list[dict[str, Any]] | None) -> list[str]:
+    """
+    Collect normalized listing URLs from assistant turns (``listings`` on each message dict).
+    Used by Streamlit when calling ``/chat`` so the API can exclude them on show-more.
+    """
+    raw: list[str] = []
+    for m in messages or []:
+        if m.get("role") != "assistant":
+            continue
+        for lst in (m.get("listings") or []):
+            u = _listing_url_from_message_item(lst)
+            if u:
+                raw.append(u)
+    return sanitize_already_shown_urls(raw)
+
+
+def _listing_url_from_message_item(item: Any) -> str:
+    if item is None:
+        return ""
+    u = getattr(item, "url", None)
+    if u is not None:
+        return str(u).strip()
+    if isinstance(item, dict):
+        return str(item.get("url") or "").strip()
+    return ""
+
+
+def sanitize_already_shown_urls(urls: list[str] | None) -> list[str]:
+    """
+    Dedupe, normalize, and cap client-supplied URL lists (preserve order; keep last N if over cap).
+    """
+    if not urls:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in urls:
+        u = normalize_shown_url(str(raw) if raw is not None else "")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    if len(out) > SHOWN_URLS_MAX_COUNT:
+        out = out[-SHOWN_URLS_MAX_COUNT:]
+    return out
 
 
 def _read_store(session_id: str) -> tuple[set[str], set[str]]:
@@ -94,6 +152,22 @@ def load_shown_keys(session_id: str) -> set[str]:
 def load_shown_urls(session_id: str) -> set[str]:
     _, urls = _read_store(session_id)
     return urls
+
+
+def merge_shown_urls_for_show_more(session_id: str, client_urls: list[str] | None) -> set[str]:
+    """
+    Union of disk-backed shown URLs for the session plus client-supplied URLs (split UI/API).
+    """
+    out: set[str] = set()
+    sid = (session_id or "").strip()
+    if sid:
+        try:
+            out |= load_shown_urls(sid)
+        except ValueError:
+            pass
+    for u in sanitize_already_shown_urls(client_urls):
+        out.add(u)
+    return out
 
 
 def add_shown_keys(session_id: str, keys: Iterable[str]) -> None:

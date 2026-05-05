@@ -9,7 +9,7 @@ import os
 import threading
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.agent_lg import TrailerAgentLG
 from src.contact_onboarding import run_contact_onboarding_turn
@@ -83,6 +83,15 @@ class ChatRequest(BaseModel):
     customer_full_name: Optional[str] = None
     customer_email: Optional[str] = None
     customer_phone: Optional[str] = None
+    # URLs the Streamlit UI has already shown this session (required for show-more when UI/API are on different hosts).
+    already_shown_listing_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("already_shown_listing_urls", mode="after")
+    @classmethod
+    def _sanitize_already_shown(cls, v: list[str]) -> list[str]:
+        from src.shown_listings_store import sanitize_already_shown_urls
+
+        return sanitize_already_shown_urls(v)
 
 
 class ChatResponse(BaseModel):
@@ -159,7 +168,11 @@ def run_chat(req: ChatRequest) -> ChatResponse:
         except Exception:
             logger.exception("ensure_session_lead_bundle failed session_id=%s", req.session_id)
 
-    reply, listings = agent.chat(req.message, session_id=req.session_id)
+    reply, listings = agent.chat(
+        req.message,
+        session_id=req.session_id,
+        client_shown_urls=req.already_shown_listing_urls,
+    )
 
     if persistence_enabled():
         try:

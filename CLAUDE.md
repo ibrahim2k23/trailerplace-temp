@@ -76,6 +76,9 @@ From `Chatbot/src` with your venv (examples use explicit `python.exe`; adjust pa
 | `src/log_setup.py` | `configure_trailerplace_logging()` — console + `log/YYYY-MM-DD.log` + `thinking_log/YYYY-MM-DD-thinking.log` |
 | `app.py` | Streamlit UI, CSS injection, auth, thinking-agent polling |
 
+### Split UI / API (`POST /chat`)
+When Streamlit and FastAPI run on different hosts (e.g. Azure Container Apps), each `POST /chat` body includes `already_shown_listing_urls` — listing URLs from prior assistant turns in the UI — so "show more" Pinecone excludes stay correct. The API unions this list with any disk-backed `shown_listings` JSON on the API host (single-machine local dev still benefits from the file).
+
 ### Reranking (`_rerank_by_fit`)
 When the caller provides `required_payload_lbs`, `required_length_ft`, or `required_gvwr_lbs`, each fetched listing gets a fit score = `base_score − penalty`. Penalty grows for under-capacity (heavy) and over-sized (extreme ratio) trailers. Phase logic: non-failing non-extreme → fill with non-failing oversized → last resort all entries sorted. Controlled by `RERANK_WARN_RATIO` (default 1.3) and `RERANK_EXTREME_RATIO` (default 1.5).
 

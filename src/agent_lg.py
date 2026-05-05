@@ -10,7 +10,7 @@ Architecture
                     ┌────────▼────────┐
                     │ specialist_node │◄── re-entered if category changes
                     └────────┬────────┘
-                             │ search_results available?
+                             │ search_results for this category?
                     ┌────────▼─────────────┐
                     │ recommendation_node  │
                     └──────────────────────┘
@@ -53,7 +53,7 @@ from src.normalizer import (
 )
 from src.state import SessionState
 from src.trailer_fields import get_trailer_fields_as_dict, list_all_categories
-from src.shown_listings_store import load_shown_urls
+from src.shown_listings_store import merge_shown_urls_for_show_more, sanitize_already_shown_urls
 from src.conversation_store import upsert_hard_lead_for_interest
 
 # Re-use the search/rerank helpers from the original agent
@@ -435,6 +435,9 @@ If the customer wants **more listings** for the same search (e.g. "show me more"
 RECOMMENDATION_PROMPT = f"""You are the Recommendation Specialist for TrailerPlace (Wharton TX, 979-532-1486).
 Search results have been retrieved. Your job is to present them clearly and move toward a sale.
 
+## RECEOMMENDATIONS (no new search yet)
+use **log_product_interest** when they clearly pick a specific unit after you recommend them trailers
+
 ## AVAILABLE TOOLS
 - **log_product_interest**: Call this when the customer clearly expresses interest in a specific unit (says a stock number, "the first one", "the red one", a partial title, etc.). Use the exact full listing title from the results. After the tool succeeds, tell them their query has been logged and the team will follow up soon.
 - **search_trailers**: Call this if the customer wants to see more options ("show me more", "any others?") with more_results=true. Keep the same filter fields and intent as the last search; only set more_results when continuing the same search.
@@ -646,6 +649,7 @@ class TrailerAgentLG:
             customer_phone=self._customer.phone if self._customer else None,
             session_id=None,
             next_node=None,
+            client_shown_urls=[],
         )
 
     # ── Graph construction ───────────────────────────────────────────────────
@@ -694,7 +698,9 @@ class TrailerAgentLG:
         sr = state.get("search_results") or []
         sfc = state.get("search_results_for_category")
         tt = state.get("trailer_type")
-        if sr and sfc == tt and state.get("recommendation_entry_due"):
+        # Enter recommendation whenever we have live search results for this category — not only
+        # the same invoke as search_trailers (follow-up turns express interest without re-search).
+        if sr and sfc == tt:
             return "recommendation_node"
         return END
 
@@ -951,20 +957,17 @@ class TrailerAgentLG:
         exclude_urls: Optional[set[str]] = None
         if more_results:
             sid = (state.get("session_id") or "").strip()
-            if sid:
-                try:
-                    exclude_urls = load_shown_urls(sid)
-                except ValueError:
-                    logger.warning("Invalid session_id for shown listings: %r", sid)
-                    exclude_urls = set()
-                logger.info(
-                    "LG_SHOW_MORE | session_id=%s exclude_urls=%s",
-                    sid,
-                    len(exclude_urls),
-                )
-            else:
+            client = list(state.get("client_shown_urls") or [])
+            exclude_urls = merge_shown_urls_for_show_more(sid, client)
+            logger.info(
+                "LG_SHOW_MORE | session_id=%s exclude_urls=%s client_urls=%s",
+                sid or "(none)",
+                len(exclude_urls),
+                len(client),
+            )
+            if not sid and not client:
                 logger.warning(
-                    "search_trailers more_results=True but no session_id; cannot exclude shown listings"
+                    "search_trailers more_results=True but no session_id and no client_shown_urls"
                 )
 
         # Infer from query/history if not explicitly provided
@@ -1109,7 +1112,9 @@ class TrailerAgentLG:
                 args = tc["args"]
                 if fn == "log_product_interest":
                     item_name = str(args.get("item_name", "")).strip()
-                    result = self._execute_log_interest(item_name)
+                    result = self._execute_log_interest(
+                        item_name, session_id=state.get("session_id")
+                    )
                     updates["is_interested"] = True
                     updates["interested_item"] = item_name
                     tool_messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
@@ -1131,7 +1136,9 @@ class TrailerAgentLG:
         updates["recommendation_entry_due"] = False
         return updates
 
-    def _execute_log_interest(self, item_name: str) -> str:
+    def _execute_log_interest(
+        self, item_name: str, *, session_id: Optional[str] = None
+    ) -> str:
         if not item_name:
             return json.dumps({"ok": False, "error": "item_name is required"})
         if self._customer is None:
@@ -1143,7 +1150,7 @@ class TrailerAgentLG:
                 phone=self._customer.phone,
                 item_name=item_name,
             )
-            sid = (self._state.get("session_id") or "").strip()
+            sid = (session_id or "").strip() or (self._state.get("session_id") or "").strip()
             if sid:
                 upsert_hard_lead_for_interest(sid, item_name)
             logger.info("INTEREST_LOGGED | item=%s", item_name)
@@ -1181,6 +1188,8 @@ class TrailerAgentLG:
         self,
         user_message: str,
         session_id: Optional[str] = None,
+        *,
+        client_shown_urls: Optional[list[str]] = None,
     ) -> tuple[str, list[dict]]:
         """
         Process a user message.
@@ -1194,6 +1203,7 @@ class TrailerAgentLG:
             in graph state may still hold prior results for prompting.
         """
         self._state["session_id"] = session_id
+        self._state["client_shown_urls"] = sanitize_already_shown_urls(client_shown_urls)
         self._state["messages"] = list(self._state["messages"]) + [HumanMessage(content=user_message)]
         # Fresh HTTP/UI payload each turn — do not leak prior search_results to the API.
         self._state["api_listings_this_turn"] = []

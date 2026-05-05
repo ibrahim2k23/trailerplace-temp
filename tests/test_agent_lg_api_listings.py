@@ -90,14 +90,17 @@ class TestAgentLgApiListings(unittest.TestCase):
 
         self.assertEqual(seen[0].content, "user text")
 
-    def test_route_after_specialist_skips_recommendation_without_flag(self) -> None:
+    def test_route_after_specialist_enters_recommendation_with_results_without_flag(
+        self,
+    ) -> None:
+        """Follow-up interest turns: specialist may not re-search; still route to recommendation."""
         base = {
             "trailer_type": "Utility",
             "search_results": [{"title": "Old", "url": "https://example.com/a"}],
             "search_results_for_category": "Utility",
             "recommendation_entry_due": False,
         }
-        self.assertEqual(TrailerAgentLG._route_after_specialist(base), END)
+        self.assertEqual(TrailerAgentLG._route_after_specialist(base), "recommendation_node")
 
     def test_route_after_specialist_enters_recommendation_when_flag_true(self) -> None:
         base = {
@@ -107,6 +110,24 @@ class TestAgentLgApiListings(unittest.TestCase):
             "recommendation_entry_due": True,
         }
         self.assertEqual(TrailerAgentLG._route_after_specialist(base), "recommendation_node")
+
+    def test_route_after_specialist_skips_when_category_mismatch(self) -> None:
+        base = {
+            "trailer_type": "Utility",
+            "search_results": [{"title": "Dump", "url": "https://example.com/c"}],
+            "search_results_for_category": "Dump",
+            "recommendation_entry_due": True,
+        }
+        self.assertEqual(TrailerAgentLG._route_after_specialist(base), END)
+
+    def test_route_after_specialist_skips_when_no_results(self) -> None:
+        base = {
+            "trailer_type": "Utility",
+            "search_results": [],
+            "search_results_for_category": "Utility",
+            "recommendation_entry_due": True,
+        }
+        self.assertEqual(TrailerAgentLG._route_after_specialist(base), END)
 
     def test_route_after_specialist_no_trailer_type_to_master(self) -> None:
         base = {

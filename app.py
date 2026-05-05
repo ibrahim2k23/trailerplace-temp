@@ -31,9 +31,12 @@ from src.conversation_store import (
     enqueue_save_user_feedback,
     persistence_enabled,
 )
-from src.shown_listings_store import add_shown_urls
+from src.shown_listings_store import (
+    accumulate_shown_urls_from_chat_messages,
+    add_shown_keys_and_urls,
+    add_shown_urls,
+)
 from src.models import TrailerListing
-from src.shown_listings_store import add_shown_keys_and_urls
 from src.thinking_agent import (
     generate_thinking_flow,
     log_thinking_flow,
@@ -568,6 +571,11 @@ if prompt := st.chat_input(placeholder):
                 "customer_full_name": st.session_state.get("customer_full_name"),
                 "customer_email": st.session_state.get("customer_email"),
                 "customer_phone": st.session_state.get("customer_phone"),
+                "already_shown_listing_urls": (
+                    accumulate_shown_urls_from_chat_messages(st.session_state.messages)
+                    if st.session_state.sales_phase == "main"
+                    else []
+                ),
             }
             try:
                 r = requests.post(
