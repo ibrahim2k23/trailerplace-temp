@@ -386,7 +386,8 @@ If the customer hasn't said enough to determine a category, ask ONE question: "W
 ## IMPORTANT
 - Do NOT ask weight, size, hitch, or any other qualification questions here. Just identify intent and category.
 - Once you know the category, call `set_trailer_type` — the specialist takes over from there.
-- If the customer already has an active category (e.g. Livestock) and their new message only refines **hitch** or dimensions, **do not** call `set_trailer_type` again with hitch words — leave category unchanged.
+- **Hitch vs category change:** Never call `set_trailer_type` with hitch-only words (gooseneck, bumper pull, tag-along). **Do** call `set_trailer_type` when the customer names a **different trailer category** than the session (e.g. switching from Dump to Utility) — see CURRENT SESSION when shown.
+- If the customer already has an active category and their new message only refines **hitch**, length, budget, or the same category need, **do not** change `trailer_type`.
 """
 
 _SPECIALIST_PROMPT_TEMPLATE = """You are the {trailer_type} Trailer Specialist for TrailerPlace (Wharton TX, 979-532-1486).
@@ -415,8 +416,11 @@ The customer is looking for a **{trailer_type}** trailer. Your job is to:
 - For optional slots: only ask if (a) the conversation suggests it matters to the customer, OR (b) you've asked all required slots and still have room for one more.
 
 ## CATEGORY PIVOT
-If the customer says they actually want a different **trailer category** (e.g. Utility instead of Livestock), call `set_trailer_type` with the new category. This resets the session.
+If the customer's **latest message** indicates a different **trailer category** than **{trailer_type}** (e.g. they were looking at Dump results but now want Utility), call `set_trailer_type` with the new category **first**, then `fetch_trailer_fields` for that type. Do **not** call `search_trailers` for the new need until required slots for the **new** category are collected.
 - **Never** call `set_trailer_type` for hitch-only wording (gooseneck, bumper pull, tag-along). Those belong in `search_trailers` as `hitch_type` ("Gooseneck" or "Bumper Pull"), not as `trailer_type`.
+
+## SHOW MORE (same category / same need)
+If the customer wants **more listings** for the same search (e.g. "show me more", "any others?", "what else do you have?"), call `search_trailers` immediately with **more_results=true** and the same filters/query intent as before. **Do not** only promise to search in plain text — you must invoke the tool so new inventory is fetched.
 
 ## SEARCH CALL RULES
 - Normalize units before calling: convert tons/kg → lbs, convert m/cm/in → ft.
@@ -634,6 +638,7 @@ class TrailerAgentLG:
             search_results=[],
             search_results_for_category=None,
             api_listings_this_turn=[],
+            recommendation_entry_due=False,
             is_interested=False,
             interested_item=None,
             customer_full_name=self._customer.full_name if self._customer else None,
@@ -689,7 +694,7 @@ class TrailerAgentLG:
         sr = state.get("search_results") or []
         sfc = state.get("search_results_for_category")
         tt = state.get("trailer_type")
-        if sr and sfc == tt:
+        if sr and sfc == tt and state.get("recommendation_entry_due"):
             return "recommendation_node"
         return END
 
@@ -706,6 +711,20 @@ class TrailerAgentLG:
                 f"Email: {self._customer.email or '(not provided)'}\n"
                 f"Phone: {self._customer.phone}\n"
                 f"Greet them by their first name: {first_name}. Do NOT ask for contact info again."
+            )
+
+        cur_tt = state.get("trailer_type")
+        if cur_tt:
+            system += (
+                f"\n\n## CURRENT SESSION\n"
+                f"Trailer category already set: **{cur_tt}**.\n"
+                "- If the customer names a **different trailer category** (e.g. Utility vs Dump), call "
+                "`set_trailer_type` immediately with the new category. That clears prior search context "
+                "so the specialist can collect fresh qualification slots.\n"
+                "- Do **not** call `set_trailer_type` for **hitch-only** wording (gooseneck, bumper pull, "
+                "tag-along); those are hitch preferences, not categories.\n"
+                "- If their message only refines hitch, length, budget, or the same category need, "
+                "**do not** change `trailer_type`."
             )
 
         messages = self._messages_for_llm(state, system)
@@ -754,6 +773,7 @@ class TrailerAgentLG:
                         updates["slots_collected"] = {}
                         updates["is_interested"] = False
                         updates["interested_item"] = None
+                        updates["recommendation_entry_due"] = False
                         logger.info(
                             "TRAILER_TYPE_PIVOT_MASTER | from=%s to=%s | cleared_search",
                             prev_tt,
@@ -855,12 +875,14 @@ class TrailerAgentLG:
                 if fn == "search_trailers" and updates.get("search_results"):
                     all_new_messages.extend(tool_messages)
                     updates["messages"] = all_new_messages
+                    updates["recommendation_entry_due"] = True
                     return updates
 
             all_new_messages.extend(tool_messages)
             current_messages = list(messages) + all_new_messages
 
         updates["messages"] = all_new_messages
+        updates["recommendation_entry_due"] = False
         return updates
 
     def _execute_specialist_tool(
@@ -897,6 +919,7 @@ class TrailerAgentLG:
             if prev_tt and prev_tt != canonical:
                 extra["search_results"] = []
                 extra["search_results_for_category"] = None
+                extra["recommendation_entry_due"] = False
                 extra["is_interested"] = False
                 extra["interested_item"] = None
                 logger.info(
@@ -1018,6 +1041,7 @@ class TrailerAgentLG:
             extra["search_results"] = []
             extra["search_results_for_category"] = None
             extra["api_listings_this_turn"] = []
+            extra["recommendation_entry_due"] = False
             return "No trailers found matching those criteria.", extra
 
         result_dicts = []
@@ -1104,6 +1128,7 @@ class TrailerAgentLG:
             current_messages = list(messages) + all_new_messages
 
         updates["messages"] = all_new_messages
+        updates["recommendation_entry_due"] = False
         return updates
 
     def _execute_log_interest(self, item_name: str) -> str:
@@ -1172,6 +1197,7 @@ class TrailerAgentLG:
         self._state["messages"] = list(self._state["messages"]) + [HumanMessage(content=user_message)]
         # Fresh HTTP/UI payload each turn — do not leak prior search_results to the API.
         self._state["api_listings_this_turn"] = []
+        self._state["recommendation_entry_due"] = False
 
         # Run the graph; it returns the final state
         result_state = self._graph.invoke(self._state)

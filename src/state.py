@@ -39,6 +39,9 @@ class SessionState(TypedDict):
     # Listings to return to the HTTP API / Streamlit for this user turn only (cleared each chat()).
     # Distinct from search_results, which stays in state for the recommendation node's prompt.
     api_listings_this_turn: list[dict[str, Any]]
+    # True only when specialist just ran a successful search_trailers this graph invoke; gates
+    # recommendation_node so FAQ turns are not overridden by the recommendation prompt.
+    recommendation_entry_due: bool
 
     # ── Interest logging ──────────────────────────────────────────────────────
     is_interested: bool
