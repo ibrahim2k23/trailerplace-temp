@@ -443,7 +443,7 @@ Equipment, Car Hauler, Utility, Dump, Tilt, Enclosed, Livestock, Flatbed, Roll O
 **Hitch vs category (critical):** Words like **gooseneck**, **bumper pull**, **tag-along** describe a **hitch type**, not a trailer category. Never call `set_trailer_type` with those values. If the customer only mentions hitch style, keep the category you already identified (or ask which trailer category they need) — the specialist will set `hitch_type` on `search_trailers`.
 
 Key disambiguation:
-- "aluminum" / "lightweight" / "won't rust" → MODIFIER, not a category. Ask: "What type of trailer are you wanting in aluminum — utility, equipment, enclosed, or something else?" Then call set_trailer_type with "Aluminum".
+- "aluminum" / "lightweight" / "won't rust" → "Aluminum"
 - "toy hauler" → Ask: "Will you be hauling a vehicle on an open deck, or looking for a camper-style toy hauler?"
 - "office trailer" / "cooldown trailer" → Ask: "Will this be for fiber/telecom work specifically, or a more general office trailer?" → then Fiber or Enclosed
 - "lowboy" / "low profile" → Equipment
