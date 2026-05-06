@@ -31,6 +31,13 @@ class SessionState(TypedDict):
     # Optional slots for the current trailer_type (populated by trailer_fields tool)
     optional_slots: list[str]
 
+    # Slot names explicitly recorded via record_slot_answer this category session
+    slots_asked: list[str]
+
+    # Utility-only: True = lightweight haul — weight slots stripped; silent payload 1000 lbs.
+    # None = not Utility or not yet classified this session.
+    utility_lightweight_decided: Optional[bool]
+
     # ── Search & recommendations ──────────────────────────────────────────────
     search_results: list[dict[str, Any]]
     # Category that produced the current non-empty search_results (for routing).
@@ -39,6 +46,8 @@ class SessionState(TypedDict):
     # Listings to return to the HTTP API / Streamlit for this user turn only (cleared each chat()).
     # Distinct from search_results, which stays in state for the recommendation node's prompt.
     api_listings_this_turn: list[dict[str, Any]]
+    # Last search_trailers args used for Pinecone (show-more reuse); excludes more_results.
+    last_search_args: Optional[dict[str, Any]]
     # True only when specialist just ran a successful search_trailers this graph invoke; gates
     # recommendation_node so FAQ turns are not overridden by the recommendation prompt.
     recommendation_entry_due: bool

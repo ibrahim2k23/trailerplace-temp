@@ -26,6 +26,7 @@ Tools exposed to the LLM
 ─────────────────────────
   set_trailer_type         – Master router saves the resolved category.
   fetch_trailer_fields     – Specialist fetches required/optional slots.
+  record_slot_answer       – Specialist records one qualification slot answer.
   search_trailers          – Specialist triggers Pinecone search.
   log_product_interest     – Recommendation node logs customer interest.
 """
@@ -66,7 +67,6 @@ from src.agent import (
     _extract_length_ft_from_text,
     _extract_weight_lbs_from_text,
     _infer_hitch_type_from_text,
-    _is_clear_light_cargo_text,
     _log_product_fetch_event,
     _match_summary_for_log,
     _metadata_to_listing,
@@ -154,6 +154,58 @@ WEIGHT_SLOT_NAMES: frozenset[str] = frozenset({
     "total_weight",
 })
 
+
+def _strip_weight_slots_from_spec_dict(spec: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a copy of get_trailer_fields_as_dict output with weight-related slots
+    and their questions removed (Utility lightweight path).
+    """
+    out = dict(spec)
+    out["required_slots"] = [
+        s for s in out.get("required_slots", []) if s not in WEIGHT_SLOT_NAMES
+    ]
+    q = dict(out.get("questions") or {})
+    for w in WEIGHT_SLOT_NAMES:
+        q.pop(w, None)
+    out["questions"] = q
+    return out
+
+
+def _sanitize_fetch_tool_json_for_utility_lightweight(content: str) -> Optional[str]:
+    """
+    If *content* is a fetch_trailer_fields JSON payload for Utility that still lists
+    weight slots, return stripped JSON string; otherwise return None (caller keeps original).
+    """
+    text = (content or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        spec = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if spec.get("category") != "Utility":
+        return None
+    req = list(spec.get("required_slots") or [])
+    if not any(s in WEIGHT_SLOT_NAMES for s in req):
+        return None
+    stripped = _strip_weight_slots_from_spec_dict(spec)
+    return json.dumps(stripped, ensure_ascii=True)
+
+
+# Keys merged from last_search_args when search_trailers(..., more_results=true).
+_LAST_SEARCH_MERGE_KEYS: tuple[str, ...] = (
+    "hitch_type",
+    "required_payload_lbs",
+    "required_length_ft",
+    "required_gvwr_lbs",
+    "condition",
+    "price_min",
+    "price_max",
+    "make",
+    "color",
+    "category_subcategory",
+)
+
 # Canonical lightweight item keywords (plain lowercase, no regex).
 # Checked via substring/word-boundary match in is_lightweight_haul().
 _LIGHTWEIGHT_KEYWORDS: tuple[str, ...] = (
@@ -186,14 +238,14 @@ def is_lightweight_haul(text: str) -> bool:
         if kw in t:
             return True
     # Fall back to the regex-based check in agent.py for edge cases
+    from src.agent import _is_clear_light_cargo_text
+
     return _is_clear_light_cargo_text(t)
 
 
 def _strip_weight_slots(required: list[str], haul_text: str) -> tuple[list[str], bool]:
     """
-    If *haul_text* describes a lightweight item, remove weight-related slot names
-    from *required* and return (filtered_list, lightweight_detected).
-    The original list is not mutated.
+    Legacy helper (keyword fallback). Prefer Utility-only classifier in TrailerAgentLG.
     """
     if not is_lightweight_haul(haul_text):
         return required, False
@@ -310,6 +362,31 @@ SEARCH_TRAILERS_TOOL = {
     },
 }
 
+RECORD_SLOT_ANSWER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "record_slot_answer",
+        "description": (
+            "Record the customer's answer to a required or optional qualification slot. "
+            "Call immediately after the customer answers a question, before asking the next "
+            "question or calling search_trailers."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "slot": {
+                    "type": "string",
+                    "description": "Slot name from required_slots or optional_slots.",
+                },
+                "value": {
+                    "description": "The customer's answer (string or number).",
+                },
+            },
+            "required": ["slot", "value"],
+        },
+    },
+}
+
 LOG_INTEREST_TOOL = {
     "type": "function",
     "function": {
@@ -388,6 +465,7 @@ If the customer hasn't said enough to determine a category, ask ONE question: "W
 - Once you know the category, call `set_trailer_type` — the specialist takes over from there.
 - **Hitch vs category change:** Never call `set_trailer_type` with hitch-only words (gooseneck, bumper pull, tag-along). **Do** call `set_trailer_type` when the customer names a **different trailer category** than the session (e.g. switching from Dump to Utility) — see CURRENT SESSION when shown.
 - If the customer already has an active category and their new message only refines **hitch**, length, budget, or the same category need, **do not** change `trailer_type`.
+- If CURRENT SESSION already shows a trailer category and the customer only describes **what they are hauling** (e.g. an ATV, lumber, gravel) without naming a **different** trailer category, **do not** call `set_trailer_type` again — category is already set; the specialist will qualify them.
 """
 
 _SPECIALIST_PROMPT_TEMPLATE = """You are the {trailer_type} Trailer Specialist for TrailerPlace (Wharton TX, 979-532-1486).
@@ -395,38 +473,31 @@ _SPECIALIST_PROMPT_TEMPLATE = """You are the {trailer_type} Trailer Specialist f
 ## YOUR ROLE
 The customer is looking for a **{trailer_type}** trailer. Your job is to:
 1. First, call `fetch_trailer_fields` with trailer_type="{trailer_type}" to get the required and optional slots.
-2. Ask ONE question at a time to fill the required slots.
-3. Evaluate whether to ask optional questions (ask only if relevant to what the customer has said).
-4. Once required slots are filled, call `search_trailers` immediately.
+2. Walk through **required slots in order** — ask ONE question per turn.
+3. After each answer, call `record_slot_answer` with that slot and value before asking the next question.
+4. Evaluate optional slots only after all required slots appear under **SLOTS COLLECTED SO FAR** — ask an optional question only if it matters for this customer.
+5. Only when every required slot is recorded below, call `search_trailers`. **Early calls are rejected by the system.**
 
 ## AVAILABLE TOOLS
-- **fetch_trailer_fields**: Call this first to learn what questions to ask for this trailer type. Returns required_slots, optional_slots, and the exact question to ask for each slot.
-- **search_trailers**: Call this once all required slots are collected. Provide a rich query combining all slot values. Use filter fields (hitch_type, required_payload_lbs, etc.) when the customer has clearly specified them.
+- **fetch_trailer_fields**: Call first to learn required_slots, optional_slots, and questions for this trailer type.
+- **record_slot_answer**: Call immediately after the customer answers each qualification question (required or optional).
+- **search_trailers**: Call only after all required slots are listed under **SLOTS COLLECTED SO FAR**. Combine slot values into `query` and use filter fields when known.
+- **set_trailer_type**: Only when the customer switches to a **different trailer category** than **{trailer_type}**.
 
 ## SLOT COLLECTION RULES
-- Ask **ONE question at a time** in the order returned by fetch_trailer_fields.
-- Before asking a question, scan the conversation — if the customer already answered it, skip it silently.
-- **Lightweight weight exception (CRITICAL)**: If the haul item is any of the following, you must NEVER ask about haul weight — not even once. Silently set payload=1000 lbs when calling search_trailers:
-  golf cart/carts, golf equipment, ATV/ATVs, UTV/UTVs, side-by-side,
-  dirt bike/bikes, motorcycle/motorcycles, lawn mower/mowers, zero-turn,
-  riding mower, push mower, gardening tools, landscaping tools,
-  small generator, canoe/canoes, kayak/kayaks, bicycle/bicycles, e-bike/e-bikes,
-  small furniture, camping gear, small equipment, light cargo, hobby equipment.
-  This rule is silent — never acknowledge to the customer that you skipped it.
-- For optional slots: only ask if (a) the conversation suggests it matters to the customer, OR (b) you've asked all required slots and still have room for one more.
+- Trust **SLOTS COLLECTED SO FAR** — ask only slots not yet marked collected.
+- **Utility + lightweight haul**: When `trailer_type` is Utility and the system has classified the haul as lightweight, weight slots will **not** appear below — do not ask about weight; the system sets payload silently for search.
+- For non-Utility categories, always collect every required slot shown below (including weight when listed).
 
 ## CATEGORY PIVOT
-If the customer's **latest message** indicates a different **trailer category** than **{trailer_type}** (e.g. they were looking at Dump results but now want Utility), call `set_trailer_type` with the new category **first**, then `fetch_trailer_fields` for that type. Do **not** call `search_trailers` for the new need until required slots for the **new** category are collected.
-- **Never** call `set_trailer_type` for hitch-only wording (gooseneck, bumper pull, tag-along). Those belong in `search_trailers` as `hitch_type` ("Gooseneck" or "Bumper Pull"), not as `trailer_type`.
-
-## SHOW MORE (same category / same need)
-If the customer wants **more listings** for the same search (e.g. "show me more", "any others?", "what else do you have?"), call `search_trailers` immediately with **more_results=true** and the same filters/query intent as before. **Do not** only promise to search in plain text — you must invoke the tool so new inventory is fetched.
+If the customer names a **different trailer category** than **{trailer_type}**, call `set_trailer_type` first, then `fetch_trailer_fields`, then collect **all** required slots for the new category via `record_slot_answer` before `search_trailers`.
+- **Never** call `set_trailer_type` for hitch-only wording — use `hitch_type` on `search_trailers`.
 
 ## SEARCH CALL RULES
-- Normalize units before calling: convert tons/kg → lbs, convert m/cm/in → ft.
-- Set `hitch_type` filter whenever the customer clearly prefers Bumper Pull or Gooseneck.
-- Set `required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs` from collected slots.
-- Build a rich `query` string that captures: haul item, weight, use case, trailer type, and any features mentioned.
+- Normalize units: tons/kg → lbs; m/cm/in → ft.
+- Set `hitch_type` when the customer clearly prefers Bumper Pull or Gooseneck.
+- Set `required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs` from collected slots when applicable.
+- Build a rich `query` from all collected slots.
 
 ## SLOTS COLLECTED SO FAR
 {slots_summary}
@@ -435,12 +506,20 @@ If the customer wants **more listings** for the same search (e.g. "show me more"
 RECOMMENDATION_PROMPT = f"""You are the Recommendation Specialist for TrailerPlace (Wharton TX, 979-532-1486).
 Search results have been retrieved. Your job is to present them clearly and move toward a sale.
 
-## RECEOMMENDATIONS (no new search yet)
-use **log_product_interest** when they clearly pick a specific unit after you recommend them trailers
+## RECOMMENDATIONS (same search context)
+Use **log_product_interest** when the customer clearly picks a specific unit after you recommend trailers.
+
+## SHOW MORE AND FILTER UPDATES
+- If the customer asks for **more results** ("show me more", "any others?", "what else?"), call `search_trailers` with **more_results=true** immediately — **do not** ask clarifying questions first.
+- Reuse the values from **PREVIOUS SEARCH FILTERS** below. Override a filter field **only** when the customer's **latest message** explicitly states a new constraint (e.g. at least 20 ft, under $15k, gooseneck only, payload 2500 lbs).
+- If they add a new constraint **without** saying "more", still call `search_trailers` with **more_results=true** and update only the mentioned fields; keep all others from PREVIOUS SEARCH FILTERS.
+- Never ask the customer to restate constraints already captured below.
 
 ## AVAILABLE TOOLS
-- **log_product_interest**: Call this when the customer clearly expresses interest in a specific unit (says a stock number, "the first one", "the red one", a partial title, etc.). Use the exact full listing title from the results. After the tool succeeds, tell them their query has been logged and the team will follow up soon.
-- **search_trailers**: Call this if the customer wants to see more options ("show me more", "any others?") with more_results=true. Keep the same filter fields and intent as the last search; only set more_results when continuing the same search.
+- **log_product_interest**: Call when the customer clearly expresses interest in a specific unit. Use the exact full listing title from the results.
+- **search_trailers**: For more inventory (`more_results=true`) or updated constraints as above.
+- **set_trailer_type**: When the customer switches to a **different trailer category** — then the specialist will re-qualify on the next turn.
+- **record_slot_answer**: Rarely needed here; use if recording a slot answer before searching again.
 
 ## PRESENTATION FORMAT
 For each trailer, use this exact layout:
@@ -458,6 +537,20 @@ End with exactly ONE warm closing question (vary the wording each turn).
 - If results aren't a perfect match, say so honestly and show the closest available option.
 - After log_product_interest succeeds, direct the customer to: {_SITE_URL}
 - Never claim a human has already contacted them — only say "your query has been logged, the team will follow up soon."
+
+## NON-SALES / FAQ INTENTS
+If the customer asks about contact info, phone number, address, location, hours, financing,
+trade-in, or service — answer immediately with the scripted response below, then offer to
+continue helping with their trailer search.
+
+- phone / contact / how to reach you → "You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!"
+- address / location / where are you → "We're located in Wharton, TX. Give us a call at 979-532-1486 or visit {_SITE_URL}."
+- financing / payment plans → "We offer financing — call 979-532-1486 to speak with our finance team. I can also keep helping you narrow down the right trailer."
+- trade-in → "Our sales team handles trade-in appraisals — call 979-532-1486."
+- service / parts / repairs → "Our service and parts team can help — reach them at 979-532-1486."
+- website / online inventory → "You can browse our inventory at {_SITE_URL} or call us at 979-532-1486."
+
+Never give a vague or evasive answer to these — always include the phone number 979-532-1486.
 """
 
 
@@ -625,6 +718,7 @@ class TrailerAgentLG:
             api_key=OPENAI_API_KEY,
             temperature=0,
         )
+        self._lightweight_cache: dict[str, bool] = {}
         self._state: SessionState = self._initial_state()
         self._graph = self._build_graph()
 
@@ -636,11 +730,14 @@ class TrailerAgentLG:
             intent=None,
             trailer_type=None,
             slots_collected={},
+            slots_asked=[],
+            utility_lightweight_decided=None,
             required_slots=[],
             optional_slots=[],
             search_results=[],
             search_results_for_category=None,
             api_listings_this_turn=[],
+            last_search_args=None,
             recommendation_entry_due=False,
             is_interested=False,
             interested_item=None,
@@ -667,6 +764,7 @@ class TrailerAgentLG:
             self._route_after_master,
             {
                 "specialist_node": "specialist_node",
+                "recommendation_node": "recommendation_node",
                 END: END,
             },
         )
@@ -687,9 +785,14 @@ class TrailerAgentLG:
 
     @staticmethod
     def _route_after_master(state: SessionState) -> str:
-        if state.get("trailer_type"):
-            return "specialist_node"
-        return END
+        tt = state.get("trailer_type")
+        if not tt:
+            return END
+        sr = state.get("search_results") or []
+        sfc = state.get("search_results_for_category")
+        if sr and sfc == tt:
+            return "recommendation_node"
+        return "specialist_node"
 
     @staticmethod
     def _route_after_specialist(state: SessionState) -> str:
@@ -703,6 +806,110 @@ class TrailerAgentLG:
         if sr and sfc == tt:
             return "recommendation_node"
         return END
+
+    def _classify_lightweight_haul(self, haul_text: str) -> bool:
+        """
+        Mini-classifier for Utility trailers: True if haul is lightweight (~under 1500 lbs).
+        Uses a short LLM JSON reply with fallback to keyword/heuristic checks.
+        """
+        key = (haul_text or "").strip().lower()
+        if not key:
+            return False
+        if key in self._lightweight_cache:
+            return self._lightweight_cache[key]
+
+        fallback = is_lightweight_haul(haul_text)
+        result_bool = fallback
+        try:
+            mini = ChatOpenAI(
+                model=OPENAI_MODEL,
+                api_key=OPENAI_API_KEY,
+                temperature=0,
+            )
+            resp = mini.invoke(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You classify whether the haul item for a UTILITY trailer is lightweight "
+                            "(combined load roughly under 1500 lbs). "
+                            "If the customer's description mentions any of these items or phrases "
+                            "(substring match, case-insensitive), you MUST classify it as lightweight — "
+                            "i.e. your JSON must be "
+                            '{"lightweight": true}. Phrases: '
+                            + ", ".join(_LIGHTWEIGHT_KEYWORDS)
+                            + ". Otherwise judge whether the combined load is roughly under 1500 lbs. "
+                            "Reply with strict JSON only, no markdown: "
+                            '{"lightweight": true} or {"lightweight": false}'
+                        ),
+                    },
+                    {"role": "user", "content": haul_text},
+                ]
+            )
+            raw = str(getattr(resp, "content", "") or "").strip()
+            if raw.startswith("```"):
+                raw = raw.replace("```json", "").replace("```", "").strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                m = re.search(r"\{[^{}]*\}", raw)
+                if m:
+                    parsed = json.loads(m.group(0))
+                else:
+                    raise
+            result_bool = bool(parsed.get("lightweight"))
+        except Exception:
+            result_bool = fallback
+
+        self._lightweight_cache[key] = result_bool
+        logger.info(
+            "LIGHTWEIGHT_CLASSIFIER | trailer_type=Utility | text=%s | result=%s",
+            key[:240],
+            result_bool,
+        )
+        return result_bool
+
+    def _run_set_trailer_type_tool(
+        self, raw_type: str, state: SessionState
+    ) -> tuple[str, dict[str, Any]]:
+        """Shared handler for set_trailer_type from specialist or recommendation node."""
+        canonical, err = _validate_set_trailer_type_arg(raw_type)
+        if err:
+            logger.info(
+                "TRAILER_TYPE_REJECTED | raw=%s | reason=%s",
+                raw_type,
+                err.get("error"),
+            )
+            return json.dumps(err, ensure_ascii=True), {}
+
+        extra: dict[str, Any] = {}
+        prev_tt = state.get("trailer_type")
+        extra["trailer_type"] = canonical
+        extra["slots_collected"] = {}
+        extra["slots_asked"] = []
+        extra["utility_lightweight_decided"] = None
+        spec = get_trailer_fields_as_dict(canonical)
+        extra["required_slots"] = spec["required_slots"]
+        extra["optional_slots"] = spec["optional_slots"]
+
+        if prev_tt and prev_tt != canonical:
+            extra["search_results"] = []
+            extra["search_results_for_category"] = None
+            extra["recommendation_entry_due"] = False
+            extra["is_interested"] = False
+            extra["interested_item"] = None
+            extra["last_search_args"] = None
+            logger.info(
+                "TRAILER_TYPE_PIVOT | from=%s to=%s | cleared_search",
+                prev_tt,
+                canonical,
+            )
+        else:
+            logger.info("TRAILER_TYPE_UPDATE | trailer_type=%s", canonical)
+
+        return json.dumps(
+            {"ok": True, "trailer_type": canonical, "note": "category updated"}
+        ), extra
 
     # ── Node: master_router_node ──────────────────────────────────────────────
 
@@ -777,6 +984,9 @@ class TrailerAgentLG:
                         updates["search_results"] = []
                         updates["search_results_for_category"] = None
                         updates["slots_collected"] = {}
+                        updates["slots_asked"] = []
+                        updates["utility_lightweight_decided"] = None
+                        updates["last_search_args"] = None
                         updates["is_interested"] = False
                         updates["interested_item"] = None
                         updates["recommendation_entry_due"] = False
@@ -808,20 +1018,15 @@ class TrailerAgentLG:
     def _specialist_node(self, state: SessionState) -> dict:
         """Collect qualification slots then trigger search."""
         trailer_type = state.get("trailer_type", "Unknown")
-        slots = state.get("slots_collected", {})
-        required = state.get("required_slots", [])
+        slots = state.get("slots_collected", {}) or {}
+        required = list(state.get("required_slots", []))
         optional = state.get("optional_slots", [])
 
-        # ── Lightweight haul detection ──────────────────────────────────────────
-        # If the haul item has already been collected and is lightweight, strip
-        # weight-related slots from required so the LLM never asks for them.
         haul_item_text = (
             str(slots.get("haul_item") or "")
             + " " + str(slots.get("vehicle_type") or "")
             + " " + str(slots.get("haul_material") or "")
         )
-        # Only the latest user message (current turn) — avoids livestock / listing text
-        # in assistant history falsely triggering lightweight detection.
         for _msg in reversed(state.get("messages", [])):
             if isinstance(_msg, HumanMessage):
                 haul_item_text += " " + str(_msg.content or "")
@@ -829,13 +1034,23 @@ class TrailerAgentLG:
             if isinstance(_msg, dict) and _msg.get("role") == "user":
                 haul_item_text += " " + str(_msg.get("content") or "")
                 break
-        required, _is_light = _strip_weight_slots(required, haul_item_text)
-        if _is_light:
-            logger.info("LIGHTWEIGHT_DETECTED | weight slots stripped from required for trailer_type=%s", trailer_type)
+
+        lightweight_updates: dict[str, Any] = {}
+        if trailer_type == "Utility":
+            is_light = self._classify_lightweight_haul(haul_item_text)
+            lightweight_updates["utility_lightweight_decided"] = is_light
+            if is_light:
+                required = [s for s in required if s not in WEIGHT_SLOT_NAMES]
+                lightweight_updates["required_slots"] = required
+                logger.info("LIGHTWEIGHT_DETECTED | utility | weight slots stripped")
+
+        shadow: dict[str, Any] = dict(state)
+        shadow.update(lightweight_updates)
+        sc = dict(shadow.get("slots_collected") or {})
 
         slots_summary_lines = []
         for slot in required + optional:
-            val = slots.get(slot)
+            val = sc.get(slot)
             if val is not None:
                 slots_summary_lines.append(f"  {slot}: {val} ✓")
             else:
@@ -846,13 +1061,27 @@ class TrailerAgentLG:
             trailer_type=trailer_type,
             slots_summary=slots_summary,
         )
+        if trailer_type == "Utility" and shadow.get("utility_lightweight_decided") is True:
+            req_display = ", ".join(required) if required else "(none)"
+            system += (
+                "\n\n## AUTHORITATIVE REQUIRED SLOTS (Utility lightweight)\n"
+                f"The only required qualification slots for search are: **{req_display}**. "
+                "Do **not** ask about haul weight or total weight; payload is set silently.\n"
+                "Ignore any earlier `fetch_trailer_fields` tool message that still lists "
+                "**haul_weight_lbs** — that requirement was superseded when the haul was "
+                "classified as lightweight."
+            )
 
-        messages = self._messages_for_llm(state, system)
-        tools = [FETCH_TRAILER_FIELDS_TOOL, SEARCH_TRAILERS_TOOL, SET_TRAILER_TYPE_TOOL]
+        messages = self._messages_for_specialist_llm(shadow, system)
+        tools = [
+            FETCH_TRAILER_FIELDS_TOOL,
+            RECORD_SLOT_ANSWER_TOOL,
+            SEARCH_TRAILERS_TOOL,
+            SET_TRAILER_TYPE_TOOL,
+        ]
         llm_with_tools = self._llm.bind_tools(tools)
 
-        # Agentic loop within the node: keep calling until no more tool calls
-        updates: dict = {"messages": []}
+        updates: dict = {"messages": [], **lightweight_updates}
         all_new_messages: list[BaseMessage] = []
 
         current_messages = messages
@@ -865,19 +1094,20 @@ class TrailerAgentLG:
             all_new_messages.append(response)
 
             if not (hasattr(response, "tool_calls") and response.tool_calls):
-                # No tool calls — final text response
                 break
 
             tool_messages = []
             for tc in response.tool_calls:
                 fn = tc["name"]
-                args = tc["args"]
-                tool_result, extra_updates = self._execute_specialist_tool(fn, args, state)
+                args = tc.get("args") or {}
+                tool_result, extra_updates = self._execute_specialist_tool(
+                    fn, args, shadow
+                )
                 updates.update(extra_updates)
+                shadow.update(extra_updates)
                 tool_messages.append(
                     ToolMessage(content=tool_result, tool_call_id=tc["id"])
                 )
-                # If search results were populated, exit the loop after tool response
                 if fn == "search_trailers" and updates.get("search_results"):
                     all_new_messages.extend(tool_messages)
                     updates["messages"] = all_new_messages
@@ -897,45 +1127,46 @@ class TrailerAgentLG:
         """Execute a tool call from the specialist node. Returns (tool_result_str, state_updates)."""
         extra: dict = {}
 
+        if fn == "record_slot_answer":
+            slot = str(args.get("slot", "")).strip()
+            value = args.get("value")
+            req = list(state.get("required_slots") or [])
+            opt = list(state.get("optional_slots") or [])
+            if slot not in req and slot not in opt:
+                return (
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": "invalid_slot",
+                            "slot": slot,
+                            "message": "Use a slot name from required_slots or optional_slots.",
+                        }
+                    ),
+                    {},
+                )
+            prev_sc = dict(state.get("slots_collected") or {})
+            prev_sc[slot] = value
+            extra["slots_collected"] = prev_sc
+            asked = list(state.get("slots_asked") or [])
+            if slot not in asked:
+                asked.append(slot)
+            extra["slots_asked"] = asked
+            logger.info("SLOT_RECORDED | slot=%s | value=%s", slot, value)
+            return json.dumps({"ok": True, "slot": slot, "value": value}), extra
+
         if fn == "fetch_trailer_fields":
             trailer_type = str(args.get("trailer_type", state.get("trailer_type", ""))).strip()
             spec = get_trailer_fields_as_dict(trailer_type)
+            if trailer_type == "Utility" and state.get("utility_lightweight_decided") is True:
+                spec = _strip_weight_slots_from_spec_dict(spec)
             extra["required_slots"] = spec["required_slots"]
             extra["optional_slots"] = spec["optional_slots"]
             logger.info("FETCH_FIELDS | trailer_type=%s | required=%s", trailer_type, spec["required_slots"])
             return json.dumps(spec), extra
 
         if fn == "set_trailer_type":
-            # Customer changed their mind
             raw_type = str(args.get("trailer_type", "")).strip()
-            canonical, err = _validate_set_trailer_type_arg(raw_type)
-            if err:
-                logger.info(
-                    "TRAILER_TYPE_REJECTED | specialist | raw=%s | reason=%s",
-                    raw_type,
-                    err.get("error"),
-                )
-                return json.dumps(err, ensure_ascii=True), {}
-            prev_tt = state.get("trailer_type")
-            extra["trailer_type"] = canonical
-            extra["slots_collected"] = {}
-            spec = get_trailer_fields_as_dict(canonical)
-            extra["required_slots"] = spec["required_slots"]
-            extra["optional_slots"] = spec["optional_slots"]
-            if prev_tt and prev_tt != canonical:
-                extra["search_results"] = []
-                extra["search_results_for_category"] = None
-                extra["recommendation_entry_due"] = False
-                extra["is_interested"] = False
-                extra["interested_item"] = None
-                logger.info(
-                    "TRAILER_TYPE_PIVOT_SPECIALIST | from=%s to=%s | cleared_search",
-                    prev_tt,
-                    canonical,
-                )
-            else:
-                logger.info("TRAILER_TYPE_SPECIALIST | trailer_type=%s", canonical)
-            return json.dumps({"ok": True, "trailer_type": canonical, "note": "category updated"}), extra
+            return self._run_set_trailer_type_tool(raw_type, state)
 
         if fn == "search_trailers":
             return self._execute_search_tool(args, state, extra)
@@ -946,10 +1177,49 @@ class TrailerAgentLG:
         self, args: dict, state: SessionState, extra: dict
     ) -> tuple[str, dict]:
         """Run a Pinecone search, update state with results."""
-        from src.agent import TrailerAgent  # reuse rerank logic
+        args = dict(args or {})
+        more_results = bool(args.get("more_results", False))
+
+        if more_results:
+            prev = state.get("last_search_args") or {}
+            merged_keys: list[str] = []
+            for k in _LAST_SEARCH_MERGE_KEYS:
+                av = args.get(k)
+                if av in (None, "") and prev.get(k) is not None:
+                    args[k] = prev[k]
+                    merged_keys.append(k)
+            q = str(args.get("query") or "").strip()
+            if not q and prev.get("query"):
+                args["query"] = prev["query"]
+                merged_keys.append("query")
+            logger.info("SHOW_MORE_REUSE | merged_keys=%s", merged_keys)
+
+        if not more_results:
+            required = list(state.get("required_slots") or [])
+            if (
+                state.get("trailer_type") == "Utility"
+                and state.get("utility_lightweight_decided") is True
+            ):
+                required = [s for s in required if s not in WEIGHT_SLOT_NAMES]
+            collected = state.get("slots_collected") or {}
+            missing = [s for s in required if s not in collected]
+            if missing:
+                logger.info("SEARCH_REJECTED_MISSING_SLOTS | missing=%s", missing)
+                return (
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": "missing_required_slots",
+                            "missing": missing,
+                            "message": (
+                                f"Ask the customer about: {missing[0]} before calling search_trailers."
+                            ),
+                        }
+                    ),
+                    {},
+                )
 
         query = str(args.get("query", "")).strip()
-        more_results = bool(args.get("more_results", False))
         required_payload_lbs = _coerce_required_payload_lbs(args.get("required_payload_lbs"))
         required_length_ft = _coerce_required_length_ft(args.get("required_length_ft"))
         required_gvwr_lbs = _coerce_required_payload_lbs(args.get("required_gvwr_lbs"))
@@ -970,25 +1240,16 @@ class TrailerAgentLG:
                     "search_trailers more_results=True but no session_id and no client_shown_urls"
                 )
 
-        # Infer from query/history if not explicitly provided
         if required_payload_lbs is None:
             required_payload_lbs = _extract_weight_lbs_from_text(query)
         if required_length_ft is None:
             required_length_ft = _extract_length_ft_from_text(query)
 
-        # Lightweight cargo detection (query + recent user messages only)
-        light = _is_clear_light_cargo_text(query)
-        if not light:
-            for msg in reversed(state.get("messages", [])):
-                if isinstance(msg, HumanMessage):
-                    if _is_clear_light_cargo_text(str(msg.content or "")):
-                        light = True
-                    break
-                if isinstance(msg, dict) and msg.get("role") == "user":
-                    if _is_clear_light_cargo_text(str(msg.get("content") or "")):
-                        light = True
-                    break
-        if required_payload_lbs is None and light:
+        if (
+            state.get("trailer_type") == "Utility"
+            and state.get("utility_lightweight_decided") is True
+            and required_payload_lbs is None
+        ):
             required_payload_lbs = 1000.0
 
         hitch_type = args.get("hitch_type")
@@ -1000,11 +1261,27 @@ class TrailerAgentLG:
             hitch_type = normalize_hitch(hitch_type) or hitch_type
         logger.info("LG_HITCH | hitch_type=%s", hitch_type)
 
+        cat_sub = args.get("category_subcategory") or state.get("trailer_type")
+
+        extra["last_search_args"] = {
+            "query": query,
+            "condition": args.get("condition"),
+            "price_min": args.get("price_min"),
+            "price_max": args.get("price_max"),
+            "category_subcategory": cat_sub,
+            "make": args.get("make"),
+            "color": args.get("color"),
+            "hitch_type": hitch_type,
+            "required_payload_lbs": required_payload_lbs,
+            "required_length_ft": required_length_ft,
+            "required_gvwr_lbs": required_gvwr_lbs,
+        }
+
         trailer_filter = TrailerFilter(
             condition=args.get("condition"),
             price_min=args.get("price_min"),
             price_max=args.get("price_max"),
-            category_subcategory=args.get("category_subcategory") or state.get("trailer_type"),
+            category_subcategory=cat_sub,
             make=args.get("make"),
             color=args.get("color"),
             hitch_type=hitch_type,
@@ -1083,17 +1360,30 @@ class TrailerAgentLG:
         """Present search results, handle interest logging."""
         search_results = state.get("search_results", [])
         results_json = json.dumps(search_results, indent=2) if search_results else "[]"
+        prev_filters_json = json.dumps(
+            state.get("last_search_args") or {}, indent=2, ensure_ascii=True
+        )
 
         system = (
             RECOMMENDATION_PROMPT
+            + "\n\n## PREVIOUS SEARCH FILTERS\n"
+            "Reuse these values when calling `search_trailers` unless the customer overrides "
+            "them in their latest message.\n```json\n"
+            f"{prev_filters_json}\n```\n"
             + f"\n\n## CURRENT SEARCH RESULTS\n```json\n{results_json}\n```\n"
             + f"\nMax trailers to present: {SEARCH_MAX_RECOMMENDATIONS}"
         )
 
         messages = self._messages_for_llm(state, system)
-        tools = [LOG_INTEREST_TOOL, SEARCH_TRAILERS_TOOL]
+        tools = [
+            LOG_INTEREST_TOOL,
+            SEARCH_TRAILERS_TOOL,
+            SET_TRAILER_TYPE_TOOL,
+            RECORD_SLOT_ANSWER_TOOL,
+        ]
         llm_with_tools = self._llm.bind_tools(tools)
 
+        shadow: dict[str, Any] = dict(state)
         updates: dict = {"messages": []}
         all_new_messages: list[BaseMessage] = []
         current_messages = messages
@@ -1109,7 +1399,7 @@ class TrailerAgentLG:
             tool_messages = []
             for tc in response.tool_calls:
                 fn = tc["name"]
-                args = tc["args"]
+                args = tc.get("args") or {}
                 if fn == "log_product_interest":
                     item_name = str(args.get("item_name", "")).strip()
                     result = self._execute_log_interest(
@@ -1119,9 +1409,25 @@ class TrailerAgentLG:
                     updates["interested_item"] = item_name
                     tool_messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
                 elif fn == "search_trailers":
-                    result, extra = self._execute_search_tool(args, state, {})
+                    result, extra = self._execute_search_tool(args, shadow, {})
+                    shadow.update(extra)
                     updates.update(extra)
                     tool_messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+                elif fn == "set_trailer_type":
+                    raw_type = str(args.get("trailer_type", "")).strip()
+                    result, extra = self._run_set_trailer_type_tool(raw_type, shadow)
+                    shadow.update(extra)
+                    updates.update(extra)
+                    tool_messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+                elif fn == "record_slot_answer":
+                    tool_result, extra_updates = self._execute_specialist_tool(
+                        fn, args, shadow
+                    )
+                    shadow.update(extra_updates)
+                    updates.update(extra_updates)
+                    tool_messages.append(
+                        ToolMessage(content=tool_result, tool_call_id=tc["id"])
+                    )
                 else:
                     tool_messages.append(
                         ToolMessage(
@@ -1160,6 +1466,43 @@ class TrailerAgentLG:
             return json.dumps({"ok": False, "error": str(exc)})
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _messages_for_specialist_llm(state: SessionState, system_prompt: str) -> list[dict]:
+        """
+        Convert state messages for ChatOpenAI; rewrite stale fetch_trailer_fields
+        ToolMessage JSON when Utility lightweight so history matches required_slots.
+        """
+        lw = state.get("utility_lightweight_decided") is True
+        out: list[dict] = [{"role": "system", "content": system_prompt}]
+        sanitized_count = 0
+        for msg in state.get("messages", []):
+            if isinstance(msg, HumanMessage):
+                out.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    out.append(msg)
+                else:
+                    out.append({"role": "assistant", "content": msg.content or ""})
+            elif isinstance(msg, ToolMessage):
+                content = str(msg.content or "")
+                if lw:
+                    new_json = _sanitize_fetch_tool_json_for_utility_lightweight(content)
+                    if new_json is not None:
+                        content = new_json
+                        sanitized_count += 1
+                        msg = ToolMessage(content=content, tool_call_id=msg.tool_call_id)
+                out.append(msg)
+            else:
+                role = getattr(msg, "role", None) or str(msg.get("role", "user"))
+                content = getattr(msg, "content", None) or str(msg.get("content", ""))
+                out.append({"role": role, "content": content})
+        if sanitized_count:
+            logger.info(
+                "FETCH_TOOL_HISTORY_SANITIZED | count=%s",
+                sanitized_count,
+            )
+        return out
 
     @staticmethod
     def _messages_for_llm(state: SessionState, system_prompt: str) -> list[dict]:

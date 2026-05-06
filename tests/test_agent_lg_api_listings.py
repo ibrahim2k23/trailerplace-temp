@@ -1,6 +1,7 @@
 """Tests for per-turn API listings vs persisted LangGraph search_results."""
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -13,7 +14,25 @@ os.environ.setdefault("PINECONE_API_KEY", "pc-test-placeholder")
 
 from langgraph.graph import END
 
-from src.agent_lg import TrailerAgentLG
+from src.agent_lg import TrailerAgentLG, _sanitize_fetch_tool_json_for_utility_lightweight
+
+
+class TestSanitizeFetchToolJson(unittest.TestCase):
+    def test_strips_weight_slots_from_utility_fetch_json(self) -> None:
+        raw = (
+            '{"category": "Utility", "required_slots": ["haul_item", "haul_weight_lbs"], '
+            '"optional_slots": [], '
+            '"questions": {"haul_item": "Q1", "haul_weight_lbs": "Weight?"}, "notes": ""}'
+        )
+        out = _sanitize_fetch_tool_json_for_utility_lightweight(raw)
+        self.assertIsNotNone(out)
+        spec = json.loads(out)
+        self.assertEqual(spec["required_slots"], ["haul_item"])
+        self.assertNotIn("haul_weight_lbs", spec["questions"])
+
+    def test_returns_none_when_not_utility(self) -> None:
+        raw = '{"category": "Dump", "required_slots": ["haul_material", "haul_weight_lbs"]}'
+        self.assertIsNone(_sanitize_fetch_tool_json_for_utility_lightweight(raw))
 
 
 class TestAgentLgApiListings(unittest.TestCase):
@@ -89,6 +108,29 @@ class TestAgentLgApiListings(unittest.TestCase):
         agent.chat("user text")
 
         self.assertEqual(seen[0].content, "user text")
+
+    def test_route_after_master_goes_recommendation_when_results_match_type(self) -> None:
+        base: dict = {
+            "trailer_type": "Utility",
+            "search_results": [{"title": "A", "url": "https://x"}],
+            "search_results_for_category": "Utility",
+        }
+        self.assertEqual(TrailerAgentLG._route_after_master(base), "recommendation_node")
+
+    def test_route_after_master_goes_specialist_when_no_results(self) -> None:
+        base: dict = {
+            "trailer_type": "Utility",
+            "search_results": [],
+            "search_results_for_category": None,
+        }
+        self.assertEqual(TrailerAgentLG._route_after_master(base), "specialist_node")
+
+    def test_route_after_master_ends_without_trailer_type(self) -> None:
+        base: dict = {
+            "trailer_type": None,
+            "search_results": [],
+        }
+        self.assertEqual(TrailerAgentLG._route_after_master(base), END)
 
     def test_route_after_specialist_enters_recommendation_with_results_without_flag(
         self,

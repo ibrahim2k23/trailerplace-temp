@@ -38,12 +38,12 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         optional=["hitch_type", "loading_style"],
         questions={
             "haul_item":       "What equipment will you be hauling (e.g. skid steer, mini excavator, tractor)?",
-            "haul_weight_lbs": "What's the rough operating weight of the equipment?",
+            "haul_weight_lbs": "What's the rough total weight of the equipment?",
             "haul_length_ft":  "About how long is the equipment (or what deck length do you need)?",
             "hitch_type":      "Do you prefer a bumper pull or gooseneck hitch?",
             "loading_style":   "How will you load it — ramps, deckover, or drive-over fenders?",
         },
-        notes="Skip haul_weight_lbs for inherently lightweight items (ATVs, golf carts, etc.); silently set payload=1000 lbs.",
+        notes="",
     ),
 
     "Car Hauler": TrailerFieldSpec(
@@ -66,9 +66,9 @@ _SPECS: dict[str, TrailerFieldSpec] = {
             "haul_item":           "What will you be hauling on the utility trailer?",
             "haul_weight_lbs":     "What's the rough total weight of your load?",
             "trailer_size":        "Do you have a size preference (length / width)?",
-            "sides_gate_storage":  "Will you need side rails, a rear gate, or tool storage?",
+            #"sides_gate_storage":  "Will you need side rails, a rear gate, or tool storage?",
         },
-        notes="Skip haul_weight_lbs for lightweight items (lawn mowers, ATVs, etc.).",
+        notes="Utility-only: lightweight haul handling is decided by the assistant agent (not used for other categories).",
     ),
 
     "Dump": TrailerFieldSpec(
