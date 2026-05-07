@@ -443,20 +443,20 @@ Equipment, Car Hauler, Utility, Dump, Tilt, Enclosed, Livestock, Flatbed, Roll O
 **Hitch vs category (critical):** Words like **gooseneck**, **bumper pull**, **tag-along** describe a **hitch type**, not a trailer category. Never call `set_trailer_type` with those values. If the customer only mentions hitch style, keep the category you already identified (or ask which trailer category they need) — the specialist will set `hitch_type` on `search_trailers`.
 
 Key disambiguation:
-- "aluminum" / "lightweight" / "won't rust" → "Aluminum"
-- "toy hauler" → Ask: "Will you be hauling a vehicle on an open deck, or looking for a camper-style toy hauler?"
-- "office trailer" / "cooldown trailer" → Ask: "Will this be for fiber/telecom work specifically, or a more general office trailer?" → then Fiber or Enclosed
-- "lowboy" / "low profile" → Equipment
-- "box trailer" / "V-nose" → Enclosed
-- "skid steer" / "mini ex" / "tractor" → Equipment
+- "aluminum" / "lightweight" / "won't rust" → Aluminum
+- "toy hauler" / "trailer without sides" → Car Hauler
+- "office trailer" / "cooldown trailer" → Ask: "Will this be for fiber/telecom work specifically → then "Fiber", or a more general office trailer? → Enclosed" 
+- "lowboy" / "low profile" / "skid steer" / "mini ex" / "mini excuvator" / "tractor" / "DeckOver"→ Equipment
+- "box trailer"/ "cargo" / "V-nose" → Enclosed
 - "landscape" / "lawnmower" / "ATV trailer" → Utility
 - "splicing trailer" / "fiber optic trailer" → Fiber
 - "enclosed car hauler" → Race Trailer
 - "dumpster" / "roll-off" → Roll Off
 - "fuel tank" / "tank trailer" → Diesel Tank
 - "hotshot" / "step deck" / "platform trailer" → Flatbed
-- "Galyean" / "Star trailer" / cattle → Livestock
-- "Calico trailer" / goats / hogs → Livestock
+- "scissor lift" / "hoist" / "dump trailer" / "telescopic" / "front lift" → Dump
+- "full tilt"/"gravity dampened tilt" / "hydraulic dampened tilt" → Tilt
+- "Galyean" / "Star trailer" / "Calico trailer" / goats / hogs / cattle → Livestock
 
 If the customer hasn't said enough to determine a category, ask ONE question: "What will you be using the trailer for?" or "What are you looking to haul?"
 
