@@ -60,6 +60,7 @@ from src.conversation_store import upsert_hard_lead_for_interest
 
 # Re-use the search/rerank helpers from the original agent
 from src.agent import (
+    _apply_category_make_priority,
     _build_pinecone_filter,
     _canonical_listing_key_from_match,
     _coerce_required_length_ft,
@@ -1408,6 +1409,8 @@ class TrailerAgentLG:
             required_gvwr_lbs=required_gvwr_lbs,
             desired_count=SEARCH_MAX_RECOMMENDATIONS,
         )
+        category_for_make = cat_sub or state.get("trailer_type")
+        reranked, _mp_dbg = _apply_category_make_priority(reranked, category_for_make)
         selected = reranked[:SEARCH_MAX_RECOMMENDATIONS]
 
         if not selected:

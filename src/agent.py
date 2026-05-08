@@ -194,6 +194,135 @@ RERANK_EXTREME_RATIO = _env_positive_float(
     "RERANK_EXTREME_RATIO", 1.5, minimum=RERANK_WARN_RATIO
 )
 
+# Post fit-rerank: preferred makes per category (top = highest priority). Keys match
+# ``normalize_category()`` output (e.g. "Car Hauler", "Roll Off").
+CATEGORY_MAKE_PRIORITY: dict[str, tuple[str, ...]] = {
+    "Aluminum": ("Aluma",),
+    "Car Hauler": ("Diamond C", "Iron Bull Trailers", "P&C"),
+    "Diesel Tank": ("East Texas Trailers",),
+    "Dump": ("Iron Bull Trailers", "Diamond C", "Texas Pride"),
+    "Enclosed": ("Cargo Craft", "Haulmark", "Stallion"),
+    "Equipment": ("Diamond C", "Iron Bull Trailers", "P&C"),
+    "Fiber": ("Cargo Craft", "Haulmark", "Stallion"),
+    "Flatbed": ("Diamond C", "Iron Bull Trailers", "P&C"),
+    "Livestock": ("Galyean", "Gooseneck", "Calico Trailers"),
+    "Race Trailer": ("Haulmark", "Cargo Craft"),
+    "Roll Off": ("Iron Bull Trailers", "East Texas Trailers"),
+    "Tilt": ("Diamond C", "Iron Bull Trailers", "Aluma"),
+    "Utility": ("Diamond C", "Iron Bull Trailers", "East Texas Trailers", "P&C"),
+}
+
+
+def _normalize_make_key_for_priority(make: Optional[str]) -> str:
+    """Lowercase, strip, collapse internal whitespace for make matching."""
+    if not make:
+        return ""
+    s = str(make).strip().lower()
+    return re.sub(r"\s+", " ", s)
+
+
+def _make_rank_lookup(preferred: tuple[str, ...]) -> dict[str, int]:
+    """Map normalized make string -> preference index (0 = best)."""
+    out: dict[str, int] = {}
+    for i, name in enumerate(preferred):
+        key = _normalize_make_key_for_priority(name)
+        if key and key not in out:
+            out[key] = i
+    return out
+
+
+def _listing_make_priority_rank(
+    make: Optional[str], rank_by_key: dict[str, int]
+) -> Optional[int]:
+    """Lowest index wins; uses raw make and ``normalize_make`` alias when helpful."""
+    if not make or not str(make).strip():
+        return None
+    raw = str(make).strip()
+    candidates = (
+        _normalize_make_key_for_priority(raw),
+        _normalize_make_key_for_priority(normalize_make(raw)),
+    )
+    best: Optional[int] = None
+    for c in candidates:
+        if not c:
+            continue
+        if c in rank_by_key:
+            r = rank_by_key[c]
+            if best is None or r < best:
+                best = r
+                continue
+        # e.g. preferred "diamond c" should match listing "diamond c trailers"
+        for key, r in rank_by_key.items():
+            if c == key or c.startswith(key + " "):
+                if best is None or r < best:
+                    best = r
+    return best
+
+
+def _apply_category_make_priority(
+    listings: list[TrailerListing],
+    category: Optional[str],
+) -> tuple[list[TrailerListing], dict[str, Any]]:
+    """
+    After fit rerank: move preferred makes to the front (in configured order),
+    then append all other listings preserving their relative order.
+
+    Returns (possibly_reordered_listings, debug_dict).
+    """
+    debug: dict[str, Any] = {"applied": False, "category": None, "reason": None}
+    if not listings:
+        debug["reason"] = "no_listings"
+        return listings, debug
+
+    cat_raw = (category or "").strip()
+    if not cat_raw:
+        debug["reason"] = "no_category"
+        return listings, debug
+
+    canon = normalize_category(cat_raw)
+    if canon == "Unknown":
+        canon = cat_raw.strip().title()
+
+    preferred = CATEGORY_MAKE_PRIORITY.get(canon)
+    debug["category"] = canon
+    if not preferred:
+        debug["reason"] = "no_preference_map"
+        return listings, debug
+
+    rank_by_key = _make_rank_lookup(preferred)
+    if not rank_by_key:
+        debug["reason"] = "empty_rank_lookup"
+        return listings, debug
+
+    preferred_rows: list[tuple[int, int, TrailerListing]] = []
+    tail: list[TrailerListing] = []
+    for i, lst in enumerate(listings):
+        r = _listing_make_priority_rank(lst.make, rank_by_key)
+        if r is None:
+            tail.append(lst)
+        else:
+            preferred_rows.append((r, i, lst))
+
+    if not preferred_rows:
+        debug["reason"] = "no_preferred_makes_in_results"
+        return listings, debug
+
+    preferred_rows.sort(key=lambda t: (t[0], t[1]))
+    ordered_pref = [t[2] for t in preferred_rows]
+    out = ordered_pref + tail
+    debug["applied"] = True
+    debug["preferred_count"] = len(ordered_pref)
+    debug["tail_count"] = len(tail)
+    debug["top_makes"] = [x.make for x in ordered_pref[: min(5, len(ordered_pref))]]
+    logger.info(
+        "MAKE_PRIORITY | category=%s | preferred=%s | tail=%s | top_makes=%s",
+        canon,
+        len(ordered_pref),
+        len(tail),
+        debug["top_makes"],
+    )
+    return out, debug
+
 
 def _env_bool(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)
@@ -1747,6 +1876,12 @@ class TrailerAgent:
             rerank_debug.get("phase"),
             len(reranked),
         )
+        category_for_make = trailer_filter.category_subcategory or args.get(
+            "category_subcategory"
+        )
+        reranked, make_priority_debug = _apply_category_make_priority(
+            reranked, category_for_make
+        )
         selected = self._pick_listings(reranked, max_count=SEARCH_MAX_RECOMMENDATIONS)
         tfilter: dict[str, Any]
         if hasattr(trailer_filter, "model_dump"):
@@ -1800,6 +1935,7 @@ class TrailerAgent:
             "requirements_source": requirements_source,
             "search_attempts": search_attempts,
             "rerank": rerank_debug,
+            "make_priority": make_priority_debug,
             "recommendation_payload": result_for_db,
         }
         return tool_result, selected, tool_debug, result_for_db
