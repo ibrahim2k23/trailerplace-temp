@@ -22,6 +22,13 @@ class TrailerFilter(BaseModel):
         None,
         description="Category, e.g. 'Utility', 'Enclosed', 'Dump', 'Flatbed', 'Equipment', 'Livestock', 'Tilt', 'Aluminum', 'Car Hauler'"
     )
+    subcategory: Optional[str] = Field(
+        None,
+        description=(
+            "Pinecone metadata subcategory (e.g. Utility, Equipment) — use with category Aluminum "
+            "when the customer chose an aluminum line/style; omit for other categories unless filtering by subcategory."
+        ),
+    )
     make: Optional[str] = Field(None, description="Trailer manufacturer brand")
     color: Optional[str] = Field(None, description="Trailer color")
     hitch_type: Optional[str] = Field(None, description="'Bumper Pull' or 'Gooseneck'")

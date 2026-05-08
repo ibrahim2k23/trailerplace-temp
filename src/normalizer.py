@@ -21,7 +21,6 @@ CATEGORY_MAP = {
     "roll off": "Roll Off",
     "diesel tank": "Diesel Tank",
     "race trailer": "Race Trailer",
-    "tank": "Tank",
     "welding": "Welding",
 }
 

@@ -17,7 +17,14 @@ from pinecone import Pinecone
 
 from src.email_sender import send_ticket_notification
 from src.models import CustomerContact, TrailerFilter, TrailerListing
-from src.normalizer import normalize_make, normalize_color, normalize_hitch, normalize_category
+from src.normalizer import (
+    normalize_make,
+    normalize_color,
+    normalize_hitch,
+    normalize_category,
+    normalize_subcategory,
+    build_category_subcategory,
+)
 from src.shown_listings_store import load_shown_urls
 
 load_dotenv()
@@ -294,6 +301,11 @@ def _build_pinecone_filter(f: TrailerFilter) -> Optional[dict]:
         category = f.category_subcategory.split(" > ")[0].strip()
         normalized = normalize_category(category)
         pf["category"] = {"$eq": normalized}
+
+    if f.subcategory:
+        sub_norm = normalize_subcategory(str(f.subcategory))
+        if sub_norm:
+            pf["subcategory"] = {"$eq": sub_norm}
 
     return pf if pf else None
 
@@ -630,6 +642,13 @@ def _metadata_to_listing(match: dict) -> TrailerListing:
     price_display = str(raw_display).strip() if raw_display is not None and str(raw_display).strip() else None
     if not price_display:
         price_display = f"${price:,.0f}" if price is not None else "Call for price"
+    legacy_cat_sub = (m.get("category_subcategory") or "").strip()
+    if legacy_cat_sub:
+        cat_sub_display = legacy_cat_sub
+    else:
+        sub_raw = m.get("subcategory")
+        sub = str(sub_raw).strip() if sub_raw is not None and str(sub_raw).strip() else None
+        cat_sub_display = build_category_subcategory(str(m.get("category") or ""), sub)
     return TrailerListing(
         listing_id=m.get("listing_id", match["id"]),
         title=m.get("title", ""),
@@ -637,7 +656,7 @@ def _metadata_to_listing(match: dict) -> TrailerListing:
         price=price,
         price_display=price_display,
         payments_from=m.get("payments_from"),
-        category_subcategory=m.get("category_subcategory", ""),
+        category_subcategory=cat_sub_display,
         make=m.get("make", ""),
         color=m.get("color", ""),
         hitch_type=m.get("hitch_type"),
@@ -698,8 +717,17 @@ SEARCH_TOOL = {
                         "Resolved trailer category. Use one of: Equipment, Car Hauler, Utility, "
                         "Dump, Tilt, Enclosed, Livestock, Roll Off, Diesel Tank, Flatbed, "
                         "Fiber, Race Trailer, Welding, Aluminum. "
-                        "For aluminum modifier: resolve to base category first (e.g. Utility, Equipment). "
+                        "For **Aluminum**, keep this as **Aluminum**; put the customer's style "
+                        "(utility, equipment, enclosed, …) in **subcategory**, not here. "
                         "Only set once category is confirmed from the conversation."
+                    ),
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": (
+                        "Pinecone subcategory filter — use when category is **Aluminum** and the customer "
+                        "chose a style (Utility, Equipment, Enclosed, …). Must align with inventory "
+                        "subcategory values. Omit for non-Aluminum searches unless filtering by subcategory."
                     ),
                 },
                 "make": {
@@ -894,7 +922,7 @@ the customer has genuinely left unanswered.
 **Fiber:** use_case (splicing / office / cooldown) · optional: crew size, AC / workbench / generator
 **Race Trailer:** vehicle_type → trailer_length_ft · optional: cabinets / workspace / living quarters
 **Welding:** equipment_list · optional: total weight
-**Aluminum (modifier):** resolve base_category first → payload_need · optional: sleeping need
+**Aluminum:** base_category (aluminum style → maps to Pinecone **subcategory**; **not** a `set_trailer_type` change) → payload_need (**weight only** in lbs/tons) · optional: sleeping need. Keep **`category_subcategory` = `Aluminum`** on search; set **`subcategory`** to the style (Utility, Equipment, …). Do **not** call `set_trailer_type("Utility")` etc. for style answers — use **`record_slot_answer`** for **`base_category`** until that slot is filled.
 **Offroad:** use_case (camping / overlanding / gear hauling) · optional: sleeping need
 
 Recovery rules — when a customer doesn't know a slot:
@@ -1660,6 +1688,7 @@ class TrailerAgent:
             price_min=args.get("price_min"),
             price_max=args.get("price_max"),
             category_subcategory=args.get("category_subcategory"),
+            subcategory=args.get("subcategory"),
             make=args.get("make"),
             color=args.get("color"),
             hitch_type=hitch_type,

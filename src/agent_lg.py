@@ -50,6 +50,7 @@ from src.normalizer import (
     normalize_color,
     normalize_hitch,
     normalize_make,
+    normalize_subcategory,
     HITCH_MAP,
 )
 from src.state import SessionState
@@ -78,6 +79,38 @@ from src.agent import (
 
 # Canonical trailer categories only (never hitch terms like Gooseneck / Bumper Pull).
 _ALLOWED_TRAILER_TYPES: frozenset[str] = frozenset(list_all_categories())
+
+# While `trailer_type` is Aluminum and `base_category` is not yet recorded, these
+# `set_trailer_type` targets are almost always a mistaken "aluminum style" answer.
+# Categories like **Dump** are intentionally excluded so customers can hard-pivot.
+_ALUMINUM_AMBIGUOUS_CATEGORY_PIVOTS: frozenset[str] = frozenset(
+    {
+        "Utility",
+        "Equipment",
+        "Enclosed",
+        "Car Hauler",
+        "Flatbed",
+        "Tilt",
+        "Livestock",
+        "Fiber",
+        "Race Trailer",
+        "Welding",
+        "Roll Off",
+        "Diesel Tank",
+    }
+)
+
+
+def _pinecone_subcategory_from_aluminum_base_slot(value: Any) -> Optional[str]:
+    """Map Aluminum `base_category` slot text to Pinecone metadata subcategory string."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    cat = normalize_category(raw)
+    if cat and cat != "Unknown":
+        sub = normalize_subcategory(cat)
+        return sub if sub else cat
+    return normalize_subcategory(raw)
 
 
 def _validate_set_trailer_type_arg(raw: str) -> tuple[Optional[str], Optional[dict[str, Any]]]:
@@ -204,6 +237,7 @@ _LAST_SEARCH_MERGE_KEYS: tuple[str, ...] = (
     "make",
     "color",
     "category_subcategory",
+    "subcategory",
 )
 
 # Canonical lightweight item keywords (plain lowercase, no regex).
@@ -339,7 +373,17 @@ SEARCH_TRAILERS_TOOL = {
                     "description": (
                         "Resolved trailer category. Use one of: Equipment, Car Hauler, Utility, "
                         "Dump, Tilt, Enclosed, Livestock, Roll Off, Diesel Tank, Flatbed, "
-                        "Fiber, Race Trailer, Welding, Aluminum."
+                        "Fiber, Race Trailer, Welding, Aluminum. "
+                        "For **Aluminum**, keep this as **Aluminum**; put the customer's style "
+                        "(Utility, Equipment, …) in **subcategory**."
+                    ),
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": (
+                        "Pinecone subcategory — required style filter when category is **Aluminum** "
+                        "(Utility, Equipment, Enclosed, …). The system may also infer this from "
+                        "the `base_category` slot."
                     ),
                 },
                 "make": {"type": "string"},
@@ -482,7 +526,7 @@ The customer is looking for a **{trailer_type}** trailer. Your job is to:
 - **fetch_trailer_fields**: Call first to learn required_slots, optional_slots, and questions for this trailer type.
 - **record_slot_answer**: Call immediately after the customer answers each qualification question (required or optional).
 - **search_trailers**: Call only after all required slots are listed under **SLOTS COLLECTED SO FAR**. Combine slot values into `query` and use filter fields when known.
-- **set_trailer_type**: Only when the customer switches to a **different trailer category** than **{trailer_type}**.
+- **set_trailer_type**: Only when the customer switches to a **different trailer category** than **{trailer_type}** (not for aluminum **style** words like Utility/Equipment while `base_category` is still empty — use `record_slot_answer` for those).
 
 ## SLOT COLLECTION RULES
 - Trust **SLOTS COLLECTED SO FAR** — ask only slots not yet marked collected.
@@ -492,11 +536,13 @@ The customer is looking for a **{trailer_type}** trailer. Your job is to:
 ## CATEGORY PIVOT
 If the customer names a **different trailer category** than **{trailer_type}**, call `set_trailer_type` first, then `fetch_trailer_fields`, then collect **all** required slots for the new category via `record_slot_answer` before `search_trailers`.
 - **Never** call `set_trailer_type` for hitch-only wording — use `hitch_type` on `search_trailers`.
+- **Aluminum exception:** While **{trailer_type}** is **Aluminum** and the aluminum **style** (`base_category`) slot is not yet collected, words like **Utility** / **Equipment** / **Enclosed** are **sub-types** for search — record them with **`record_slot_answer(slot='base_category', ...)`**. Do **not** call `set_trailer_type` for those style answers until `base_category` is recorded (the system blocks mistaken pivots). For a true category change (e.g. they want **Dump** instead), `set_trailer_type` is appropriate.
 
 ## SEARCH CALL RULES
 - Normalize units: tons/kg → lbs; m/cm/in → ft.
 - Set `hitch_type` when the customer clearly prefers Bumper Pull or Gooseneck.
 - Set `required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs` from collected slots when applicable.
+- For **Aluminum**: keep **`category_subcategory` = `Aluminum`** and set **`subcategory`** to the style from **`base_category`** (Utility, Equipment, …). Put haul context in **`query`**; **`payload_need`** is weight-only for **`required_payload_lbs`**.
 - Build a rich `query` from all collected slots.
 
 ## SLOTS COLLECTED SO FAR
@@ -882,6 +928,33 @@ class TrailerAgentLG:
             )
             return json.dumps(err, ensure_ascii=True), {}
 
+        slots = state.get("slots_collected") or {}
+        if (
+            state.get("trailer_type") == "Aluminum"
+            and "base_category" not in slots
+            and canonical is not None
+            and canonical != "Aluminum"
+            and canonical in _ALUMINUM_AMBIGUOUS_CATEGORY_PIVOTS
+        ):
+            err_guard: dict[str, Any] = {
+                "ok": False,
+                "error": "aluminum_base_category_slot_required",
+                "received": raw_type,
+                "normalized": canonical,
+                "message": (
+                    f"'{canonical}' matches an aluminum inventory style, not a new top-level category "
+                    "while the aluminum style question is still unanswered. Keep trailer_type as "
+                    "Aluminum and record the answer with record_slot_answer(slot='base_category', value=...). "
+                    "Use set_trailer_type only for a real category change (e.g. Dump) or after base_category "
+                    "has been collected."
+                ),
+            }
+            logger.info(
+                "TRAILER_TYPE_REJECTED | aluminum_guard | missing_base_category | proposed=%s",
+                canonical,
+            )
+            return json.dumps(err_guard, ensure_ascii=True), {}
+
         extra: dict[str, Any] = {}
         prev_tt = state.get("trailer_type")
         extra["trailer_type"] = canonical
@@ -939,6 +1012,14 @@ class TrailerAgentLG:
                 "- If their message only refines hitch, length, budget, or the same category need, "
                 "**do not** change `trailer_type`."
             )
+            if cur_tt == "Aluminum":
+                system += (
+                    "\n- **Aluminum:** If the customer says **utility**, **equipment**, **enclosed**, etc., "
+                    "that is an aluminum **style** (sub-type), **not** a category change — the specialist "
+                    "must use **`record_slot_answer(slot='base_category', ...)`**. Do **not** call "
+                    "`set_trailer_type('Utility')` / similar for those answers while the style slot is still "
+                    "open. `set_trailer_type` is for a genuinely different category (e.g. **Dump**)."
+                )
 
         messages = self._messages_for_llm(state, system)
         tools = [SET_TRAILER_TYPE_TOOL]
@@ -1252,6 +1333,16 @@ class TrailerAgentLG:
         ):
             required_payload_lbs = 1000.0
 
+        if state.get("trailer_type") == "Aluminum":
+            collected = state.get("slots_collected") or {}
+            if not args.get("subcategory"):
+                sub_slot = _pinecone_subcategory_from_aluminum_base_slot(collected.get("base_category"))
+                if sub_slot:
+                    args["subcategory"] = sub_slot
+            if required_payload_lbs is None:
+                required_payload_lbs = _coerce_required_payload_lbs(collected.get("payload_need"))
+            args["category_subcategory"] = "Aluminum"
+
         hitch_type = args.get("hitch_type")
         if not hitch_type:
             hitch_type = _infer_hitch_type_from_text(query)
@@ -1269,6 +1360,7 @@ class TrailerAgentLG:
             "price_min": args.get("price_min"),
             "price_max": args.get("price_max"),
             "category_subcategory": cat_sub,
+            "subcategory": args.get("subcategory"),
             "make": args.get("make"),
             "color": args.get("color"),
             "hitch_type": hitch_type,
@@ -1282,6 +1374,7 @@ class TrailerAgentLG:
             price_min=args.get("price_min"),
             price_max=args.get("price_max"),
             category_subcategory=cat_sub,
+            subcategory=args.get("subcategory"),
             make=args.get("make"),
             color=args.get("color"),
             hitch_type=hitch_type,

@@ -19,7 +19,14 @@ from openai import OpenAI
 from pinecone import Pinecone
 
 from src.models import TrailerFilter, TrailerListing
-from src.normalizer import normalize_make, normalize_color, normalize_hitch, normalize_category
+from src.normalizer import (
+    normalize_make,
+    normalize_color,
+    normalize_hitch,
+    normalize_category,
+    normalize_subcategory,
+    build_category_subcategory,
+)
 
 load_dotenv()
 
@@ -275,6 +282,11 @@ def _build_pinecone_filter(f: TrailerFilter) -> Optional[dict]:
         normalized = normalize_category(category)
         pf["category"] = {"$eq": normalized}
 
+    if f.subcategory:
+        sub_norm = normalize_subcategory(str(f.subcategory))
+        if sub_norm:
+            pf["subcategory"] = {"$eq": sub_norm}
+
     return pf if pf else None
 
 
@@ -518,6 +530,13 @@ def _metadata_to_listing(match: dict) -> TrailerListing:
     price_display = str(raw_display).strip() if raw_display is not None and str(raw_display).strip() else None
     if not price_display:
         price_display = f"${price:,.0f}" if price is not None else "Call for price"
+    legacy_cat_sub = (m.get("category_subcategory") or "").strip()
+    if legacy_cat_sub:
+        cat_sub_display = legacy_cat_sub
+    else:
+        sub_raw = m.get("subcategory")
+        sub = str(sub_raw).strip() if sub_raw is not None and str(sub_raw).strip() else None
+        cat_sub_display = build_category_subcategory(str(m.get("category") or ""), sub)
     return TrailerListing(
         listing_id=m.get("listing_id", match["id"]),
         title=m.get("title", ""),
@@ -525,7 +544,7 @@ def _metadata_to_listing(match: dict) -> TrailerListing:
         price=price,
         price_display=price_display,
         payments_from=m.get("payments_from"),
-        category_subcategory=m.get("category_subcategory", ""),
+        category_subcategory=cat_sub_display,
         make=m.get("make", ""),
         color=m.get("color", ""),
         hitch_type=m.get("hitch_type"),
@@ -586,8 +605,14 @@ SEARCH_TOOL = {
                         "Resolved trailer category. Use one of: Equipment, Car Hauler, Utility, "
                         "Dump, Tilt, Enclosed, Livestock, Roll Off, Diesel Tank, Flatbed, "
                         "Fiber, Race Trailer, Welding, Aluminum. "
-                        "For aluminum modifier: resolve to base category first (e.g. Utility, Equipment). "
-                        "Only set once category is confirmed from the conversation."
+                        "For **Aluminum**, keep this as **Aluminum**; put style (Utility, Equipment, …) in **subcategory**."
+                    ),
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": (
+                        "Pinecone subcategory filter — use with category **Aluminum** for style "
+                        "(Utility, Equipment, Enclosed, …)."
                     ),
                 },
                 "make": {
@@ -693,7 +718,7 @@ Ask ONE question at a time, in order. Stop collecting once you have the required
 **Fiber:** use_case (splicing / office / cooldown) → tow_vehicle · optional: crew size, AC / workbench / generator
 **Race Trailer:** vehicle_type → trailer_length_ft → tow_vehicle · optional: cabinets / workspace / living quarters
 **Welding:** equipment_list → tow_vehicle · optional: total weight
-**Aluminum (modifier):** resolve base_category first → payload_need → tow_vehicle
+**Aluminum:** base_category (style → Pinecone **subcategory**; not `set_trailer_type`) → payload_need (**weight only**) → tow_vehicle · optional: sleeping need
 **Offroad:** use_case (camping / overlanding / gear hauling) → tow_vehicle · optional: sleeping need
 
 Recovery rules — when a customer doesn't know a slot:
@@ -1200,6 +1225,7 @@ class TrailerAgent:
             price_min=args.get("price_min"),
             price_max=args.get("price_max"),
             category_subcategory=args.get("category_subcategory"),
+            subcategory=args.get("subcategory"),
             make=args.get("make"),
             color=args.get("color"),
             hitch_type=args.get("hitch_type"),

@@ -24,11 +24,11 @@ from pinecone import Pinecone, ServerlessSpec
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.normalizer import (
     normalize_category,
+    normalize_subcategory,
     normalize_make,
     normalize_color,
     normalize_hitch,
     normalize_condition,
-    build_category_subcategory,
     build_embedding_text,
 )
 
@@ -230,7 +230,6 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
 
     condition = normalize_condition(raw_condition)
     category = normalize_category(raw_category)
-    cat_sub = build_category_subcategory(raw_category, raw_subcategory)
     make = normalize_make(raw_make)
     color = normalize_color(raw_color)
     hitch = normalize_hitch(raw_hitch) if raw_hitch else None
@@ -257,12 +256,14 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "title": title,
         "condition": condition,
         "category": category,
-        "category_subcategory": cat_sub,
         "make": make,
         "color": color,
         "url": url,
         "price_display": price_display,
     }
+    sub_norm = normalize_subcategory(raw_subcategory)
+    if sub_norm and sub_norm.lower() != category.lower():
+        metadata["subcategory"] = sub_norm
     for key, val in [
         ("price", price),
         ("hitch_type", hitch),

@@ -189,9 +189,12 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         required=["base_category", "payload_need"],
         optional=["sleeping_need"],
         questions={
-            "base_category":  "What type of trailer are you looking for in aluminum — utility, equipment, enclosed, or something else?",
-            "payload_need":   "What will you be hauling, and what's the rough load weight?",
-            "sleeping_need":  "Will you need sleeping accommodations in the trailer?",
+            "base_category": (
+                "What type of trailer are you looking for in aluminum — utility, equipment, enclosed, "
+                "or something else?"
+            ),
+            "payload_need": "What's the rough total weight of the load?",
+            "sleeping_need": "Will you need sleeping accommodations in the trailer?",
         },
         notes="Aluminum is a modifier, not a standalone category. Resolve base_category first.",
     ),
