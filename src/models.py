@@ -40,6 +40,10 @@ class TrailerFilter(BaseModel):
         None,
         description="Minimum trailer GVWR in lbs (numeric filter threshold)",
     )
+    required_width_ft: Optional[float] = Field(
+        None,
+        description="Minimum trailer deck width in feet (numeric filter threshold)",
+    )
 
 
 class TrailerListing(BaseModel):

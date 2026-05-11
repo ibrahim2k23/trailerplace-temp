@@ -416,6 +416,8 @@ def _build_pinecone_filter(f: TrailerFilter) -> Optional[dict]:
         pf["length_ft_num"] = {"$gte": f.required_length_ft}
     if f.required_gvwr_lbs is not None:
         pf["gvwr_lbs_num"] = {"$gte": f.required_gvwr_lbs}
+    if f.required_width_ft is not None:
+        pf["width_ft_num"] = {"$gte": f.required_width_ft}
 
     if f.make:
         normalized = normalize_make(f.make)
@@ -656,6 +658,35 @@ def _extract_length_ft_from_text(text: str) -> Optional[float]:
     if m6:
         return float(m6.group(1)) * 3.0
     return None
+
+
+def _extract_width_ft_from_text(text: str) -> Optional[float]:
+    """
+    Parse width requirements from natural text.
+    Examples: "8.5 ft wide", "102 inch width", "7' wide".
+    """
+    s = str(text or "").lower()
+    if not s.strip():
+        return None
+    m = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|in|inch|inches|\"|')\s*(?:wide|width)\b",
+        s,
+    )
+    if not m:
+        m = re.search(
+            r"\b(?:width|wide)\s*(?:is|of|around|about|at least|minimum)?\s*(\d+(?:\.\d+)?)\s*(ft|feet|foot|in|inch|inches|\"|')\b",
+            s,
+        )
+    if not m:
+        return None
+    try:
+        qty = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    unit = (m.group(2) or "").lower()
+    if unit in ("in", "inch", "inches", '"'):
+        qty = qty / 12.0
+    return qty if qty > 0 else None
 
 
 def _spec_str_nonempty(val) -> bool:
@@ -904,6 +935,13 @@ SEARCH_TOOL = {
                         "(for fit-aware filtering/ranking). Omit if unknown."
                     ),
                 },
+                "required_width_ft": {
+                    "type": "number",
+                    "description": (
+                        "Minimum trailer width in feet when the customer clearly provides it "
+                        "(for fit-aware filtering/ranking). Omit if unknown."
+                    ),
+                },
                 "more_results": {
                     "type": "boolean",
                     "description": (
@@ -1062,8 +1100,8 @@ Once required slots are filled, call search_trailers immediately with a rich que
 - **Show more:** If the customer wants additional options for the *same* need (e.g. "show me more", "any others", "what else is available"), call search_trailers again with **more_results: true** and the **same** filter fields and a query consistent with what they are still looking for. Do not set more_results on the first search for a new topic.
 - Open with a short recap of what they asked for (category, haul, rough weight etc.), then introduce the options.
 - **Hitch type and Pinecone:** The vector database filters on structured fields. If the customer clearly wants a **Bumper Pull** or **Gooseneck** hitch (or phrasing like *gooseneck hitch*, *goose neck*, *bumper pull*, *tag along*), you MUST set tool arg **`hitch_type`** to **`"Bumper Pull"`** or **`"Gooseneck"`** — the free-text `query` alone is not enough. **Brand vs hitch:** the word *Gooseneck* in a model name (e.g. a manufacturer) is not a hitch; when the customer is asking for a *gooseneck hitch* / *gooseneck* in a hitch context, they mean **`hitch_type: "Gooseneck"`**.
-- If customer clearly states the load weight, load length, or a minimum trailer GVWR, you MUST pass them in tool args (`required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs`) as numeric values so recommendation ranking can prefer right-sized trailers.
-- Normalize units before tool args: convert any weight units (tons, kg, etc.) to **lbs** for `required_payload_lbs` and `required_gvwr_lbs`, and convert any length units (m/cm/mm/yd/in) to **feet** for `required_length_ft`.
+- If customer clearly states the load weight, load length, minimum trailer GVWR, or trailer/load width, you MUST pass them in tool args (`required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs`, `required_width_ft`) as numeric values so recommendation ranking can prefer right-sized trailers.
+- Normalize units before tool args: convert any weight units (tons, kg, etc.) to **lbs** for `required_payload_lbs` and `required_gvwr_lbs`, and convert any length/width units (m/cm/mm/yd/in) to **feet** for `required_length_ft` and `required_width_ft`.
 - When you present **multiple** trailers, number them **`1.`**, **`2.`**, **`3.`** (etc.) in the order you want them read. For a **single** trailer, you may omit the number.
 - For **each** trailer, use this **fixed layout** — do not skip or reorder steps **2** and **3**:
   1) **Title line** — Markdown link: **`[Full listing title exactly as returned — includes stock after the dash](that row's listing URL from search JSON)`**. Use the **per-listing URL** from the tool for that trailer (not the generic dealership site URL unless it is the same field).
@@ -1348,6 +1386,7 @@ class TrailerAgent:
         required_payload_lbs: Optional[float],
         required_length_ft: Optional[float],
         required_gvwr_lbs: Optional[float],
+        required_width_ft: Optional[float],
         desired_count: int,
         warn_ratio: float = RERANK_WARN_RATIO,
         extreme_ratio: float = RERANK_EXTREME_RATIO,
@@ -1356,11 +1395,13 @@ class TrailerAgent:
             required_payload_lbs is not None
             or required_length_ft is not None
             or required_gvwr_lbs is not None
+            or required_width_ft is not None
         )
         required_dim_count = (
             int(required_payload_lbs is not None)
             + int(required_length_ft is not None)
             + int(required_gvwr_lbs is not None)
+            + int(required_width_ft is not None)
         )
         if not listings or not needs_present:
             return listings, {
@@ -1369,6 +1410,7 @@ class TrailerAgent:
                 "required_payload_lbs": required_payload_lbs,
                 "required_length_ft": required_length_ft,
                 "required_gvwr_lbs": required_gvwr_lbs,
+                "required_width_ft": required_width_ft,
             }
 
         def _emit_rerank_score_logs(
@@ -1386,7 +1428,7 @@ class TrailerAgent:
                 lst = e["listing"]
                 decision_rank = decision_rank_by_entry.get(id(e))
                 logger.info(
-                    "RERANK_SCORE | phase=%s | fetched_pos=%s | decision_rank=%s | listing_id=%s | title=%s | base_score=%.6f | penalty=%.6f | fit_score=%.6f | payload_ratio=%s | length_ratio=%s | gvwr_ratio=%s | fail_count=%s | missing_count=%s | has_all_required_dims=%s | payload_spec_tier=%s | length_exact_rank=%s | gvwr_spec_tier=%s",
+                    "RERANK_SCORE | phase=%s | fetched_pos=%s | decision_rank=%s | listing_id=%s | title=%s | base_score=%.6f | penalty=%.6f | fit_score=%.6f | payload_ratio=%s | length_ratio=%s | gvwr_ratio=%s | width_ratio=%s | fail_count=%s | missing_count=%s | has_all_required_dims=%s | payload_spec_tier=%s | length_exact_rank=%s | gvwr_spec_tier=%s | width_spec_tier=%s",
                     phase_name,
                     fetched_pos,
                     decision_rank if decision_rank is not None else "None",
@@ -1398,12 +1440,14 @@ class TrailerAgent:
                     e["payload_ratio"],
                     e["length_ratio"],
                     e["gvwr_ratio"],
+                    e["width_ratio"],
                     e["fail_count"],
                     e["missing_count"],
                     e["has_all_required_dims"],
                     e.get("payload_spec_tier"),
                     e.get("length_exact_rank"),
                     e.get("gvwr_spec_tier"),
+                    e.get("width_spec_tier"),
                 )
 
         def _entry_for_debug(e: dict[str, Any], decision_rank: Optional[int]) -> dict[str, Any]:
@@ -1417,6 +1461,7 @@ class TrailerAgent:
                 "payload_ratio": e["payload_ratio"],
                 "length_ratio": e["length_ratio"],
                 "gvwr_ratio": e["gvwr_ratio"],
+                "width_ratio": e["width_ratio"],
                 "payload_from": e["payload_from"],
                 "fail_count": e["fail_count"],
                 "missing_count": e["missing_count"],
@@ -1424,6 +1469,7 @@ class TrailerAgent:
                 "payload_spec_tier": e.get("payload_spec_tier"),
                 "length_exact_rank": e.get("length_exact_rank"),
                 "gvwr_spec_tier": e.get("gvwr_spec_tier"),
+                "width_spec_tier": e.get("width_spec_tier"),
             }
 
         def _build_debug_payload(
@@ -1444,6 +1490,7 @@ class TrailerAgent:
                 "required_payload_lbs": required_payload_lbs,
                 "required_length_ft": required_length_ft,
                 "required_gvwr_lbs": required_gvwr_lbs,
+                "required_width_ft": required_width_ft,
                 "warn_ratio": warn_ratio,
                 "extreme_ratio": extreme_ratio,
                 "ranked_fit_summary": ranked_preview,
@@ -1470,6 +1517,7 @@ class TrailerAgent:
                 int(e.get("payload_spec_tier", 0)),
                 int(e.get("length_exact_rank", 0)),
                 int(e.get("gvwr_spec_tier", 0)),
+                int(e.get("width_spec_tier", 0)),
                 not e["has_all_required_dims"],
                 round(_length_overage_for_sort(e), 6),
                 e["penalty"],
@@ -1485,6 +1533,7 @@ class TrailerAgent:
                 payload_from = "gvwr" if payload is not None else "unknown"
             length_ft = _parse_length_ft(lst.length)
             gvwr_lbs = _parse_lbs(lst.gvwr)
+            width_ft = _parse_length_ft(lst.width)
 
             payload_ratio = (
                 (payload / required_payload_lbs)
@@ -1501,6 +1550,11 @@ class TrailerAgent:
                 if (required_gvwr_lbs is not None and gvwr_lbs is not None and required_gvwr_lbs > 0)
                 else None
             )
+            width_ratio = (
+                (width_ft / required_width_ft)
+                if (required_width_ft is not None and width_ft is not None and required_width_ft > 0)
+                else None
+            )
 
             fail_count = 0
             missing_count = 0
@@ -1512,6 +1566,7 @@ class TrailerAgent:
                 ("payload", payload_ratio, required_payload_lbs is not None),
                 ("length", length_ratio, required_length_ft is not None),
                 ("gvwr", gvwr_ratio, required_gvwr_lbs is not None),
+                ("width", width_ratio, required_width_ft is not None),
             ]
             for dim_name, ratio, required in dims:
                 if not required:
@@ -1561,6 +1616,11 @@ class TrailerAgent:
             else:
                 gvwr_spec_tier = 0 if gvwr_ratio is not None else 1
 
+            if required_width_ft is None:
+                width_spec_tier = 0
+            else:
+                width_spec_tier = 0 if width_ratio is not None else 1
+
             base_score = float(lst.score or 0.0)
             entries.append(
                 {
@@ -1578,10 +1638,12 @@ class TrailerAgent:
                     "payload_ratio": None if payload_ratio is None else round(payload_ratio, 6),
                     "length_ratio": None if length_ratio is None else round(length_ratio, 6),
                     "gvwr_ratio": None if gvwr_ratio is None else round(gvwr_ratio, 6),
+                    "width_ratio": None if width_ratio is None else round(width_ratio, 6),
                     "payload_from": payload_from,
                     "payload_spec_tier": payload_spec_tier,
                     "length_exact_rank": length_exact_rank,
                     "gvwr_spec_tier": gvwr_spec_tier,
+                    "width_spec_tier": width_spec_tier,
                 }
             )
 
@@ -1739,6 +1801,7 @@ class TrailerAgent:
         required_payload_lbs = _coerce_required_payload_lbs(args.pop("required_payload_lbs", None))
         required_length_ft = _coerce_required_length_ft(args.pop("required_length_ft", None))
         required_gvwr_lbs = _coerce_required_payload_lbs(args.pop("required_gvwr_lbs", None))
+        required_width_ft = _coerce_required_length_ft(args.pop("required_width_ft", None))
         requirements_source = "tool_args"
 
         hitch_type: Optional[str] = args.pop("hitch_type", None)
@@ -1769,17 +1832,29 @@ class TrailerAgent:
                 )
 
         # Fallback: if model omitted explicit need fields, infer from query/user history.
-        if required_payload_lbs is None or required_length_ft is None:
+        if (
+            required_payload_lbs is None
+            or required_length_ft is None
+            or required_width_ft is None
+        ):
             inferred_payload = _extract_weight_lbs_from_text(query)
             inferred_length = _extract_length_ft_from_text(query)
+            inferred_width = _extract_width_ft_from_text(query)
             if required_payload_lbs is None and inferred_payload is not None:
                 required_payload_lbs = inferred_payload
                 requirements_source = "inferred_from_query"
             if required_length_ft is None and inferred_length is not None:
                 required_length_ft = inferred_length
                 requirements_source = "inferred_from_query"
+            if required_width_ft is None and inferred_width is not None:
+                required_width_ft = inferred_width
+                requirements_source = "inferred_from_query"
 
-        if required_payload_lbs is None or required_length_ft is None:
+        if (
+            required_payload_lbs is None
+            or required_length_ft is None
+            or required_width_ft is None
+        ):
             # Search recent user messages backwards; last clear value wins.
             for msg in reversed(self._history):
                 if not isinstance(msg, dict):
@@ -1797,7 +1872,16 @@ class TrailerAgent:
                     if l is not None:
                         required_length_ft = l
                         requirements_source = "inferred_from_history"
-                if required_payload_lbs is not None and required_length_ft is not None:
+                if required_width_ft is None:
+                    w = _extract_width_ft_from_text(content)
+                    if w is not None:
+                        required_width_ft = w
+                        requirements_source = "inferred_from_history"
+                if (
+                    required_payload_lbs is not None
+                    and required_length_ft is not None
+                    and required_width_ft is not None
+                ):
                     break
 
         light_cargo_detected = _is_clear_light_cargo_text(query)
@@ -1823,6 +1907,7 @@ class TrailerAgent:
             hitch_type=hitch_type,
             required_length_ft=required_length_ft,
             required_gvwr_lbs=required_gvwr_lbs,
+            required_width_ft=required_width_ft,
         )
 
         query_for_search = query
@@ -1837,6 +1922,8 @@ class TrailerAgent:
             normalized_fragments.append(f"{round(required_length_ft, 2)} ft")
         if required_gvwr_lbs is not None and not re.search(r"\bgvwr\b", ql):
             normalized_fragments.append(f"minimum gvwr {round(required_gvwr_lbs)} lbs")
+        if required_width_ft is not None and not re.search(r"\b(width|wide)\b", ql):
+            normalized_fragments.append(f"width approx {round(required_width_ft, 2)} ft")
         if normalized_fragments:
             query_for_search = f"{query} | normalized_requirements: {' '.join(normalized_fragments)}"
 
@@ -1856,11 +1943,12 @@ class TrailerAgent:
             exclude_urls=exclude_urls,
         )
         logger.info(
-            "RERANK_INPUT | listing_count=%s | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | source=%s",
+            "RERANK_INPUT | listing_count=%s | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | width_ft=%s | source=%s",
             len(listings),
             required_payload_lbs,
             required_length_ft,
             required_gvwr_lbs,
+            required_width_ft,
             requirements_source,
         )
         reranked, rerank_debug = self._rerank_by_fit(
@@ -1868,6 +1956,7 @@ class TrailerAgent:
             required_payload_lbs=required_payload_lbs,
             required_length_ft=required_length_ft,
             required_gvwr_lbs=required_gvwr_lbs,
+            required_width_ft=required_width_ft,
             desired_count=SEARCH_MAX_RECOMMENDATIONS,
         )
         logger.info(
@@ -1932,6 +2021,7 @@ class TrailerAgent:
             "required_payload_lbs": required_payload_lbs,
             "required_length_ft": required_length_ft,
             "required_gvwr_lbs": required_gvwr_lbs,
+            "required_width_ft": required_width_ft,
             "requirements_source": requirements_source,
             "search_attempts": search_attempts,
             "rerank": rerank_debug,

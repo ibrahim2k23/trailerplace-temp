@@ -49,6 +49,23 @@ class TestAluminumPivotGuard(unittest.TestCase):
         self.assertTrue(data.get("ok"))
         self.assertEqual(extra.get("trailer_type"), "Dump")
 
+    def test_same_category_update_does_not_clear_slots(self) -> None:
+        agent = TrailerAgentLG(customer=None)
+        state = {
+            "trailer_type": "Equipment",
+            "slots_collected": {"haul_item": "tractor", "haul_weight_lbs": 2000},
+            "required_slots": ["haul_item", "haul_weight_lbs", "haul_length_ft"],
+            "optional_slots": ["hitch_type"],
+            "utility_lightweight_decided": None,
+            "heavy_duty_haul_decided": True,
+            "width_requirement_active": True,
+        }
+        msg, extra = agent._run_set_trailer_type_tool("Equipment", state)  # type: ignore[arg-type]
+        data = json.loads(msg)
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data.get("note"), "category unchanged")
+        self.assertEqual(extra, {"trailer_type": "Equipment"})
+
 
 class TestAluminumSearchInjection(unittest.TestCase):
     @patch("src.agent_lg._run_search", return_value=[])
@@ -91,6 +108,12 @@ class TestBuildPineconeFilterSubcategory(unittest.TestCase):
         assert pf is not None
         self.assertEqual(pf.get("category"), {"$eq": "Aluminum"})
         self.assertEqual(pf.get("subcategory"), {"$eq": "Utility"})
+
+    def test_width_requirement_maps_to_numeric_filter(self) -> None:
+        pf = _build_pinecone_filter(TrailerFilter(required_width_ft=8.5))
+        self.assertIsNotNone(pf)
+        assert pf is not None
+        self.assertEqual(pf.get("width_ft_num"), {"$gte": 8.5})
 
 
 if __name__ == "__main__":

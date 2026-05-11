@@ -173,6 +173,47 @@ def _infer_hitch_from_recent_user_messages(
     return None
 
 
+def _recent_user_messages_text(
+    state: SessionState,
+    *,
+    max_human_turns: int = 12,
+) -> list[str]:
+    """Recent user messages newest-first."""
+    out: list[str] = []
+    for msg in reversed(state.get("messages", [])):
+        if isinstance(msg, HumanMessage):
+            out.append(str(msg.content or ""))
+        elif isinstance(msg, dict) and msg.get("role") == "user":
+            out.append(str(msg.get("content") or ""))
+        if len(out) >= max_human_turns:
+            break
+    return out
+
+
+def _infer_dimension_requirements_from_history(
+    state: SessionState,
+    *,
+    max_human_turns: int = 12,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Infer (payload_lbs, length_ft, width_ft) from recent user messages.
+    Most recent clear value wins for each field.
+    """
+    payload: Optional[float] = None
+    length: Optional[float] = None
+    width: Optional[float] = None
+    for text in _recent_user_messages_text(state, max_human_turns=max_human_turns):
+        if payload is None:
+            payload = _extract_weight_lbs_from_text(text)
+        if length is None:
+            length = _extract_length_ft_from_text(text)
+        if width is None:
+            width = _extract_width_ft_from_text(text)
+        if payload is not None and length is not None and width is not None:
+            break
+    return payload, length, width
+
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -188,6 +229,11 @@ WEIGHT_SLOT_NAMES: frozenset[str] = frozenset({
     "haul_weight_lbs",
     "total_weight",
 })
+WIDTH_REQUIREMENT_SLOT = "item_or_trailer_width_ft"
+WIDTH_REQUIREMENT_QUESTION = (
+    "What is the approximate width of what you'll haul (or trailer width you need)?"
+)
+WIDTH_REQUIREMENT_EXCLUDED_TYPES: frozenset[str] = frozenset({"Utility", "Enclosed"})
 
 
 def _strip_weight_slots_from_spec_dict(spec: dict[str, Any]) -> dict[str, Any]:
@@ -233,6 +279,7 @@ _LAST_SEARCH_MERGE_KEYS: tuple[str, ...] = (
     "required_payload_lbs",
     "required_length_ft",
     "required_gvwr_lbs",
+    "required_width_ft",
     "condition",
     "price_min",
     "price_max",
@@ -255,6 +302,13 @@ _LIGHTWEIGHT_KEYWORDS: tuple[str, ...] = (
     "canoe", "canoes", "kayak", "kayaks", "small watercraft",
     "bicycle", "bicycles", "e-bike", "e-bikes", "ebike", "ebikes",
     "small furniture", "camping gear", "light cargo", "hobby equipment",
+)
+_HEAVY_DUTY_KEYWORDS: tuple[str, ...] = (
+    "excavator", "mini excavator", "dozer", "bulldozer", "backhoe", "trackhoe",
+    "skid steer", "telehandler", "forklift", "loader", "wheel loader",
+    "tractor", "combine", "harvester", "roller", "compactor",
+    "scissor lift", "boom lift", "lift", "heavy machinery", "heavy equipment",
+    "construction equipment", "oversize", "oversized", "wide load",
 )
 
 
@@ -287,6 +341,124 @@ def _strip_weight_slots(required: list[str], haul_text: str) -> tuple[list[str],
         return required, False
     filtered = [s for s in required if s not in WEIGHT_SLOT_NAMES]
     return filtered, True
+
+
+def _is_heavy_duty_haul_text(text: str) -> bool:
+    if not (text or "").strip():
+        return False
+    t = text.lower()
+    return any(kw in t for kw in _HEAVY_DUTY_KEYWORDS)
+
+
+def _extract_width_ft_from_text(text: str) -> Optional[float]:
+    """
+    Parse width requirements from natural text.
+    Examples: "8.5 ft wide", "102 inch width", "7' wide".
+    """
+    s = str(text or "").lower()
+    if not s.strip():
+        return None
+    m = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|in|inch|inches|\"|')\s*(?:wide|width)\b",
+        s,
+    )
+    if not m:
+        m = re.search(
+            r"\b(?:width|wide)\s*(?:is|of|around|about|at least|minimum)?\s*(\d+(?:\.\d+)?)\s*(ft|feet|foot|in|inch|inches|\"|')\b",
+            s,
+        )
+    if not m:
+        return None
+    try:
+        qty = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    unit = (m.group(2) or "").lower()
+    if unit in ("in", "inch", "inches", '"'):
+        qty = qty / 12.0
+    return qty if qty > 0 else None
+
+
+def _inject_width_requirement_slots(
+    required: list[str],
+    optional: list[str],
+    *,
+    slots_collected: Optional[dict[str, Any]] = None,
+) -> tuple[list[str], list[str], bool]:
+    """
+    Ensure width slot is required (unless already collected).
+    Returns (required, optional, injected_flag).
+    """
+    collected = slots_collected or {}
+    if WIDTH_REQUIREMENT_SLOT in collected and collected.get(WIDTH_REQUIREMENT_SLOT) not in (None, ""):
+        return required, optional, False
+    req = list(required)
+    opt = [x for x in optional if x != WIDTH_REQUIREMENT_SLOT]
+    injected = False
+    if WIDTH_REQUIREMENT_SLOT not in req:
+        # Ask width early in the required flow for heavy-duty hauls.
+        if "haul_item" in req:
+            req.insert(req.index("haul_item") + 1, WIDTH_REQUIREMENT_SLOT)
+        else:
+            req.insert(0, WIDTH_REQUIREMENT_SLOT)
+        injected = True
+    return req, opt, injected
+
+
+def _inject_width_requirement_into_spec(
+    spec: dict[str, Any],
+    *,
+    slots_collected: Optional[dict[str, Any]] = None,
+) -> tuple[dict[str, Any], bool]:
+    out = dict(spec)
+    req, opt, injected = _inject_width_requirement_slots(
+        list(out.get("required_slots") or []),
+        list(out.get("optional_slots") or []),
+        slots_collected=slots_collected,
+    )
+    out["required_slots"] = req
+    out["optional_slots"] = opt
+    q = dict(out.get("questions") or {})
+    q.setdefault(WIDTH_REQUIREMENT_SLOT, WIDTH_REQUIREMENT_QUESTION)
+    out["questions"] = q
+    return out, injected
+
+
+def _question_text_for_slot(trailer_type: str, slot: str) -> str:
+    if slot == WIDTH_REQUIREMENT_SLOT:
+        return WIDTH_REQUIREMENT_QUESTION
+    spec = get_trailer_fields_as_dict(trailer_type)
+    q = dict(spec.get("questions") or {})
+    return str(q.get(slot) or f"Could you share your {slot.replace('_', ' ')}?")
+
+
+def _enforce_single_required_question_message(
+    messages: list[Any],
+    *,
+    trailer_type: str,
+    required_slots: list[str],
+    slots_collected: dict[str, Any],
+) -> bool:
+    """
+    If required slots are still missing, force the final assistant output to exactly one question.
+    Returns True when an override was applied.
+    """
+    missing = [s for s in required_slots if s not in slots_collected]
+    if not missing:
+        return False
+    slot = missing[0]
+    question = _question_text_for_slot(trailer_type, slot).strip()
+    if not question.endswith("?"):
+        question = question.rstrip(".") + "?"
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, AIMessage):
+            tcs = getattr(msg, "tool_calls", None) or []
+            if not tcs:
+                messages[i] = AIMessage(content=question)
+                return True
+    messages.append(AIMessage(content=question))
+    return True
 
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -398,6 +570,7 @@ SEARCH_TRAILERS_TOOL = {
                 "required_payload_lbs": {"type": "number"},
                 "required_length_ft": {"type": "number"},
                 "required_gvwr_lbs": {"type": "number"},
+                "required_width_ft": {"type": "number"},
                 "more_results": {
                     "type": "boolean",
                     "description": "True when customer asks for more options from the same search.",
@@ -657,7 +830,7 @@ If the customer names a **different trailer category** than **{trailer_type}**, 
 ## SEARCH CALL RULES
 - Normalize units: tons/kg → lbs; m/cm/in → ft.
 - Set `hitch_type` when the customer clearly prefers Bumper Pull or Gooseneck.
-- Set `required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs` from collected slots when applicable.
+- Set `required_payload_lbs`, `required_length_ft`, `required_gvwr_lbs`, and `required_width_ft` from collected slots when applicable.
 - For **Aluminum**: keep **`category_subcategory` = `Aluminum`** and set **`subcategory`** to the style from **`base_category`** (Utility, Equipment, …). Put haul context in **`query`**; **`payload_need`** is weight-only for **`required_payload_lbs`**.
 - Build a rich `query` from all collected slots.
 
@@ -871,6 +1044,7 @@ class TrailerAgentLG:
             temperature=0,
         )
         self._lightweight_cache: dict[str, bool] = {}
+        self._heavy_duty_cache: dict[str, bool] = {}
         self._state: SessionState = self._initial_state()
         self._graph = self._build_graph()
 
@@ -884,6 +1058,8 @@ class TrailerAgentLG:
             slots_collected={},
             slots_asked=[],
             utility_lightweight_decided=None,
+            heavy_duty_haul_decided=None,
+            width_requirement_active=False,
             required_slots=[],
             optional_slots=[],
             search_results=[],
@@ -1023,6 +1199,64 @@ class TrailerAgentLG:
         )
         return result_bool
 
+    def _classify_heavy_duty_haul(self, haul_text: str) -> bool:
+        """
+        Mini-classifier for non-Utility/Enclosed types: True if haul likely needs width qualification.
+        Uses strict JSON with fallback keyword heuristics.
+        """
+        key = (haul_text or "").strip().lower()
+        if not key:
+            return False
+        if key in self._heavy_duty_cache:
+            return self._heavy_duty_cache[key]
+
+        fallback = _is_heavy_duty_haul_text(haul_text)
+        result_bool = fallback
+        try:
+            mini = ChatOpenAI(
+                model=OPENAI_MODEL,
+                api_key=OPENAI_API_KEY,
+                temperature=0,
+            )
+            resp = mini.invoke(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Classify whether the haul context implies heavy-duty or dimensionally large "
+                            "equipment where width should be explicitly collected before trailer search. "
+                            "Return strict JSON only: {'heavy_duty': true} or {'heavy_duty': false}. "
+                            "Always return true when text indicates heavy machinery, construction equipment, "
+                            "oversized or wide-load needs, or references to cars/car brands that can imply "
+                            "dimensionally large vehicle hauling."
+                        ),
+                    },
+                    {"role": "user", "content": haul_text},
+                ]
+            )
+            raw = str(getattr(resp, "content", "") or "").strip()
+            if raw.startswith("```"):
+                raw = raw.replace("```json", "").replace("```", "").strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                m = re.search(r"\{[^{}]*\}", raw)
+                if m:
+                    parsed = json.loads(m.group(0))
+                else:
+                    raise
+            result_bool = bool(parsed.get("heavy_duty"))
+        except Exception:
+            result_bool = fallback
+
+        self._heavy_duty_cache[key] = result_bool
+        logger.info(
+            "HEAVY_DUTY_CLASSIFIER | text=%s | result=%s",
+            key[:240],
+            result_bool,
+        )
+        return result_bool
+
     def _run_set_trailer_type_tool(
         self, raw_type: str, state: SessionState
     ) -> tuple[str, dict[str, Any]]:
@@ -1065,10 +1299,19 @@ class TrailerAgentLG:
 
         extra: dict[str, Any] = {}
         prev_tt = state.get("trailer_type")
+        if prev_tt and prev_tt == canonical:
+            # Same-category tool calls should be idempotent and must not wipe collected slots.
+            logger.info("TRAILER_TYPE_UPDATE_NOOP | trailer_type=%s", canonical)
+            return json.dumps(
+                {"ok": True, "trailer_type": canonical, "note": "category unchanged"}
+            ), {"trailer_type": canonical}
+
         extra["trailer_type"] = canonical
         extra["slots_collected"] = {}
         extra["slots_asked"] = []
         extra["utility_lightweight_decided"] = None
+        extra["heavy_duty_haul_decided"] = None
+        extra["width_requirement_active"] = False
         spec = get_trailer_fields_as_dict(canonical)
         extra["required_slots"] = spec["required_slots"]
         extra["optional_slots"] = spec["optional_slots"]
@@ -1299,17 +1542,36 @@ class TrailerAgentLG:
                 haul_item_text += " " + str(_msg.get("content") or "")
                 break
 
-        lightweight_updates: dict[str, Any] = {}
+        qualifier_updates: dict[str, Any] = {}
         if trailer_type == "Utility":
             is_light = self._classify_lightweight_haul(haul_item_text)
-            lightweight_updates["utility_lightweight_decided"] = is_light
+            qualifier_updates["utility_lightweight_decided"] = is_light
             if is_light:
                 required = [s for s in required if s not in WEIGHT_SLOT_NAMES]
-                lightweight_updates["required_slots"] = required
+                qualifier_updates["required_slots"] = required
                 logger.info("LIGHTWEIGHT_DETECTED | utility | weight slots stripped")
+        elif trailer_type and trailer_type not in WIDTH_REQUIREMENT_EXCLUDED_TYPES:
+            was_active = bool(state.get("width_requirement_active"))
+            is_heavy = self._classify_heavy_duty_haul(haul_item_text)
+            qualifier_updates["heavy_duty_haul_decided"] = is_heavy
+            if is_heavy or was_active:
+                required, optional, injected = _inject_width_requirement_slots(
+                    required,
+                    optional,
+                    slots_collected=slots,
+                )
+                qualifier_updates["required_slots"] = required
+                qualifier_updates["optional_slots"] = optional
+                qualifier_updates["width_requirement_active"] = True
+                if injected:
+                    logger.info(
+                        "WIDTH_SLOT_INJECTED | trailer_type=%s | slot=%s",
+                        trailer_type,
+                        WIDTH_REQUIREMENT_SLOT,
+                    )
 
         shadow: dict[str, Any] = dict(state)
-        shadow.update(lightweight_updates)
+        shadow.update(qualifier_updates)
         sc = dict(shadow.get("slots_collected") or {})
 
         slots_summary_lines = []
@@ -1335,6 +1597,17 @@ class TrailerAgentLG:
                 "**haul_weight_lbs** — that requirement was superseded when the haul was "
                 "classified as lightweight."
             )
+        if (
+            trailer_type
+            and trailer_type not in WIDTH_REQUIREMENT_EXCLUDED_TYPES
+            and shadow.get("width_requirement_active") is True
+        ):
+            req_display = ", ".join(required) if required else "(none)"
+            system += (
+                "\n\n## AUTHORITATIVE REQUIRED SLOTS (Heavy-duty width)\n"
+                f"The required qualification slots for search are: **{req_display}**.\n"
+                f"Ensure **{WIDTH_REQUIREMENT_SLOT}** is collected before `search_trailers`."
+            )
 
         messages = self._messages_for_specialist_llm(shadow, system)
         tools = [
@@ -1345,7 +1618,7 @@ class TrailerAgentLG:
         ]
         llm_with_tools = self._llm.bind_tools(tools)
 
-        updates: dict = {"messages": [], **lightweight_updates}
+        updates: dict = {"messages": [], **qualifier_updates}
         all_new_messages: list[BaseMessage] = []
 
         current_messages = messages
@@ -1382,6 +1655,16 @@ class TrailerAgentLG:
             current_messages = list(messages) + all_new_messages
 
         updates["messages"] = all_new_messages
+        if _enforce_single_required_question_message(
+            all_new_messages,
+            trailer_type=trailer_type,
+            required_slots=list(shadow.get("required_slots") or required),
+            slots_collected=dict(shadow.get("slots_collected") or {}),
+        ):
+            logger.info(
+                "SPECIALIST_REQUIRED_QUESTION_ENFORCED | trailer_type=%s",
+                trailer_type,
+            )
         updates["recommendation_entry_due"] = False
         return updates
 
@@ -1408,6 +1691,26 @@ class TrailerAgentLG:
                     ),
                     {},
                 )
+            if slot in opt:
+                collected_now = dict(state.get("slots_collected") or {})
+                missing_required = [s for s in req if s not in collected_now]
+                if missing_required:
+                    first_missing = missing_required[0]
+                    return (
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": "optional_before_required",
+                                "slot": slot,
+                                "missing_required": missing_required,
+                                "message": (
+                                    "Record required slots before optional slots. "
+                                    f"Ask about: {first_missing}"
+                                ),
+                            }
+                        ),
+                        {},
+                    )
             prev_sc = dict(state.get("slots_collected") or {})
             prev_sc[slot] = value
             extra["slots_collected"] = prev_sc
@@ -1423,6 +1726,21 @@ class TrailerAgentLG:
             spec = get_trailer_fields_as_dict(trailer_type)
             if trailer_type == "Utility" and state.get("utility_lightweight_decided") is True:
                 spec = _strip_weight_slots_from_spec_dict(spec)
+            if (
+                trailer_type
+                and trailer_type not in WIDTH_REQUIREMENT_EXCLUDED_TYPES
+                and state.get("width_requirement_active") is True
+            ):
+                spec, injected = _inject_width_requirement_into_spec(
+                    spec,
+                    slots_collected=state.get("slots_collected") or {},
+                )
+                if injected:
+                    logger.info(
+                        "FETCH_FIELDS_WIDTH_SLOT_INJECTED | trailer_type=%s | slot=%s",
+                        trailer_type,
+                        WIDTH_REQUIREMENT_SLOT,
+                    )
             extra["required_slots"] = spec["required_slots"]
             extra["optional_slots"] = spec["optional_slots"]
             logger.info("FETCH_FIELDS | trailer_type=%s | required=%s", trailer_type, spec["required_slots"])
@@ -1487,6 +1805,11 @@ class TrailerAgentLG:
         required_payload_lbs = _coerce_required_payload_lbs(args.get("required_payload_lbs"))
         required_length_ft = _coerce_required_length_ft(args.get("required_length_ft"))
         required_gvwr_lbs = _coerce_required_payload_lbs(args.get("required_gvwr_lbs"))
+        required_width_ft = _coerce_required_length_ft(
+            args.get("required_width_ft")
+            or args.get("item_or_trailer_width_ft")
+            or (state.get("slots_collected") or {}).get(WIDTH_REQUIREMENT_SLOT)
+        )
 
         exclude_urls: Optional[set[str]] = None
         if more_results:
@@ -1508,6 +1831,24 @@ class TrailerAgentLG:
             required_payload_lbs = _extract_weight_lbs_from_text(query)
         if required_length_ft is None:
             required_length_ft = _extract_length_ft_from_text(query)
+        if required_width_ft is None:
+            required_width_ft = _extract_width_ft_from_text(query)
+
+        if required_payload_lbs is None or required_length_ft is None or required_width_ft is None:
+            hp, hl, hw = _infer_dimension_requirements_from_history(state)
+            if required_payload_lbs is None and hp is not None:
+                required_payload_lbs = hp
+            if required_length_ft is None and hl is not None:
+                required_length_ft = hl
+            if required_width_ft is None and hw is not None:
+                required_width_ft = hw
+            if hp is not None or hl is not None or hw is not None:
+                logger.info(
+                    "SEARCH_REQUIREMENTS_INFERRED_FROM_HISTORY | payload_lbs=%s | length_ft=%s | width_ft=%s",
+                    required_payload_lbs,
+                    required_length_ft,
+                    required_width_ft,
+                )
 
         if (
             state.get("trailer_type") == "Utility"
@@ -1550,6 +1891,7 @@ class TrailerAgentLG:
             "required_payload_lbs": required_payload_lbs,
             "required_length_ft": required_length_ft,
             "required_gvwr_lbs": required_gvwr_lbs,
+            "required_width_ft": required_width_ft,
         }
 
         trailer_filter = TrailerFilter(
@@ -1563,20 +1905,32 @@ class TrailerAgentLG:
             hitch_type=hitch_type,
             required_length_ft=required_length_ft,
             required_gvwr_lbs=required_gvwr_lbs,
+            required_width_ft=required_width_ft,
         )
 
+        query_for_search = query
+        norm_frags: list[str] = []
+        ql = query.lower()
+        if required_width_ft is not None and not re.search(r"\b(width|wide)\b", ql):
+            norm_frags.append(f"width approx {round(required_width_ft, 2)} ft")
+        if required_length_ft is not None and not re.search(r"\b(ft|feet|inch|inches|in|m|meter|meters|cm|mm|yd|yard|yards)\b", ql):
+            norm_frags.append(f"length approx {round(required_length_ft, 2)} ft")
+        if norm_frags:
+            query_for_search = f"{query} | normalized_requirements: {' '.join(norm_frags)}"
+
         listings = _run_search(
-            query,
+            query_for_search,
             trailer_filter,
             top_k=SEARCH_TOP_K,
             exclude_urls=exclude_urls,
         )
         logger.info(
-            "LG_RERANK_INPUT | listing_count=%s | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | more_results=%s",
+            "LG_RERANK_INPUT | listing_count=%s | payload_lbs=%s | length_ft=%s | gvwr_lbs=%s | width_ft=%s | more_results=%s",
             len(listings),
             required_payload_lbs,
             required_length_ft,
             required_gvwr_lbs,
+            required_width_ft,
             more_results,
         )
 
@@ -1589,6 +1943,7 @@ class TrailerAgentLG:
             required_payload_lbs=required_payload_lbs,
             required_length_ft=required_length_ft,
             required_gvwr_lbs=required_gvwr_lbs,
+            required_width_ft=required_width_ft,
             desired_count=SEARCH_MAX_RECOMMENDATIONS,
         )
         category_for_make = cat_sub or state.get("trailer_type")

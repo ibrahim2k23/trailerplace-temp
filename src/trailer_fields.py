@@ -212,6 +212,10 @@ _DEFAULT_SPEC = TrailerFieldSpec(
     },
 )
 
+# Runtime note:
+# The LangGraph specialist may inject an additional required slot for width
+# (item_or_trailer_width_ft) when heavy-duty/large-dimension hauling is detected.
+
 
 # ---------------------------------------------------------------------------
 # Public API

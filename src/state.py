@@ -37,6 +37,10 @@ class SessionState(TypedDict):
     # Utility-only: True = lightweight haul — weight slots stripped; silent payload 1000 lbs.
     # None = not Utility or not yet classified this session.
     utility_lightweight_decided: Optional[bool]
+    # Non-Utility/Enclosed: True when heavy-duty/large-dimension haul is detected this session.
+    heavy_duty_haul_decided: Optional[bool]
+    # When True, specialist must collect width slot before search for eligible categories.
+    width_requirement_active: bool
 
     # ── Search & recommendations ──────────────────────────────────────────────
     search_results: list[dict[str, Any]]
