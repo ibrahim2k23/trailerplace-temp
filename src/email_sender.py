@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 import smtplib
 import ssl
 from abc import ABC, abstractmethod
@@ -22,6 +23,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 TICKET_EMAIL_SUBJECT = "ticket notification"
+
+_faq_email_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="faq_email")
 
 
 @runtime_checkable
@@ -117,3 +120,59 @@ def send_ticket_notification(
     sender = get_email_sender()
     sender.send_plain_text(to_addr, TICKET_EMAIL_SUBJECT, body)
     logger.info("Ticket notification email sent to configured EMAIL_TO")
+
+
+def send_faq_email_sync(
+    *,
+    full_name: str,
+    email: Optional[str],
+    phone: str,
+    subject: str,
+    summary_line: str,
+) -> None:
+    """Send FAQ / non-sales inquiry email to EMAIL_TO (blocking)."""
+    to_addr = (os.getenv("EMAIL_TO") or "").strip()
+    if not to_addr:
+        raise RuntimeError("EMAIL_TO is not set in the environment")
+    subj = (subject or "").strip() or "FAQ inquiry"
+    email_line = (email or "").strip() or "Not provided"
+    summary = (summary_line or "").strip() or "(no summary)"
+    body = (
+        f"Name: {full_name}\n"
+        f"Email: {email_line}\n"
+        f"Phone Number: {phone}\n"
+        f"\n{summary}\n"
+    )
+    sender = get_email_sender()
+    sender.send_plain_text(to_addr, subj, body)
+    logger.info("FAQ email sent to configured EMAIL_TO subject=%r", subj)
+
+
+def enqueue_faq_email_notification(
+    *,
+    full_name: str,
+    email: Optional[str],
+    phone: str,
+    subject: str,
+    summary_line: str,
+) -> None:
+    """Queue FAQ email send in a background thread (non-blocking for chat)."""
+
+    def _run() -> None:
+        try:
+            send_faq_email_sync(
+                full_name=full_name,
+                email=email,
+                phone=phone,
+                subject=subject,
+                summary_line=summary_line,
+            )
+        except Exception:
+            logger.exception("Background FAQ email send failed")
+
+    _faq_email_pool.submit(_run)
+    logger.info(
+        "FAQ_EMAIL_ENQUEUED | subject=%r | summary_len=%s",
+        (subject or "")[:120],
+        len(summary_line or ""),
+    )

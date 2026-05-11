@@ -24,6 +24,7 @@ Session state key: `trailer_type`
 
 Tools exposed to the LLM
 ─────────────────────────
+  faq_tool                 – Master / recommendation: scripted FAQ + async email.
   set_trailer_type         – Master router saves the resolved category.
   fetch_trailer_fields     – Specialist fetches required/optional slots.
   record_slot_answer       – Specialist records one qualification slot answer.
@@ -43,7 +44,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
-from src.email_sender import send_ticket_notification
+from src.email_sender import enqueue_faq_email_notification, send_ticket_notification
 from src.models import CustomerContact, TrailerFilter, TrailerListing
 from src.normalizer import (
     normalize_category,
@@ -463,23 +464,137 @@ _SITE_URL = (os.getenv("TRAILERPLACE_WEBSITE", "https://www.trailerplace.com") o
 if not _SITE_URL.startswith("http"):
     _SITE_URL = "https://www.trailerplace.com"
 
+# FAQ tool: enum + canonical reply_text templates (used when model reply is empty/off-script).
+FAQ_TOOL_TYPES: tuple[str, ...] = (
+    "contact_or_human",
+    "financing",
+    "trade_in",
+    "service_parts",
+    "store_info",
+)
+FAQ_TYPES_SET: frozenset[str] = frozenset(FAQ_TOOL_TYPES)
+FAQ_CANONICAL_REPLY_TEXT: dict[str, str] = {
+    "contact_or_human": (
+        "You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!"
+    ),
+    "financing": (
+        "We offer financing — call 979-532-1486 to speak with our finance team. "
+        "I can also keep helping you narrow down the right trailer."
+    ),
+    "trade_in": "Our sales team handles trade-in appraisals — call 979-532-1486.",
+    "service_parts": "Our service and parts team can help — reach them at 979-532-1486.",
+    "store_info": (
+        f"We're located in Wharton, TX. Give us a call at 979-532-1486 or visit {_SITE_URL}. "
+        "We offer financing and delivery."
+    ),
+}
+FAQ_CANONICAL_EMAIL_SUMMARY: dict[str, str] = {
+    "contact_or_human": "Customer asked how to contact a representative.",
+    "financing": "Customer asked about financing options.",
+    "trade_in": "Customer asked about trade-in options.",
+    "service_parts": "Customer asked about service or parts.",
+    "store_info": "Customer asked for store information (location/hours/website).",
+}
+
+FAQ_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "faq_tool",
+        "description": (
+            "Use for non-sales questions: contact/human rep, financing, trade-in, service/parts, "
+            "or store info (location/hours/website). Set reply_text to the customer-facing text "
+            "you intend to show (ideally the canonical script for the chosen faq_type). "
+            "You MUST call this tool before answering any FAQ question — do not answer FAQ in plain text only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "faq_type": {
+                    "type": "string",
+                    "enum": list(FAQ_TOOL_TYPES),
+                    "description": "Which FAQ category applies.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short email subject for the internal notification.",
+                },
+                "user_summary": {
+                    "type": "string",
+                    "description": "One-line summary of what the customer asked.",
+                },
+                "reply_text": {
+                    "type": "string",
+                    "description": "Customer-facing reply you plan to send (non-empty).",
+                },
+            },
+            "required": ["faq_type", "title", "user_summary", "reply_text"],
+        },
+    },
+}
+
+
+def _normalize_ws(s: str) -> str:
+    return " ".join((s or "").split())
+
+
+def _faq_reply_matches_canonical(faq_type: str, reply_text: str) -> bool:
+    exp = FAQ_CANONICAL_REPLY_TEXT.get(faq_type)
+    if not exp:
+        return False
+    return _normalize_ws(exp) == _normalize_ws(reply_text)
+
+
+def _effective_faq_reply_text(faq_type: str, reply_text: str) -> str:
+    """Prefer canonical script when model reply is missing or does not match canonical."""
+    rt = (reply_text or "").strip()
+    if rt and _faq_reply_matches_canonical(faq_type, rt):
+        return rt
+    return (FAQ_CANONICAL_REPLY_TEXT.get(faq_type) or rt).strip()
+
+
+def _effective_faq_email_summary(faq_type: str, user_summary: str) -> str:
+    """Use deterministic one-line email summaries to avoid noisy raw question echoes."""
+    fallback = (FAQ_CANONICAL_EMAIL_SUMMARY.get(faq_type) or "").strip()
+    raw = (user_summary or "").strip()
+    return fallback or raw
+
+
+def _patch_final_assistant_with_faq_reply_text(
+    messages: list[Any], reply_text: str
+) -> None:
+    """Backward-compatible alias for tests; prefer _ensure_faq_assistant_reply."""
+    _ensure_faq_assistant_reply(messages, reply_text)
+
+
+def _ensure_faq_assistant_reply(messages: list[Any], reply_text: str) -> None:
+    """
+    Ensure the user sees reply_text: patch the last plain AIMessage, or append one if missing.
+    """
+    text = (reply_text or "").strip()
+    if not text:
+        return
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, AIMessage):
+            tcs = getattr(msg, "tool_calls", None) or []
+            if not tcs:
+                messages[i] = AIMessage(content=text)
+                return
+    messages.append(AIMessage(content=text))
+    logger.info("FAQ_FALLBACK_REPLY_USED | reason=no_plain_assistant_message_appended")
+
+
 MASTER_ROUTER_PROMPT = f"""You are a friendly trailer sales assistant for TrailerPlace, Wharton TX (979-532-1486).
 
 ## YOUR ROLE
 You are the entry point of this conversation. Your sole job is to:
 1. Greet the customer warmly (use their first name if known).
-2. Handle non-sales intents (financing, trade-in, service, store info) by directing them to 979-532-1486.
-3. Identify the trailer **category** the customer needs, then call `set_trailer_type` immediately.
+2. For **contact / human rep / financing / trade-in / service or parts / store info**, you **must** call **`faq_tool` first** (before any assistant text answering that FAQ). Use a clear `title`, one-line `user_summary`, and `reply_text`; the customer will see the canonical script for that FAQ type if needed.
+3. Identify the trailer **category** the customer needs, then call `set_trailer_type` immediately (sales flow).
 
 ## AVAILABLE TOOLS
+- **faq_tool**: Non-sales FAQ only. Enum `faq_type`: contact_or_human, financing, trade_in, service_parts, store_info.
 - **set_trailer_type**: Call this as soon as you know the trailer category. This hands the customer off to the category specialist. Do NOT ask qualification questions yourself — the specialist handles that.
-
-## INTENT ROUTING (non-sales)
-- financing    → "Let me connect you with our finance team — call 979-532-1486. I can also help narrow down the trailer type first if that's helpful."
-- trade_in     → "Our sales team handles trade-in appraisals — give us a call at 979-532-1486."
-- service/parts → "Our service and parts team can help — reach them at 979-532-1486."
-- store_info   → "We're in Wharton, TX. Call us at 979-532-1486. We offer financing and delivery."
-- human_handoff → "You can reach our team at 979-532-1486. Happy to keep helping here too."
 
 ## CATEGORY IDENTIFICATION RULES
 Map what the customer says to one of these categories:
@@ -563,6 +678,7 @@ Use **log_product_interest** when the customer clearly picks a specific unit aft
 - Never ask the customer to restate constraints already captured below.
 
 ## AVAILABLE TOOLS
+- **faq_tool**: Non-sales FAQ (contact/human, financing, trade-in, service/parts, store info). **Call this tool before answering** those questions in plain text.
 - **log_product_interest**: Call when the customer clearly expresses interest in a specific unit. Use the exact full listing title from the results.
 - **search_trailers**: For more inventory (`more_results=true`) or updated constraints as above.
 - **set_trailer_type**: When the customer switches to a **different trailer category** — then the specialist will re-qualify on the next turn.
@@ -585,19 +701,8 @@ End with exactly ONE warm closing question (vary the wording each turn).
 - After log_product_interest succeeds, direct the customer to: {_SITE_URL}
 - Never claim a human has already contacted them — only say "your query has been logged, the team will follow up soon."
 
-## NON-SALES / FAQ INTENTS
-If the customer asks about contact info, phone number, address, location, hours, financing,
-trade-in, or service — answer immediately with the scripted response below, then offer to
-continue helping with their trailer search.
-
-- phone / contact / how to reach you → "You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!"
-- address / location / where are you → "We're located in Wharton, TX. Give us a call at 979-532-1486 or visit {_SITE_URL}."
-- financing / payment plans → "We offer financing — call 979-532-1486 to speak with our finance team. I can also keep helping you narrow down the right trailer."
-- trade-in → "Our sales team handles trade-in appraisals — call 979-532-1486."
-- service / parts / repairs → "Our service and parts team can help — reach them at 979-532-1486."
-- website / online inventory → "You can browse our inventory at {_SITE_URL} or call us at 979-532-1486."
-
-Never give a vague or evasive answer to these — always include the phone number 979-532-1486.
+## FAQ (non-sales)
+For contact/human rep, financing, trade-in, service/parts, or store info, you **must** call **`faq_tool` first** before answering in text. Pass `title`, `user_summary`, and `reply_text`. After the tool succeeds, your visible reply must match the tool result (canonical wording is applied when needed). Then offer to keep helping with trailers if relevant.
 """
 
 
@@ -832,6 +937,8 @@ class TrailerAgentLG:
 
     @staticmethod
     def _route_after_master(state: SessionState) -> str:
+        if state.get("next_node") == END:
+            return END
         tt = state.get("trailer_type")
         if not tt:
             return END
@@ -985,10 +1092,96 @@ class TrailerAgentLG:
             {"ok": True, "trailer_type": canonical, "note": "category updated"}
         ), extra
 
+    def _execute_faq_tool(
+        self, args: dict[str, Any], state: SessionState
+    ) -> tuple[str, dict[str, Any]]:
+        """Validate faq_tool args (structural), enqueue async FAQ email, return JSON for the tool message."""
+        extra: dict[str, Any] = {}
+        faq_type = str(args.get("faq_type") or "").strip()
+        title = str(args.get("title") or "").strip()
+        user_summary = str(args.get("user_summary") or "").strip()
+        reply_text = str(args.get("reply_text") or "").strip()
+
+        _max_title = 200
+        _max_summary = 2000
+        _max_reply = 12000
+
+        logger.info(
+            "FAQ_TOOL_ATTEMPT | faq_type=%s | title_len=%s | reply_len=%s",
+            faq_type or "(none)",
+            len(title),
+            len(reply_text),
+        )
+
+        def _reject(reason: str) -> tuple[str, dict[str, Any]]:
+            logger.info("FAQ_TOOL_REJECTED | reason=%s | faq_type=%s", reason, faq_type or "(none)")
+            return json.dumps({"ok": False, "error": reason}), extra
+
+        if faq_type not in FAQ_TYPES_SET:
+            logger.info(
+                "FAQ_TOOL_REJECTED | reason=invalid_faq_type | faq_type=%s",
+                faq_type or "(none)",
+            )
+            return (
+                json.dumps({"ok": False, "error": "invalid_faq_type", "faq_type": faq_type}),
+                extra,
+            )
+        if not title or len(title) > _max_title:
+            return _reject("invalid_title")
+        if not user_summary or len(user_summary) > _max_summary:
+            return _reject("invalid_user_summary")
+        if not reply_text or len(reply_text) > _max_reply:
+            return _reject("invalid_reply_text")
+
+        effective = _effective_faq_reply_text(faq_type, reply_text)
+        if not effective:
+            return _reject("invalid_effective_reply")
+
+        if not _faq_reply_matches_canonical(faq_type, reply_text):
+            logger.info(
+                "FAQ_FALLBACK_REPLY_USED | reason=non_canonical_model_reply | faq_type=%s",
+                faq_type,
+            )
+        effective_summary = _effective_faq_email_summary(faq_type, user_summary)
+        if effective_summary != user_summary:
+            logger.info(
+                "FAQ_SUMMARY_NORMALIZED | faq_type=%s | used_deterministic_summary=true",
+                faq_type,
+            )
+
+        full_name = (
+            (self._customer.full_name if self._customer else None)
+            or state.get("customer_full_name")
+            or "Unknown"
+        )
+        email = (self._customer.email if self._customer else None) or state.get("customer_email")
+        phone = (
+            (self._customer.phone if self._customer else None)
+            or state.get("customer_phone")
+            or "Not provided"
+        )
+
+        enqueue_faq_email_notification(
+            full_name=str(full_name),
+            email=str(email) if email else None,
+            phone=str(phone),
+            subject=title,
+            summary_line=f"[{faq_type}] {effective_summary}",
+        )
+        logger.info("FAQ_TOOL_SUCCESS_ENQUEUED | faq_type=%s | title=%s", faq_type, title[:120])
+        return (
+            json.dumps({"ok": True, "effective_reply_text": effective}),
+            extra,
+        )
+
     # ── Node: master_router_node ──────────────────────────────────────────────
 
     def _master_router_node(self, state: SessionState) -> dict:
         """Greet, route intent, identify trailer category."""
+        logger.info(
+            "LANGGRAPH_NODE | node=master_router_node | trailer_type=%s",
+            state.get("trailer_type"),
+        )
         system = MASTER_ROUTER_PROMPT
         if self._customer:
             first_name = (self._customer.full_name or "").split()[0]
@@ -1023,76 +1216,61 @@ class TrailerAgentLG:
                 )
 
         messages = self._messages_for_llm(state, system)
-        tools = [SET_TRAILER_TYPE_TOOL]
-
+        tools = [FAQ_TOOL, SET_TRAILER_TYPE_TOOL]
         llm_with_tools = self._llm.bind_tools(tools)
-        response = llm_with_tools.invoke(messages)
 
-        updates: dict = {"messages": [response]}
+        updates: dict[str, Any] = {}
+        all_new_messages: list[BaseMessage] = []
+        current_messages = messages
+        shadow: dict[str, Any] = dict(state)
+        faq_reply_override: Optional[str] = None
 
-        prev_tt = state.get("trailer_type")
+        for _ in range(4):
+            response = llm_with_tools.invoke(current_messages)
+            all_new_messages.append(response)
 
-        # Handle tool calls
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_messages = []
+            if not (hasattr(response, "tool_calls") and response.tool_calls):
+                break
+
+            tool_messages: list[ToolMessage] = []
             for tc in response.tool_calls:
-                fn = tc["name"]
-                args = tc["args"]
-                if fn == "set_trailer_type":
+                fn = str(tc.get("name", "")).strip()
+                args = dict(tc.get("args") or {})
+                tid = str(tc.get("id", "") or "")
+
+                if fn == "faq_tool":
+                    body, extra = self._execute_faq_tool(args, shadow)
+                    updates.update(extra)
+                    shadow.update(extra)
+                    try:
+                        data = json.loads(body)
+                        if data.get("ok"):
+                            eff = str(data.get("effective_reply_text") or "").strip()
+                            faq_reply_override = eff or str(args.get("reply_text") or "").strip()
+                    except json.JSONDecodeError:
+                        pass
+                    updates["next_node"] = END
+                    tool_messages.append(ToolMessage(content=body, tool_call_id=tid))
+                elif fn == "set_trailer_type":
                     raw_type = str(args.get("trailer_type", "")).strip()
-                    canonical, err = _validate_set_trailer_type_arg(raw_type)
-                    if err:
-                        logger.info(
-                            "TRAILER_TYPE_REJECTED | master | raw=%s | reason=%s",
-                            raw_type,
-                            err.get("error"),
-                        )
-                        tool_messages.append(
-                            ToolMessage(
-                                content=json.dumps(err, ensure_ascii=True),
-                                tool_call_id=tc["id"],
-                            )
-                        )
-                        continue
-                    if canonical is None:
-                        continue
-                    updates["trailer_type"] = canonical
-                    # Pre-populate slot lists from trailer_fields
-                    spec = get_trailer_fields_as_dict(canonical)
-                    updates["required_slots"] = spec["required_slots"]
-                    updates["optional_slots"] = spec["optional_slots"]
-                    # Category pivot: drop stale search results from a previous category
-                    if prev_tt and prev_tt != canonical:
-                        updates["search_results"] = []
-                        updates["search_results_for_category"] = None
-                        updates["slots_collected"] = {}
-                        updates["slots_asked"] = []
-                        updates["utility_lightweight_decided"] = None
-                        updates["last_search_args"] = None
-                        updates["is_interested"] = False
-                        updates["interested_item"] = None
-                        updates["recommendation_entry_due"] = False
-                        logger.info(
-                            "TRAILER_TYPE_PIVOT_MASTER | from=%s to=%s | cleared_search",
-                            prev_tt,
-                            canonical,
-                        )
-                    logger.info("TRAILER_TYPE_SET | trailer_type=%s", canonical)
-                    tool_messages.append(
-                        ToolMessage(
-                            content=json.dumps({"ok": True, "trailer_type": canonical}),
-                            tool_call_id=tc["id"],
-                        )
-                    )
+                    result_json, extra = self._run_set_trailer_type_tool(raw_type, shadow)
+                    updates.update(extra)
+                    shadow.update(extra)
+                    tool_messages.append(ToolMessage(content=result_json, tool_call_id=tid))
                 else:
                     tool_messages.append(
                         ToolMessage(
                             content=json.dumps({"ok": False, "error": f"unknown_tool:{fn}"}),
-                            tool_call_id=tc["id"],
+                            tool_call_id=tid,
                         )
                     )
-            updates["messages"] = updates["messages"] + tool_messages
 
+            all_new_messages.extend(tool_messages)
+            current_messages = list(messages) + all_new_messages
+
+        updates["messages"] = all_new_messages
+        if faq_reply_override:
+            _ensure_faq_assistant_reply(all_new_messages, faq_reply_override)
         return updates
 
     # ── Node: specialist_node ─────────────────────────────────────────────────
@@ -1100,6 +1278,10 @@ class TrailerAgentLG:
     def _specialist_node(self, state: SessionState) -> dict:
         """Collect qualification slots then trigger search."""
         trailer_type = state.get("trailer_type", "Unknown")
+        logger.info(
+            "LANGGRAPH_NODE | node=specialist_node | trailer_type=%s",
+            trailer_type,
+        )
         slots = state.get("slots_collected", {}) or {}
         required = list(state.get("required_slots", []))
         optional = state.get("optional_slots", [])
@@ -1455,6 +1637,11 @@ class TrailerAgentLG:
     def _recommendation_node(self, state: SessionState) -> dict:
         """Present search results, handle interest logging."""
         search_results = state.get("search_results", [])
+        logger.info(
+            "LANGGRAPH_NODE | node=recommendation_node | trailer_type=%s | search_result_count=%s",
+            state.get("trailer_type"),
+            len(search_results) if isinstance(search_results, list) else 0,
+        )
         results_json = json.dumps(search_results, indent=2) if search_results else "[]"
         prev_filters_json = json.dumps(
             state.get("last_search_args") or {}, indent=2, ensure_ascii=True
@@ -1472,6 +1659,7 @@ class TrailerAgentLG:
 
         messages = self._messages_for_llm(state, system)
         tools = [
+            FAQ_TOOL,
             LOG_INTEREST_TOOL,
             SEARCH_TRAILERS_TOOL,
             SET_TRAILER_TYPE_TOOL,
@@ -1484,6 +1672,7 @@ class TrailerAgentLG:
         all_new_messages: list[BaseMessage] = []
         current_messages = messages
         max_iterations = 4
+        faq_reply_override: Optional[str] = None
 
         for _ in range(max_iterations):
             response = llm_with_tools.invoke(current_messages)
@@ -1496,7 +1685,19 @@ class TrailerAgentLG:
             for tc in response.tool_calls:
                 fn = tc["name"]
                 args = tc.get("args") or {}
-                if fn == "log_product_interest":
+                if fn == "faq_tool":
+                    body, extra = self._execute_faq_tool(args, shadow)
+                    updates.update(extra)
+                    shadow.update(extra)
+                    try:
+                        data = json.loads(body)
+                        if data.get("ok"):
+                            eff = str(data.get("effective_reply_text") or "").strip()
+                            faq_reply_override = eff or str(args.get("reply_text") or "").strip()
+                    except json.JSONDecodeError:
+                        pass
+                    tool_messages.append(ToolMessage(content=body, tool_call_id=tc["id"]))
+                elif fn == "log_product_interest":
                     item_name = str(args.get("item_name", "")).strip()
                     result = self._execute_log_interest(
                         item_name, session_id=state.get("session_id")
@@ -1505,6 +1706,7 @@ class TrailerAgentLG:
                     updates["interested_item"] = item_name
                     tool_messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
                 elif fn == "search_trailers":
+                    faq_reply_override = None
                     result, extra = self._execute_search_tool(args, shadow, {})
                     shadow.update(extra)
                     updates.update(extra)
@@ -1535,6 +1737,8 @@ class TrailerAgentLG:
             current_messages = list(messages) + all_new_messages
 
         updates["messages"] = all_new_messages
+        if faq_reply_override:
+            _ensure_faq_assistant_reply(all_new_messages, faq_reply_override)
         updates["recommendation_entry_due"] = False
         return updates
 
@@ -1647,20 +1851,37 @@ class TrailerAgentLG:
         # Fresh HTTP/UI payload each turn — do not leak prior search_results to the API.
         self._state["api_listings_this_turn"] = []
         self._state["recommendation_entry_due"] = False
+        self._state["next_node"] = None
 
         # Run the graph; it returns the final state
         result_state = self._graph.invoke(self._state)
         self._state = result_state
 
-        # Extract the last assistant text message
+        # Extract the last non-empty plain assistant text message (skip tool-call-only AIMessages)
         reply = ""
         for msg in reversed(result_state.get("messages", [])):
-            if isinstance(msg, AIMessage) and msg.content:
-                reply = str(msg.content)
-                break
+            if isinstance(msg, AIMessage):
+                if getattr(msg, "tool_calls", None):
+                    continue
+                c = str(msg.content or "").strip()
+                if c:
+                    reply = c
+                    break
             if isinstance(msg, dict) and msg.get("role") == "assistant":
-                reply = str(msg.get("content", ""))
-                break
+                c = str(msg.get("content", "") or "").strip()
+                if c:
+                    reply = c
+                    break
+
+        if not reply:
+            logger.warning(
+                "EMPTY_CHAT_REPLY_FALLBACK | session_id=%s",
+                result_state.get("session_id"),
+            )
+            reply = (
+                "Sorry—I didn't catch that. Tell me what trailer you're looking for, "
+                "or call TrailerPlace at 979-532-1486."
+            )
 
         return reply, list(result_state.get("api_listings_this_turn") or [])
 

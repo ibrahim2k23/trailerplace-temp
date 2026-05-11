@@ -132,6 +132,15 @@ class TestAgentLgApiListings(unittest.TestCase):
         }
         self.assertEqual(TrailerAgentLG._route_after_master(base), END)
 
+    def test_route_after_master_ends_when_next_node_forced_end(self) -> None:
+        base: dict = {
+            "next_node": END,
+            "trailer_type": "Livestock",
+            "search_results": [{"title": "A"}],
+            "search_results_for_category": "Livestock",
+        }
+        self.assertEqual(TrailerAgentLG._route_after_master(base), END)
+
     def test_route_after_specialist_enters_recommendation_with_results_without_flag(
         self,
     ) -> None:
