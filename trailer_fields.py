@@ -108,12 +108,17 @@ _SPECS: dict[str, TrailerFieldSpec] = {
     "Livestock": TrailerFieldSpec(
         category="Livestock",
         required=["trailer_length_ft"],
-        optional=["gate_preferences"],
+        optional=["trailer_width_ft", "hitch_type", "gate_preferences"],
         questions={
             "trailer_length_ft": "What length trailer are you looking for?",
+            "trailer_width_ft":  "Do you have a width preference?",
+            "hitch_type":        "Do you prefer a bumper pull or gooseneck hitch?",
             "gate_preferences":  "Any preference on gate style — butterfly, swing, or slant load?",
         },
-        notes="Do NOT ask about animal type or count. Only ask about trailer length.",
+        notes=(
+            "Do NOT ask about animal type or count. Only trailer length is required. "
+            "Capture width or hitch type when the user mentions them."
+        ),
     ),
 
     "Roll Off": TrailerFieldSpec(

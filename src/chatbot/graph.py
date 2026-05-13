@@ -75,11 +75,49 @@ class MindDecision(BaseModel):
     faq_summary: Optional[str] = None
 
 
+class ExtractedSlot(BaseModel):
+    slot: str = Field(description="Canonical slot key from the allowed slot list.")
+    value: str = Field(description="Concise normalized slot value, for example '12 ft' or 'gooseneck'.")
+    confidence: float = Field(default=1.0, description="Confidence from 0 to 1.")
+
+
+class SlotExtractionDecision(BaseModel):
+    trailer_category: Optional[str] = None
+    extracted_slots: list[ExtractedSlot] = Field(
+        default_factory=list,
+        description="Preferred output: one item per extracted slot value.",
+    )
+    slots_collected_update: Any = Field(
+        default_factory=dict,
+        description=(
+            "Fallback output: canonical slot keys with extracted values from the latest user message. "
+            "Prefer extracted_slots."
+        ),
+    )
+    confidence_by_slot: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-slot confidence from 0 to 1 for extracted slot values.",
+    )
+    notes: str = Field(
+        default="",
+        description="Optional debug note. Do not store slot values here.",
+    )
+
+
 @lru_cache(maxsize=1)
 def _mind_llm():
     model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         MindDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _slot_extractor_llm():
+    model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        SlotExtractionDecision,
         method="function_calling",
     )
 
@@ -217,6 +255,87 @@ def _required_slot_state(category: str, slots: dict[str, Any]) -> tuple[list[str
     return missing, invalid, questions
 
 
+def _allowed_slots_for_category(category: str | None) -> list[str]:
+    if not category:
+        return []
+    spec = get_trailer_fields_as_dict(category)
+    required_slots = list(spec.get("required_slots") or [])
+    optional_slots = list(spec.get("optional_slots") or [])
+    return list(dict.fromkeys(required_slots + optional_slots))
+
+
+def _slot_schema_for_category(category: str | None) -> dict[str, Any]:
+    if not category:
+        return {}
+    spec = get_trailer_fields_as_dict(category)
+    questions = dict(spec.get("questions") or {})
+    return {
+        "category": spec.get("category"),
+        "required_slots": list(spec.get("required_slots") or []),
+        "optional_slots": list(spec.get("optional_slots") or []),
+        "questions_by_slot": questions,
+        "notes": spec.get("notes") or "",
+    }
+
+
+def _slot_update_dict(raw_update: Any, raw_items: Any) -> tuple[dict[str, Any], dict[str, float]]:
+    updates: dict[str, Any] = {}
+    confidence: dict[str, float] = {}
+
+    if isinstance(raw_update, dict):
+        updates.update({k: v for k, v in raw_update.items() if v not in (None, "")})
+    elif isinstance(raw_update, list):
+        raw_items = list(raw_items or []) + raw_update
+
+    for item in raw_items or []:
+        if not isinstance(item, dict):
+            continue
+        slot = str(item.get("slot") or "").strip()
+        value = item.get("value")
+        if slot and value not in (None, ""):
+            updates[slot] = value
+        if slot and item.get("confidence") is not None:
+            confidence[slot] = item.get("confidence")
+
+    return updates, confidence
+
+
+def _repair_slot_extraction_from_notes(
+    *,
+    notes: str,
+    allowed_slots: list[str],
+    extracted_category: str | None,
+) -> SlotExtractionDecision:
+    if not notes.strip():
+        return SlotExtractionDecision()
+    try:
+        repaired = _slot_extractor_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You are correcting a prior slot extraction output.\n"
+                        "Convert any slot/value hints from notes into extracted_slots.\n"
+                        "Return structured output only.\n"
+                        "Do not place extracted values into notes."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        "Current known context:\n"
+                        f"{_safe_json({'allowed_slots': allowed_slots, 'extracted_category': extracted_category})}\n\n"
+                        "Prior extraction notes:\n"
+                        f"{notes}\n\n"
+                        "Return corrected structured output with extracted_slots filled when possible."
+                    )
+                ),
+            ]
+        )
+        return repaired
+    except Exception:
+        logger.exception("Slot extraction repair LLM failed")
+        return SlotExtractionDecision()
+
+
 def _mind_node(state: ChatbotState) -> ChatbotState:
     resolution = resolve_category_from_text(state.get("user_message") or "")
     if resolution.needs_clarification and not state.get("trailer_category"):
@@ -278,6 +397,156 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             decision.trailer_category = deterministic_hint
 
     return {**state, "mind_decision": _model_dump(decision)}
+
+
+def _extract_slots_node(state: ChatbotState) -> ChatbotState:
+    decision = dict(state.get("mind_decision") or {})
+    resolution = resolve_category_from_text(state.get("user_message") or "")
+    current_category = state.get("trailer_category")
+    extractor_category_hint = decision.get("trailer_category") or resolution.category or current_category
+    allowed_slots = _allowed_slots_for_category(extractor_category_hint)
+    slot_schema = _slot_schema_for_category(extractor_category_hint)
+    context = {
+        "current_category": current_category,
+        "mind_proposed_category": decision.get("trailer_category"),
+        "detected_category_hint": resolution.category,
+        "allowed_slots_for_hint_category": allowed_slots,
+        "field_schema_for_hint_category": slot_schema,
+        "existing_slots_collected": state.get("slots_collected") or {},
+        "awaiting_slot": state.get("awaiting_slot"),
+        "recent_messages": (state.get("messages") or [])[-8:],
+        "latest_user_message": state.get("user_message") or "",
+    }
+    extraction = SlotExtractionDecision()
+    try:
+        extraction = _slot_extractor_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You are a slot extraction agent for Trailer Place qualification.\n\n"
+                        "Task:\n"
+                        "Extract trailer category and slot values from the latest user message using conversation context.\n"
+                        "Return structured output only.\n\n"
+                        "Rules:\n"
+                        "1) Extract only values explicitly stated or strongly implied by the user. Do not guess.\n"
+                        "2) Use canonical category names and slot keys from provided schema context.\n"
+                        "3) Prefer the latest user statement if it conflicts with prior slot values.\n"
+                        "4) If user message does not provide a slot value, omit that slot.\n"
+                        "5) If user changes category explicitly, return the new category.\n"
+                        "6) Never generate follow-up questions or assistant prose.\n"
+                        "7) Keep values concise and normalized text (e.g., '12 ft', 'gooseneck').\n\n"
+                        "Critical output rules:\n"
+                        "- Put extracted values in extracted_slots as explicit {slot, value, confidence} items.\n"
+                        "- Also mirror the same values in slots_collected_update when possible.\n"
+                        "- Do not put slot:value pairs in notes.\n"
+                        "- Inspect each allowed slot's question text and decide whether the latest user message answers it.\n"
+                        "- If you detect trailer length, use trailer_length_ft when it is an allowed slot.\n\n"
+                        "Examples:\n"
+                        "- If latest_user_message is 'I am looking for a 12 feet livestock trailer' and "
+                        "trailer_length_ft is allowed, return extracted_slots=[{\"slot\":\"trailer_length_ft\",\"value\":\"12 ft\",\"confidence\":0.99}].\n"
+                        "- If latest_user_message is 'I need a 12 ft livestock trailer with gooseneck' and "
+                        "trailer_length_ft and hitch_type are allowed, return "
+                        "extracted_slots=[{\"slot\":\"trailer_length_ft\",\"value\":\"12 ft\",\"confidence\":0.99},{\"slot\":\"hitch_type\",\"value\":\"gooseneck\",\"confidence\":0.99}].\n"
+                        "- If latest_user_message is 'at least 5 feet wide' and trailer_width_ft is allowed, "
+                        "return extracted_slots=[{\"slot\":\"trailer_width_ft\",\"value\":\"5 ft\",\"confidence\":0.95}].\n\n"
+                        "Input context includes:\n"
+                        "- current_category\n"
+                        "- allowed required/optional slots for that category (from trailer_fields)\n"
+                        "- field_schema_for_hint_category with required slots, optional slots, questions, and notes\n"
+                        "- existing slots_collected\n"
+                        "- awaiting_slot\n"
+                        "- recent_messages (last 8 turns)\n"
+                        "- latest user_message"
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        "Extract category/slot updates from this context and return structured output:\n\n"
+                        f"{_safe_json(context)}"
+                    )
+                ),
+            ]
+        )
+    except Exception:
+        logger.exception("Slot extraction LLM failed; continuing without extraction updates")
+
+    extraction_data = _model_dump(extraction)
+    extracted_category = extraction_data.get("trailer_category")
+    extracted_updates, item_confidence = _slot_update_dict(
+        extraction_data.get("slots_collected_update"),
+        extraction_data.get("extracted_slots"),
+    )
+    confidence = {
+        **dict(extraction_data.get("confidence_by_slot") or {}),
+        **item_confidence,
+    }
+    notes = str(extraction_data.get("notes") or "")
+    repaired_from_notes = False
+
+    if not extracted_updates and notes.strip():
+        repaired = _repair_slot_extraction_from_notes(
+            notes=notes,
+            allowed_slots=allowed_slots,
+            extracted_category=extracted_category,
+        )
+        repaired_data = _model_dump(repaired)
+        repaired_updates, repaired_item_confidence = _slot_update_dict(
+            repaired_data.get("slots_collected_update"),
+            repaired_data.get("extracted_slots"),
+        )
+        if repaired_updates:
+            extracted_updates = repaired_updates
+            repaired_from_notes = True
+            if not extracted_category and repaired_data.get("trailer_category"):
+                extracted_category = repaired_data.get("trailer_category")
+            repaired_conf = {
+                **dict(repaired_data.get("confidence_by_slot") or {}),
+                **repaired_item_confidence,
+            }
+            if repaired_conf:
+                confidence = repaired_conf
+
+    target_category = extracted_category or extractor_category_hint
+    allowed_after_extraction = set(_allowed_slots_for_category(target_category))
+    filtered_updates: dict[str, Any] = {}
+    dropped_invalid_keys: list[str] = []
+    validation_drops: list[str] = []
+    for key, value in extracted_updates.items():
+        if value in (None, ""):
+            continue
+        if allowed_after_extraction and key not in allowed_after_extraction:
+            dropped_invalid_keys.append(key)
+            continue
+        is_valid, _reason = _validate_slot_value(key, value)
+        if not is_valid:
+            validation_drops.append(key)
+            continue
+        filtered_updates[key] = value
+
+    decision_updates = dict(decision.get("slots_collected_update") or {})
+    prior_slots = dict(state.get("slots_collected") or {})
+    overwritten_keys = [
+        key for key, value in filtered_updates.items()
+        if key in prior_slots and prior_slots.get(key) != value
+    ]
+    merged_updates = {**decision_updates, **filtered_updates}
+    decision["slots_collected_update"] = merged_updates
+    if extracted_category and not decision.get("trailer_category"):
+        decision["trailer_category"] = extracted_category
+
+    logger.info(
+        "slot_extraction_result | category_hint=%r | extracted_category=%r | extracted_keys=%s | overwritten_keys=%s | dropped_invalid_keys=%s | validation_drops=%s | confidence=%s | raw_extracted_slots=%s | notes=%r",
+        extractor_category_hint,
+        extracted_category,
+        json.dumps(sorted(filtered_updates.keys())),
+        json.dumps(sorted(overwritten_keys)),
+        json.dumps(sorted(dropped_invalid_keys)),
+        json.dumps(sorted(validation_drops)),
+        json.dumps(confidence, default=str),
+        json.dumps(extraction_data.get("extracted_slots") or [], default=str),
+        f"repaired_from_notes={repaired_from_notes}; raw_notes={notes}",
+    )
+    return {**state, "mind_decision": decision}
 
 
 def _apply_mind_node(state: ChatbotState) -> ChatbotState:
@@ -583,12 +852,14 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
 def build_chatbot_graph():
     graph = StateGraph(ChatbotState)
     graph.add_node("mind", _mind_node)
+    graph.add_node("extract_slots", _extract_slots_node)
     graph.add_node("apply_mind", _apply_mind_node)
     graph.add_node("pinecone_search", _pinecone_search_node)
     graph.add_node("send_interested_listing_email", _interest_email_node)
     graph.add_node("send_non_sales_faq_email", _faq_email_node)
     graph.set_entry_point("mind")
-    graph.add_edge("mind", "apply_mind")
+    graph.add_edge("mind", "extract_slots")
+    graph.add_edge("extract_slots", "apply_mind")
     graph.add_conditional_edges("apply_mind", _route_after_mind)
     graph.add_edge("pinecone_search", END)
     graph.add_edge("send_interested_listing_email", END)

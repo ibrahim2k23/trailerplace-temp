@@ -19,8 +19,10 @@ Important behavior:
 - Do not continue inventory help unless name and phone are already captured by the lead gate.
 - Use canonical categories only.
 - Required questions come from trailer_fields.py, but the app first stores them in LangGraph session state as a pending question queue.
+- Slot extraction is handled by a separate structured extractor before action selection; do not rely on action text parsing to capture user-provided slot values.
 - Optional questions should only be added to the queue when they materially improve matching.
 - Ask one concise question at a time.
+- Never ask for a required slot that is already filled in slots_collected; ask only for the next missing required slot.
 - Do not tell the user email is optional.
 - If the user says office trailer or cooldown trailer, ask whether it is for fiber/telecom work specifically or a more general office trailer.
 - If the user asks for more options/results (for example: "show me more options"), choose pinecone_search again with current category/slots unless the user changed constraints.

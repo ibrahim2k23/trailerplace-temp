@@ -1,0 +1,172 @@
+2026-05-13 12:31:54 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:32:03 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:32:06 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:32:06 INFO [src.chatbot.service] chat_turn | session_id=a648e9b6-8c60-460e-b469-8339e9227d7c | user_question='ibrahim here. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:32:08 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:32:40 INFO [src.chatbot.service] main_phase_route_decision | session_id=a648e9b6-8c60-460e-b469-8339e9227d7c | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:32:41 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:32:44 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:32:44 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Livestock' | extracted_category='Livestock' | extracted_keys=[] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={} | notes='trailer_length_ft: 12 ft'
+2026-05-13 12:32:44 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["trailer_length_ft"] | invalid=[]
+2026-05-13 12:32:44 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={} | pending_count=0
+2026-05-13 12:32:44 INFO [src.chatbot.service] graph_result | session_id=a648e9b6-8c60-460e-b469-8339e9227d7c | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 12:32:44 INFO [src.chatbot.service] chat_turn | session_id=a648e9b6-8c60-460e-b469-8339e9227d7c | user_question='I am looking for a 12 feet length and atleast 5 feet width livestock trailer' | chatbot_response='What length trailer are you looking for?'
+2026-05-13 12:32:45 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:33:10 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:33:11 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:33:14 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:33:14 INFO [src.chatbot.service] chat_turn | session_id=5bbc0920-3e7b-47e0-a704-1a95b273f3bc | user_question='Ibrahim. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:33:15 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:33:24 INFO [src.chatbot.service] main_phase_route_decision | session_id=5bbc0920-3e7b-47e0-a704-1a95b273f3bc | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:33:25 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:33:26 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:33:26 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Livestock' | extracted_category='Livestock' | extracted_keys=[] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={} | notes='trailer_length_ft: 12 ft'
+2026-05-13 12:33:26 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["trailer_length_ft"] | invalid=[]
+2026-05-13 12:33:26 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={} | pending_count=0
+2026-05-13 12:33:26 INFO [src.chatbot.service] graph_result | session_id=5bbc0920-3e7b-47e0-a704-1a95b273f3bc | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 12:33:26 INFO [src.chatbot.service] chat_turn | session_id=5bbc0920-3e7b-47e0-a704-1a95b273f3bc | user_question='I am looking for a 12 feet livestock trailer' | chatbot_response='What length trailer are you looking for?'
+2026-05-13 12:33:27 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:36:11 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:36:17 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:36:19 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:36:19 INFO [src.chatbot.service] chat_turn | session_id=1e90c5bb-6c45-4170-a7ce-8b1cf9dafc1e | user_question='Ibrahim. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:36:21 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:37:06 INFO [src.chatbot.service] main_phase_route_decision | session_id=1e90c5bb-6c45-4170-a7ce-8b1cf9dafc1e | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:37:08 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:37:09 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:37:09 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Livestock' | extracted_category='Livestock' | extracted_keys=[] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={} | notes='repaired_from_notes=False; raw_notes='
+2026-05-13 12:37:09 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["trailer_length_ft"] | invalid=[]
+2026-05-13 12:37:09 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={} | pending_count=0
+2026-05-13 12:37:09 INFO [src.chatbot.service] graph_result | session_id=1e90c5bb-6c45-4170-a7ce-8b1cf9dafc1e | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 12:37:09 INFO [src.chatbot.service] chat_turn | session_id=1e90c5bb-6c45-4170-a7ce-8b1cf9dafc1e | user_question='I am looking for a 12 feet livestock trailer' | chatbot_response='What length trailer are you looking for?'
+2026-05-13 12:37:10 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:42:20 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:42:25 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:42:31 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:42:31 INFO [src.chatbot.service] chat_turn | session_id=e016ab30-8a73-4f55-870e-2de677e83066 | user_question='Ibrahim here. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:42:33 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:42:46 INFO [src.chatbot.service] main_phase_route_decision | session_id=e016ab30-8a73-4f55-870e-2de677e83066 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:42:49 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:42:50 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:42:50 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Livestock' | extracted_category='Livestock' | extracted_keys=[] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={} | notes='repaired_from_notes=False; raw_notes='
+2026-05-13 12:42:50 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["trailer_length_ft"] | invalid=[]
+2026-05-13 12:42:50 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={} | pending_count=1
+2026-05-13 12:42:50 INFO [src.chatbot.service] graph_result | session_id=e016ab30-8a73-4f55-870e-2de677e83066 | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 12:42:50 INFO [src.chatbot.service] chat_turn | session_id=e016ab30-8a73-4f55-870e-2de677e83066 | user_question='I am looking for a 12 ft livestock trailer' | chatbot_response='What length trailer are you looking for?'
+2026-05-13 12:42:51 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:46:03 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:46:08 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:46:10 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:46:10 INFO [src.chatbot.service] chat_turn | session_id=73b06ee9-bad1-4567-a2ea-34821a23c813 | user_question='Ibrahim here. my number is 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:46:12 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:46:18 INFO [src.chatbot.service] main_phase_route_decision | session_id=73b06ee9-bad1-4567-a2ea-34821a23c813 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:46:19 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:46:21 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:46:21 ERROR [src.chatbot.graph] Slot extraction LLM failed; continuing without extraction updates
+Traceback (most recent call last):
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\src\chatbot\graph.py", line 397, in _extract_slots_node
+    extraction = _slot_extractor_llm().invoke(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\langchain_core\runnables\base.py", line 3335, in invoke
+    input_ = context.run(step.invoke, input_, config)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\langchain_core\output_parsers\base.py", line 207, in invoke
+    return self._call_with_config(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\langchain_core\runnables\base.py", line 2238, in _call_with_config
+    context.run(
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\langchain_core\runnables\config.py", line 486, in call_func_with_variable_args
+    return func(input, **kwargs)  # type: ignore[call-arg]
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\langchain_core\output_parsers\base.py", line 208, in <lambda>
+    lambda inner_input: self.parse_result(
+                        ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\langchain_core\output_parsers\openai_tools.py", line 369, in parse_result
+    pydantic_objects.append(tool(**res["args"]))
+                            ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ibrahim\Desktop\Techtics Work\May 2026\temp\.venv\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for SlotExtractionDecision
+slots_collected_update
+  Input should be a valid dictionary [type=dict_type, input_value=[{'slot': 'trailer_length...t', 'confidence': 0.99}], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+2026-05-13 12:46:21 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Livestock' | extracted_category=None | extracted_keys=[] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={} | raw_extracted_slots=[] | notes='repaired_from_notes=False; raw_notes='
+2026-05-13 12:46:21 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["trailer_length_ft"] | invalid=[]
+2026-05-13 12:46:21 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={} | pending_count=1
+2026-05-13 12:46:21 INFO [src.chatbot.service] graph_result | session_id=73b06ee9-bad1-4567-a2ea-34821a23c813 | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 12:46:21 INFO [src.chatbot.service] chat_turn | session_id=73b06ee9-bad1-4567-a2ea-34821a23c813 | user_question='I am looking for a 12 ft livestock trailer' | chatbot_response='What length trailer are you looking for?'
+2026-05-13 12:46:22 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:48:53 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:00 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:49:03 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:03 INFO [src.chatbot.service] chat_turn | session_id=59412663-b0ba-46be-aeef-9b555e73aa19 | user_question='Ibrahim. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:49:05 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:49:14 INFO [src.chatbot.service] main_phase_route_decision | session_id=59412663-b0ba-46be-aeef-9b555e73aa19 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:49:16 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:17 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:17 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Livestock' | extracted_category='Livestock' | extracted_keys=["trailer_length_ft"] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={"trailer_length_ft": 0.99} | raw_extracted_slots=[{"slot": "trailer_length_ft", "value": "12 ft", "confidence": 0.99}] | notes='repaired_from_notes=False; raw_notes='
+2026-05-13 12:49:17 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=[] | invalid=[]
+2026-05-13 12:49:17 INFO [src.chatbot.graph] action_corrected_to_search | previous_action=ask_next_question | category='Livestock'
+2026-05-13 12:49:17 INFO [src.chatbot.graph] mind_decision_applied | action=pinecone_search | category_before=None | category_after='Livestock' | slot_changes={"trailer_length_ft": {"before": null, "after": "12 ft"}} | pending_count=0
+2026-05-13 12:49:17 INFO [src.chatbot.graph] pinecone_search_execute | category='Livestock' | slots={"trailer_length_ft": "12 ft"} | shown_count=0
+2026-05-13 12:49:20 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 200 OK"
+2026-05-13 12:49:21 INFO [src.chatbot.tools.pinecone_search] pinecone_search | category='Livestock' | top_k=50 | max_recommendations=5 | already_shown_url_count=0 | metadata_filter={"$and": [{"category": {"$eq": "Livestock"}}, {"length_ft_num": {"$gte": 12.0}}]} | slots={"trailer_length_ft": "12 ft"} | query_text='I am looking for a 12 ft livestock trailer | Category: Livestock | trailer_length_ft: 12 ft'
+2026-05-13 12:49:22 INFO [pinecone.client.indexes] Describing index 'trailer-recommendations'
+2026-05-13 12:49:23 INFO [httpx] HTTP Request: GET https://api.pinecone.io/indexes/trailer-recommendations "HTTP/1.1 200 OK"
+2026-05-13 12:49:24 INFO [pinecone.index] Index client created for host https://trailer-recommendations-a929752.svc.aped-4627-b74a.pinecone.io
+2026-05-13 12:49:24 INFO [pinecone.index] Querying index with top_k=50
+2026-05-13 12:49:28 INFO [src.chatbot.tools.pinecone_search] rerank_summary | applied=true | required_length_ft=12.0 | required_gvwr_lbs=None | required_width_ft=None | candidates=34 | kept_pool=34
+2026-05-13 12:49:28 INFO [src.chatbot.tools.pinecone_search] rerank_debug={"applied": true, "required_length_ft": 12.0, "required_gvwr_lbs": null, "required_width_ft": null, "candidate_count": 34}
+2026-05-13 12:49:28 INFO [src.chatbot.tools.pinecone_search] make_rerank_summary | category='Livestock' | preferred=['Galyean', 'Gooseneck', 'Calico Trailers'] | preferred_found=32 | total=34 | before_top=['Calico Trailers', 'Gooseneck', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers'] | after_top=['Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean']
+2026-05-13 12:49:28 INFO [src.chatbot.tools.pinecone_search] make_rerank_debug={"applied": true, "category": "Livestock", "preferred_order": ["Galyean", "Gooseneck", "Calico Trailers"], "preferred_found": 32}
+2026-05-13 12:49:29 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:31 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:33 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:34 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:35 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:49:35 INFO [src.chatbot.service] graph_result | session_id=59412663-b0ba-46be-aeef-9b555e73aa19 | action='pinecone_search' | category='Livestock' | tool_events=[{"tool": "pinecone_search", "result_count": 5}]
+2026-05-13 12:49:35 INFO [src.chatbot.service] category_cycle_results_shown | session_id=59412663-b0ba-46be-aeef-9b555e73aa19 | active_category_cycle_id=1 | has_shown_search_results=True
+2026-05-13 12:49:35 INFO [src.chatbot.service] chat_turn | session_id=59412663-b0ba-46be-aeef-9b555e73aa19 | user_question='I am looking for a 12 ft livestock trailer' | chatbot_response="1. [2025 Galyean Cattle Trailer - 15220](https://www.trailerplace.com/inventory/2025-galyean-cattle-trailer-15220/)\n\n- Length: 24 ft 0 in\n- Color: Black\n- Hitch Type: Gooseneck\n- Price: $29,750\n\n**Why-it-fits:** The 2025 Galyean Cattle Trailer is a robust 24 ft gooseneck option, perfect for transporting livestock with ease and reliability.\n\n---\n\n2. [2025 Galyean Cattle Trailer - 15221](https://www.trailerplace.com/inventory/2025-galyean-cattle-trailer-15221/)\n\n- Length: 24 ft 0 in\n- Color: Silver\n- Hitch Type: Gooseneck\n- Price: $24,600\n\n**Why-it-fits:** This 24 ft gooseneck Galyean Cattle Trailer offers ample space for your livestock needs, making it a great choice for your 12 ft trailer requirement.\n\n---\n\n3. [2026 Galyean Cattle Trailer W/Butterfly Gates 24' - 15181](https://www.trailerplace.com/inventory/2026-galyean-cattle-trailer-w-butterfly-gates-24-15181/)\n\n- Length: 24 ft 0 in\n- Color: Black\n- GVWR: 17150 lbs\n- Hitch Type: Gooseneck\n- Payload Capacity: 10170 lbs\n- Price: $23,995\n\n**Why-it-fits:** This 24' Galyean Cattle Trailer offers ample space and a robust payload capacity of 10,170 lbs, perfect for transporting livestock efficiently.\n\n---\n\n4. [2025 Galyean 24’X6’8''X6’6'' Cattle Trailer W/ Butterfly Gates - 15174](https://www.trailerplace.com/inventory/2025-galyean-24x68x66-cattle-trailer-w-butterfly-gates-15174/)\n\n- Length: 24 ft 0 in\n- Color: Dark Gray Metallic\n- Hitch Type: Gooseneck\n- Price: $23,995\n\n**Why-it-fits:** This 24-foot Galyean cattle trailer with butterfly gates offers ample space and durability, perfect for transporting livestock comfortably and securely.\n\n---\n\n5. [2025 Galyean 24’X6’8''X6’6'' Cattle Trailer W/Swing Slide - 15180](https://www.trailerplace.com/inventory/2025-galyean-24x68x66-cattle-trailer-w-swing-slide-15180/)\n\n- Length: 24 ft 0 in\n- Color: Caribou\n- Hitch Type: Gooseneck\n- Price: $24,600\n\n**Why-it-fits:** This 24-foot cattle trailer offers ample space and a durable gooseneck hitch, perfect for transporting livestock efficiently."
+2026-05-13 12:49:38 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:50:59 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:51:01 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:51:04 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:51:04 INFO [src.chatbot.service] chat_turn | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | user_question='Ibrahim here. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 12:51:06 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:51:49 INFO [src.chatbot.service] main_phase_route_decision | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:52:00 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:52:04 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:52:04 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Utility' | extracted_category='Utility' | extracted_keys=["haul_weight_lbs", "trailer_size"] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={"trailer_size": 0.99, "haul_weight_lbs": 0.99} | raw_extracted_slots=[{"slot": "trailer_size", "value": "12 ft", "confidence": 0.99}, {"slot": "haul_weight_lbs", "value": "3000 lbs", "confidence": 0.99}] | notes='repaired_from_notes=False; raw_notes='
+2026-05-13 12:52:04 INFO [src.chatbot.graph] required_completion_state | category='Utility' | missing=["haul_item"] | invalid=[]
+2026-05-13 12:52:04 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Utility' | slot_changes={"haul_weight_lbs": {"before": null, "after": "3000 lbs"}, "trailer_size": {"before": null, "after": "12 ft"}} | pending_count=0
+2026-05-13 12:52:04 INFO [src.chatbot.service] graph_result | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | action='respond' | category='Utility' | tool_events=[]
+2026-05-13 12:52:04 INFO [src.chatbot.service] chat_turn | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | user_question='I am looking for a 12ft utility trailer with a payload capacity of  3000 lbs' | chatbot_response='What will you be hauling on the utility trailer?'
+2026-05-13 12:52:05 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 12:52:27 INFO [src.chatbot.service] main_phase_route_decision | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 12:52:27 INFO [src.chatbot.service] category_switch_candidate | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | old_category='Utility' | new_category='Equipment' | has_shown_search_results=False | active_category_cycle_id=1
+2026-05-13 12:52:27 INFO [src.chatbot.service] category_switch_ignored_pre_results | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | old_category='Utility' | new_category='Equipment' | active_category_cycle_id=1
+2026-05-13 12:52:27 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Utility' | has_shown_search_results=False | proposed_category='Equipment'
+2026-05-13 12:52:36 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:52:40 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:52:41 INFO [src.chatbot.graph] slot_extraction_result | category_hint='Utility' | extracted_category='Utility' | extracted_keys=["haul_item", "haul_weight_lbs", "trailer_size"] | overwritten_keys=[] | dropped_invalid_keys=[] | validation_drops=[] | confidence={"haul_item": 0.99} | raw_extracted_slots=[{"slot": "haul_item", "value": "construction equipment", "confidence": 0.99}] | notes='repaired_from_notes=False; raw_notes='
+2026-05-13 12:52:41 INFO [src.chatbot.graph] required_completion_state | category='Utility' | missing=[] | invalid=[]
+2026-05-13 12:52:41 INFO [src.chatbot.graph] mind_decision_applied | action=pinecone_search | category_before='Utility' | category_after='Utility' | slot_changes={"haul_item": {"before": null, "after": "construction equipment"}} | pending_count=0
+2026-05-13 12:52:41 INFO [src.chatbot.graph] pinecone_search_execute | category='Utility' | slots={"trailer_size": "12 ft", "haul_weight_lbs": "3000 lbs", "haul_item": "construction equipment"} | shown_count=0
+2026-05-13 12:52:47 INFO [openai._base_client] Retrying request to /embeddings in 0.386562 seconds
+2026-05-13 12:52:55 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 200 OK"
+2026-05-13 12:52:58 INFO [src.chatbot.tools.pinecone_search] pinecone_search | category='Utility' | top_k=50 | max_recommendations=5 | already_shown_url_count=0 | metadata_filter={"$and": [{"category": {"$eq": "Utility"}}, {"length_ft_num": {"$gte": 12.0}}, {"gvwr_lbs_num": {"$gte": 3000.0}}]} | slots={"trailer_size": "12 ft", "haul_weight_lbs": "3000 lbs", "haul_item": "construction equipment"} | query_text='construction equipment | Category: Utility | haul_item: construction equipment | haul_weight_lbs: 3000 lbs | trailer_size: 12 ft'
+2026-05-13 12:52:58 INFO [pinecone.index] Querying index with top_k=50
+2026-05-13 12:53:09 INFO [src.chatbot.tools.pinecone_search] rerank_summary | applied=true | required_length_ft=12.0 | required_gvwr_lbs=3000.0 | required_width_ft=None | candidates=33 | kept_pool=29
+2026-05-13 12:53:09 INFO [src.chatbot.tools.pinecone_search] rerank_debug={"applied": true, "required_length_ft": 12.0, "required_gvwr_lbs": 3000.0, "required_width_ft": null, "candidate_count": 33}
+2026-05-13 12:53:09 INFO [src.chatbot.tools.pinecone_search] make_rerank_summary | category='Utility' | preferred=['Diamond C', 'Iron Bull Trailers', 'East Texas Trailers', 'P&C'] | preferred_found=23 | total=29 | before_top=['P&C', 'P&C', 'P&C Trailers', 'P&C', 'East Texas Trailers', 'Aluma', 'East Texas Trailers', 'East Texas Trailers'] | after_top=['Diamond C Trailers', 'Diamond C Trailers', 'Diamond C Trailers', 'Diamond C Trailers', 'Diamond C Trailers', 'Iron Bull Trailers', 'Iron Bull Trailers', 'Iron Bull Trailers']
+2026-05-13 12:53:09 INFO [src.chatbot.tools.pinecone_search] make_rerank_debug={"applied": true, "category": "Utility", "preferred_order": ["Diamond C", "Iron Bull Trailers", "East Texas Trailers", "P&C"], "preferred_found": 23}
+2026-05-13 12:53:22 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:53:23 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:53:25 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:53:25 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:53:27 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 12:53:27 INFO [src.chatbot.service] graph_result | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | action='pinecone_search' | category='Utility' | tool_events=[{"tool": "pinecone_search", "result_count": 5}]
+2026-05-13 12:53:27 INFO [src.chatbot.service] category_cycle_results_shown | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | active_category_cycle_id=1 | has_shown_search_results=True
+2026-05-13 12:53:27 INFO [src.chatbot.service] chat_turn | session_id=895185fb-243c-42a3-bdfe-dc17d18b968b | user_question='construction equipment' | chatbot_response='1. [2026 Diamond C TUT206 - 07590](https://www.trailerplace.com/inventory/2026-diamond-c-tut206-07590/)\n\n- Length: 18 ft 0 in\n- GVWR: 9890 lbs\n- Payload Capacity: 7360 lbs\n- Color: Mocha Metallic\n- Hitch Type: Bumper Pull\n- Price: $6,495\n\n**Why-it-fits:** The 2026 Diamond C TUT206 offers an 18 ft length and a robust payload capacity of 7360 lbs, making it perfect for all your construction needs.\n\n---\n\n2. [2026 Diamond C Trailers Utility - 11261](https://www.trailerplace.com/inventory/2026-diamond-c-trailers-utility-11261/)\n\n- Length: 18 ft 0 in\n- GVWR: 9890 lbs\n- Payload Capacity: 7430 lbs\n- Color: Mocha Metallic\n- Hitch Type: Bumper Pull\n- Price: $6,250\n\n**Why-it-fits:** This 18 ft Diamond C trailer in Mocha Metallic is perfect for transporting construction equipment with a robust payload capacity of 7,430 lbs.\n\n---\n\n3. [2026 Diamond C Trailers Gtu235 W/ Bi Fold - 07676](https://www.trailerplace.com/inventory/2026-diamond-c-trailers-gtu235-w-bi-fold-07676/)\n\n- Length: 20 ft 0 in\n- GVWR: 7000 lbs\n- Payload Capacity: 4690 lbs\n- Color: Black\n- Hitch Type: Bumper Pull\n- Price: $6,995\n\n**Why-it-fits:** This 20 ft Diamond C trailer, with a 7000 lbs GVWR and 4690 lbs payload capacity, is perfect for transporting your construction equipment efficiently.\n\n---\n\n4. [2026 Diamond C TUT206 - 07826](https://www.trailerplace.com/inventory/2026-diamond-c-tut206-07826/)\n\n- Length: 22 ft 0 in\n- GVWR: 9890 lbs\n- Payload Capacity: 7190 lbs\n- Color: Onyx Black\n- Hitch Type: Bumper Pull\n- Price: $6,750\n\n**Why-it-fits:** The 2026 Diamond C TUT206 offers a robust 22 ft length and a payload capacity of 7,190 lbs, perfect for all your construction needs.\n\n---\n\n5. [2026 Diamond C Trailers Tut206 - 07825](https://www.trailerplace.com/inventory/2026-diamond-c-trailers-tut206-07825/)\n\n- Length: 22 ft 0 in\n- GVWR: 9890 lbs\n- Payload Capacity: 7230 lbs\n- Color: Black\n- Hitch Type: Bumper Pull\n- Price: $6,750\n\n**Why-it-fits:** This 22 ft Diamond C trailer, with a payload capacity of 7,230 lbs, is perfect for transporting your construction equipment efficiently.'
+2026-05-13 12:53:28 INFO [src.db] Chatbot persistence schema is ready
