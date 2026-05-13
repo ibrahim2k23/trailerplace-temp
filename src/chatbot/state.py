@@ -22,6 +22,7 @@ class ChatbotState(TypedDict, total=False):
     trailer_category: Optional[str]
     category_needs_clarification: bool
     slots_collected: dict[str, Any]
+    metadata_filters_collected: dict[str, Any]
     awaiting_slot: Optional[str]
     pending_questions: list[QuestionItem]
     asked_questions: list[str]

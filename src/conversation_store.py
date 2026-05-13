@@ -31,6 +31,28 @@ def _session():
     return db.get_session_factory()()
 
 
+def _merge_existing_feedback(
+    existing: list[dict[str, Any]] | None,
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Preserve feedback saved directly to JSONB when rebuilding conversation turns."""
+    if not isinstance(existing, list):
+        return incoming
+
+    merged: list[dict[str, Any]] = []
+    for idx, turn in enumerate(incoming):
+        next_turn = dict(turn)
+        existing_turn = existing[idx] if idx < len(existing) and isinstance(existing[idx], dict) else {}
+        if "feedback" not in next_turn:
+            existing_feedback = existing_turn.get("feedback")
+            if existing_feedback in (None, ""):
+                existing_feedback = existing_turn.get("user_feedback")
+            if existing_feedback not in (None, ""):
+                next_turn["feedback"] = existing_feedback
+        merged.append(next_turn)
+    return merged
+
+
 def ensure_persistence_schema() -> None:
     if not persistence_enabled():
         return
@@ -91,6 +113,19 @@ def update_lead_item_of_interest(session_id: str, item_of_interest: str) -> None
         session.commit()
 
 
+def promote_lead_to_hard(session_id: str) -> None:
+    if not persistence_enabled() or not session_id:
+        return
+    with _session() as session:
+        lead = session.execute(
+            select(ChatbotLead).where(ChatbotLead.psid == session_id)
+        ).scalar_one_or_none()
+        if not lead:
+            return
+        lead.lead_type = "hard"
+        session.commit()
+
+
 def upsert_conversation(
     *,
     session_id: str,
@@ -105,7 +140,7 @@ def upsert_conversation(
     with _session() as session:
         row = session.get(ChatbotConversation, sid)
         if row:
-            row.conversation = conversation
+            row.conversation = _merge_existing_feedback(row.conversation, conversation)
         else:
             row = ChatbotConversation(
                 session_id=sid,
@@ -162,8 +197,7 @@ def enqueue_save_user_feedback(
                 if 0 <= turn_idx < len(conversation):
                     conversation[turn_idx] = {
                         **conversation[turn_idx],
-                        "user_feedback": text,
-                        "feedback_at": timestamp_iso,
+                        "feedback": text or None,
                     }
                     row.conversation = conversation
                     session.commit()

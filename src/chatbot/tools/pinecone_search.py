@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
 
-from src.normalizer import normalize_category, normalize_color, normalize_hitch
+from src.normalizer import normalize_category, normalize_color, normalize_hitch, normalize_subcategory
 
 load_dotenv()
 
@@ -83,6 +83,8 @@ MAKE_ALIAS_MAP: dict[str, str] = {
     "gooseneck": "Gooseneck",
     "texas pride": "Texas Pride",
 }
+
+_ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
 
 
 def _parse_number(value: Any) -> Optional[float]:
@@ -162,24 +164,39 @@ def _embed(text: str) -> list[float]:
     return response.data[0].embedding
 
 
-def _metadata_filter(category: str | None, slots: dict[str, Any]) -> dict[str, Any]:
+def _metadata_filter(
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata_filters = metadata_filters or {}
     filters: list[dict[str, Any]] = []
     if category:
         filters.append({"category": {"$eq": normalize_category(category)}})
 
-    if slots.get("hitch_type"):
-        hitch = normalize_hitch(str(slots["hitch_type"]))
-        if hitch:
+    hitch_value = metadata_filters.get("hitch_type") or slots.get("hitch_type")
+    if hitch_value:
+        hitch = normalize_hitch(str(hitch_value))
+        if hitch in _ALLOWED_HITCH_TYPES:
             filters.append({"hitch_type": {"$eq": hitch}})
-    if slots.get("color"):
-        filters.append({"color": {"$eq": normalize_color(str(slots["color"]))}})
+        else:
+            logger.info("pinecone_hitch_filter_rejected | value=%r | normalized=%r", hitch_value, hitch)
+    subcategory_value = metadata_filters.get("subcategory")
+    if subcategory_value:
+        subcategory = normalize_subcategory(str(subcategory_value))
+        if subcategory:
+            filters.append({"subcategory": {"$eq": subcategory}})
+    color_value = metadata_filters.get("color") or slots.get("color")
+    if color_value:
+        filters.append({"color": {"$eq": normalize_color(str(color_value))}})
 
-    max_price = _parse_number(slots.get("max_price") or slots.get("budget"))
+    max_price = _parse_number(metadata_filters.get("max_price") or slots.get("max_price") or slots.get("budget"))
     if max_price:
         filters.append({"price": {"$lte": max_price}})
 
     min_length = (
-        _parse_length_ft(slots.get("haul_length_ft"))
+        _parse_length_ft(metadata_filters.get("length_ft"))
+        or _parse_length_ft(slots.get("haul_length_ft"))
         or _parse_length_ft(slots.get("vehicle_length_ft"))
         or _parse_length_ft(slots.get("trailer_length_ft"))
         or _parse_length_ft(slots.get("trailer_size"))
@@ -187,13 +204,23 @@ def _metadata_filter(category: str | None, slots: dict[str, Any]) -> dict[str, A
     if min_length:
         filters.append({"length_ft_num": {"$gte": min_length}})
 
-    min_gvwr = _parse_number(
-        slots.get("haul_weight_lbs")
+    min_width = (
+        _parse_length_ft(metadata_filters.get("width_ft"))
+        or _parse_length_ft(slots.get("item_or_trailer_width_ft"))
+        or _parse_length_ft(slots.get("trailer_width_ft"))
+        or _parse_length_ft(slots.get("width_ft"))
+    )
+    if min_width:
+        filters.append({"width_ft_num": {"$gte": min_width}})
+
+    min_payload = _parse_number(
+        metadata_filters.get("payload_lbs")
+        or slots.get("haul_weight_lbs")
         or slots.get("payload_need")
         or slots.get("total_weight")
     )
-    if min_gvwr:
-        filters.append({"gvwr_lbs_num": {"$gte": min_gvwr}})
+    if min_payload:
+        filters.append({"payload_lbs_num": {"$gte": min_payload}})
 
     if not filters:
         return {}
@@ -202,13 +229,21 @@ def _metadata_filter(category: str | None, slots: dict[str, Any]) -> dict[str, A
     return {"$and": filters}
 
 
-def _query_text(category: str | None, slots: dict[str, Any], user_message: str) -> str:
+def _query_text(
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    user_message: str,
+) -> str:
     parts = [user_message.strip()]
     if category:
         parts.append(f"Category: {category}")
     for key, value in sorted((slots or {}).items()):
         if value not in (None, "", [], {}):
             parts.append(f"{key}: {value}")
+    for key, value in sorted((metadata_filters or {}).items()):
+        if value not in (None, "", [], {}):
+            parts.append(f"filter_{key}: {value}")
     return " | ".join(p for p in parts if p)
 
 
@@ -241,26 +276,29 @@ def _clean_match(match: Any) -> dict[str, Any]:
     }
 
 
-def _required_length_ft_from_slots(slots: dict[str, Any]) -> Optional[float]:
+def _required_length_ft_from_filters(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> Optional[float]:
     return (
-        _parse_length_ft(slots.get("haul_length_ft"))
+        _parse_length_ft(metadata_filters.get("length_ft"))
+        or _parse_length_ft(slots.get("haul_length_ft"))
         or _parse_length_ft(slots.get("vehicle_length_ft"))
         or _parse_length_ft(slots.get("trailer_length_ft"))
         or _parse_length_ft(slots.get("trailer_size"))
     )
 
 
-def _required_weight_lbs_from_slots(slots: dict[str, Any]) -> Optional[float]:
+def _required_payload_lbs_from_filters(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> Optional[float]:
     return _parse_number(
-        slots.get("haul_weight_lbs")
+        metadata_filters.get("payload_lbs")
+        or slots.get("haul_weight_lbs")
         or slots.get("payload_need")
         or slots.get("total_weight")
     )
 
 
-def _required_width_ft_from_slots(slots: dict[str, Any]) -> Optional[float]:
+def _required_width_ft_from_filters(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> Optional[float]:
     return _parse_length_ft(
-        slots.get("item_or_trailer_width_ft")
+        metadata_filters.get("width_ft")
+        or slots.get("item_or_trailer_width_ft")
         or slots.get("trailer_width_ft")
         or slots.get("width_ft")
     )
@@ -344,14 +382,14 @@ def _rerank_listings_by_fit(
     listings: list[dict[str, Any]],
     *,
     required_length_ft: Optional[float],
-    required_gvwr_lbs: Optional[float],
+    required_payload_lbs: Optional[float],
     required_width_ft: Optional[float],
     warn_ratio: float,
     extreme_ratio: float,
     length_weight: float,
     missing_dim_penalty: float,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    needs_present = any(x is not None for x in (required_length_ft, required_gvwr_lbs, required_width_ft))
+    needs_present = any(x is not None for x in (required_length_ft, required_payload_lbs, required_width_ft))
     if not listings or not needs_present:
         return listings, {"applied": False, "reason": "missing_clear_requirements_or_no_listings"}
 
@@ -378,8 +416,8 @@ def _rerank_listings_by_fit(
             else None
         )
         weight_ratio = (
-            (weight_cap / required_gvwr_lbs)
-            if required_gvwr_lbs is not None and weight_cap is not None and required_gvwr_lbs > 0
+            (weight_cap / required_payload_lbs)
+            if required_payload_lbs is not None and weight_cap is not None and required_payload_lbs > 0
             else None
         )
         width_ratio = (
@@ -408,7 +446,7 @@ def _rerank_listings_by_fit(
                 if length_ratio > extreme_ratio:
                     penalty += (length_ratio - extreme_ratio) * (length_weight * 3.2)
 
-        if required_gvwr_lbs is not None:
+        if required_payload_lbs is not None:
             if weight_ratio is None:
                 missing_count += 1
                 penalty += missing_dim_penalty
@@ -424,6 +462,12 @@ def _rerank_listings_by_fit(
                     penalty += (weight_ratio - extreme_ratio) * 4.0
                 if weight_from == "gvwr":
                     penalty += 0.2
+                    logger.info(
+                        "payload_rerank_gvwr_fallback | title=%r | gvwr=%r | payload_capacity=%r",
+                        listing.get("title"),
+                        listing.get("gvwr"),
+                        listing.get("payload_capacity"),
+                    )
 
         if required_width_ft is not None:
             if width_ratio is None:
@@ -494,9 +538,9 @@ def _rerank_listings_by_fit(
             )
 
     logger.info(
-        "rerank_summary | applied=true | required_length_ft=%s | required_gvwr_lbs=%s | required_width_ft=%s | candidates=%s | kept_pool=%s",
+        "rerank_summary | applied=true | required_length_ft=%s | required_payload_lbs=%s | required_width_ft=%s | candidates=%s | kept_pool=%s",
         required_length_ft,
-        required_gvwr_lbs,
+        required_payload_lbs,
         required_width_ft,
         len(entries),
         len(fallback_pool),
@@ -505,7 +549,7 @@ def _rerank_listings_by_fit(
     return [e["listing"] for e in ranked_entries], {
         "applied": True,
         "required_length_ft": required_length_ft,
-        "required_gvwr_lbs": required_gvwr_lbs,
+        "required_payload_lbs": required_payload_lbs,
         "required_width_ft": required_width_ft,
         "candidate_count": len(entries),
     }
@@ -515,28 +559,31 @@ def search_pinecone_listings(
     *,
     category: str | None,
     slots: dict[str, Any],
+    metadata_filters: dict[str, Any] | None = None,
     user_message: str,
     already_shown_urls: list[str] | None = None,
     top_k: int | None = None,
     max_recommendations: int | None = None,
 ) -> list[dict[str, Any]]:
-    query = _query_text(category, slots, user_message)
+    metadata_filters = metadata_filters or {}
+    query = _query_text(category, slots, metadata_filters, user_message)
     vector = _embed(query)
     top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
     max_recommendations = max_recommendations or int(os.getenv("SEARCH_MAX_RECOMMENDATIONS", "5"))
-    metadata_filter = _metadata_filter(category, slots) or None
+    metadata_filter = _metadata_filter(category, slots, metadata_filters) or None
     query_preview = query[:2000] + ("...(truncated)" if len(query) > 2000 else "")
     shown_urls = {str(u).strip() for u in (already_shown_urls or []) if str(u or "").strip()}
 
     logger.info(
         "pinecone_search | category=%r | top_k=%s | max_recommendations=%s | "
-        "already_shown_url_count=%s | metadata_filter=%s | slots=%s | query_text=%r",
+        "already_shown_url_count=%s | metadata_filter=%s | slots=%s | metadata_filters_collected=%s | query_text=%r",
         category,
         top_k,
         max_recommendations,
         len(shown_urls),
         json.dumps(metadata_filter, default=str) if metadata_filter else "{}",
         json.dumps(slots or {}, default=str),
+        json.dumps(metadata_filters or {}, default=str),
         query_preview,
     )
 
@@ -555,13 +602,13 @@ def search_pinecone_listings(
         listings.append(item)
 
     if RERANK_ENABLED:
-        required_length_ft = _required_length_ft_from_slots(slots)
-        required_gvwr_lbs = _required_weight_lbs_from_slots(slots)
-        required_width_ft = _required_width_ft_from_slots(slots)
+        required_length_ft = _required_length_ft_from_filters(slots, metadata_filters)
+        required_payload_lbs = _required_payload_lbs_from_filters(slots, metadata_filters)
+        required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
         listings, rerank_debug = _rerank_listings_by_fit(
             listings,
             required_length_ft=required_length_ft,
-            required_gvwr_lbs=required_gvwr_lbs,
+            required_payload_lbs=required_payload_lbs,
             required_width_ft=required_width_ft,
             warn_ratio=RERANK_WARN_RATIO,
             extreme_ratio=RERANK_EXTREME_RATIO,

@@ -16,8 +16,14 @@ from pydantic import BaseModel, Field
 from trailer_fields import get_trailer_fields_as_dict
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.formatting import format_listing_results
+from src.chatbot.mini_llm_classifier import (
+    HaulClassificationDecision,
+    classify_haul_requirements,
+)
 from src.chatbot.prompts import MIND_SYSTEM_PROMPT
 from src.chatbot.state import ChatbotState, QuestionItem
+from src.models import TrailerListing
+from src.normalizer import normalize_hitch, normalize_subcategory
 from src.chatbot.tools.email_tools import (
     FAQ_CATEGORY_LABELS,
     send_interested_listing_email,
@@ -68,6 +74,7 @@ class MindDecision(BaseModel):
     assistant_text: str = ""
     trailer_category: Optional[str] = None
     slots_collected_update: dict[str, Any] = Field(default_factory=dict)
+    metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
     optional_question_slots_to_queue: list[str] = Field(default_factory=list)
     selected_listing_title: Optional[str] = None
     selected_listing_url: Optional[str] = None
@@ -75,11 +82,35 @@ class MindDecision(BaseModel):
     faq_summary: Optional[str] = None
 
 
+class FilterExtractionDecision(BaseModel):
+    length_ft: Optional[str] = None
+    width_ft: Optional[str] = None
+    payload_lbs: Optional[str] = None
+    max_price: Optional[str] = None
+    hitch_type: Optional[str] = None
+    subcategory: Optional[str] = None
+    color: Optional[str] = None
+    slot_updates: dict[str, Any] = Field(default_factory=dict)
+
+
 @lru_cache(maxsize=1)
 def _mind_llm():
     model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         MindDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _filter_extractor_llm():
+    model = (
+        os.getenv("FILTER_EXTRACTOR_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        FilterExtractionDecision,
         method="function_calling",
     )
 
@@ -92,6 +123,375 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 def _safe_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=True, default=str)
+
+
+_METADATA_FILTER_KEYS = {
+    "length_ft",
+    "width_ft",
+    "payload_lbs",
+    "max_price",
+    "hitch_type",
+    "subcategory",
+    "color",
+}
+_ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
+_CONFIDENT_CLASSIFICATIONS = {"medium", "high"}
+_DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
+_DYNAMIC_WIDTH_QUESTION = "About how wide is the item, or what trailer width do you need?"
+
+
+def _category_slots(category: str | None) -> set[str]:
+    if not category:
+        return set()
+    spec = get_trailer_fields_as_dict(category)
+    return set(spec.get("required_slots") or []) | set(spec.get("optional_slots") or [])
+
+
+def _first_match(patterns: tuple[str, ...], text: str) -> str | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return " ".join(g for g in match.groups() if g) or match.group(0)
+    return None
+
+
+def _normalize_allowed_hitch(value: Any) -> str | None:
+    hitch = normalize_hitch(str(value or "").strip())
+    return hitch if hitch in _ALLOWED_HITCH_TYPES else None
+
+
+def _explicit_subcategory_requested(message: str) -> bool:
+    text = str(message or "").lower()
+    return bool(
+        re.search(
+            r"\b(?:sub\s*category|subcategory)\s+(?:should\s+be|is|to|as|=)\b"
+            r"|\b(?:filter|search)\s+(?:by|for|with)\s+(?:sub\s*category|subcategory)\b"
+            r"|\bmake\s+the\s+(?:sub\s*category|subcategory)\b",
+            text,
+        )
+    )
+
+
+def _sanitize_metadata_filter_update(key: str, value: Any, latest_message: str) -> tuple[str, Any] | None:
+    if value in (None, "") or key not in _METADATA_FILTER_KEYS:
+        return None
+    if key == "hitch_type":
+        hitch = _normalize_allowed_hitch(value)
+        if not hitch:
+            logger.info("metadata_filter_rejected | key=hitch_type | value=%r", value)
+            return None
+        return key, hitch
+    if key == "subcategory":
+        if not _explicit_subcategory_requested(latest_message):
+            logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=not_explicit", value)
+            return None
+        subcategory = normalize_subcategory(str(value))
+        if not subcategory:
+            logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=invalid", value)
+            return None
+        return key, subcategory
+    return key, value
+
+
+def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision:
+    latest = state.get("user_message") or ""
+    if not latest.strip():
+        return FilterExtractionDecision()
+
+    text = latest.strip()
+    updates: dict[str, Any] = {}
+    slot_updates: dict[str, Any] = {}
+    shorthand_dimension = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?\s*[xX]\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?"
+        r"(?:\s*[xX]\s*(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?)?\b",
+        text,
+    )
+    if shorthand_dimension:
+        # Trailer shorthand is width x length x optional height.
+        updates["width_ft"] = shorthand_dimension.group(1)
+        updates["length_ft"] = shorthand_dimension.group(2)
+
+    width = _first_match(
+        (
+            r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|')\s*(?:wide|width)\b",
+            r"\b(?:width|wide)\D{0,40}?(?:at\s+least|atleast|min(?:imum)?|should\s+be|is|of)?\D{0,20}?(\d+(?:\.\d+)?)\s*(ft|feet|foot|')\b",
+        ),
+        text,
+    )
+    width_scrubbed = re.sub(
+        r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\s*(?:wide|width)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    width_scrubbed = re.sub(
+        r"\b(?:width|wide)\D{0,60}?\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\b",
+        " ",
+        width_scrubbed,
+        flags=re.I,
+    )
+    length = _first_match(
+        (
+            r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|')\s*(?:long|length|trailer)\b",
+            r"\b(?:length|long|deck\s+length|trailer\s+length|size)\D{0,30}(\d+(?:\.\d+)?)\s*(ft|feet|foot|')\b",
+            r"\b(?:make\s+it|change\s+it\s+to|instead)\D{0,20}(\d+(?:\.\d+)?)\s*(ft|feet|foot|')\b",
+            r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|')\b",
+        ),
+        width_scrubbed,
+    )
+    payload = _first_match(
+        (
+            r"\b(\d+(?:\.\d+)?)\s*(k|m)?\s*(lbs?|pounds?|#)\b",
+            r"\b(?:payload|load|haul|weight)\D{0,30}(\d+(?:\.\d+)?)\s*(k|m)?\b",
+        ),
+        text,
+    )
+    price = _first_match(
+        (
+            r"\b(?:under|below|max|budget)\D{0,20}\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|m)?\b",
+            r"\$\s*(\d[\d,]*(?:\.\d+)?)\s*(k|m)?\b",
+        ),
+        text,
+    )
+
+    if length and "length_ft" not in updates:
+        updates["length_ft"] = length
+    if width and "width_ft" not in updates:
+        updates["width_ft"] = width
+    if payload:
+        updates["payload_lbs"] = payload
+    if price:
+        updates["max_price"] = price
+
+    lower = text.lower()
+    if "gooseneck" in lower:
+        updates["hitch_type"] = "gooseneck"
+    elif "bumper pull" in lower or "bumper-pull" in lower:
+        updates["hitch_type"] = "bumper pull"
+
+    color_match = re.search(
+        r"\b(black|white|gray|grey|silver|red|blue|green|yellow|orange|tan)\b",
+        lower,
+    )
+    if color_match:
+        updates["color"] = color_match.group(1)
+
+    return FilterExtractionDecision(**updates, slot_updates=slot_updates)
+
+
+def _extract_filter_decision(state: ChatbotState, category: str | None) -> FilterExtractionDecision:
+    latest = state.get("user_message") or ""
+    recent = [
+        str(m.get("content") or "")
+        for m in reversed((state.get("messages") or [])[-8:])
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    context = {
+        "listing_model_fields": sorted(TrailerListing.model_fields.keys()),
+        "latest_user_message": latest,
+        "recent_user_messages": recent,
+        "current_category": category,
+        "allowed_category_slots": sorted(_category_slots(category)),
+        "slots_collected": state.get("slots_collected") or {},
+        "metadata_filters_collected": state.get("metadata_filters_collected") or {},
+    }
+    try:
+        return _filter_extractor_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Extract only explicit trailer search filters and category slot values from the latest user message. "
+                        "Use recent messages only as context, not as new updates.\n"
+                        "Rules:\n"
+                        "- Return null for fields not explicitly mentioned in the latest user message.\n"
+                        "- Width phrases such as 'width should be at least 6 ft' or '6 ft wide' map only to width_ft, never length_ft.\n"
+                        "- Length phrases must mention length, long, deck length, trailer length, size, trailer size, or an ambiguous 'make it 14 ft' update.\n"
+                        "- Trailer shorthand like '6x12' means width_ft=6 and length_ft=12; '6x12x5' means width_ft=6, length_ft=12, height=5. Do not store height unless there is an allowed slot/filter for it.\n"
+                        "- Payload/load/haul weight maps to payload_lbs, not GVWR.\n"
+                        "- hitch_type can only be gooseneck or bumper pull; return null for any other value.\n"
+                        "- subcategory must only be returned when the latest message explicitly asks for a subcategory filter.\n"
+                        "- Do not infer subcategory from category words like Tilt, Utility, Dump, Aluminum, or Enclosed.\n"
+                        "- Preserve existing values by returning null unless the latest message updates that exact field.\n"
+                        "- slot_updates may include only allowed category slots and only when the latest message provides the value."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        "Return structured extraction for this context:\n"
+                        f"{_safe_json(context)}"
+                    )
+                ),
+            ]
+        )
+    except Exception:
+        logger.exception("Filter extractor LLM failed; using regex fallback")
+        return _fallback_filter_extraction(state)
+
+
+def _metadata_filters_from_extraction(
+    extraction: FilterExtractionDecision,
+    latest_message: str = "",
+) -> dict[str, Any]:
+    data = _model_dump(extraction)
+    updates: dict[str, Any] = {}
+    for key in _METADATA_FILTER_KEYS:
+        sanitized = _sanitize_metadata_filter_update(key, data.get(key), latest_message)
+        if sanitized:
+            clean_key, clean_value = sanitized
+            updates[clean_key] = clean_value
+    return updates
+
+
+def _metadata_filters_from_decision(
+    decision: dict[str, Any],
+    latest_message: str = "",
+) -> dict[str, Any]:
+    raw = decision.get("metadata_filters_update") or {}
+    updates: dict[str, Any] = {}
+    for key, value in raw.items():
+        sanitized = _sanitize_metadata_filter_update(str(key), value, latest_message)
+        if sanitized:
+            clean_key, clean_value = sanitized
+            updates[clean_key] = clean_value
+    return updates
+
+
+def _slot_updates_from_extraction(
+    extraction: FilterExtractionDecision,
+    allowed_category_slots: set[str],
+) -> dict[str, Any]:
+    raw = dict(extraction.slot_updates or {})
+    return {
+        k: v
+        for k, v in raw.items()
+        if k in allowed_category_slots and v not in (None, "")
+    }
+
+
+def _slot_updates_from_metadata(category: str | None, metadata_filters: dict[str, Any]) -> dict[str, Any]:
+    allowed = _category_slots(category)
+    if not allowed:
+        return {}
+    updates: dict[str, Any] = {}
+
+    def pick(candidates: tuple[str, ...]) -> str | None:
+        for slot in candidates:
+            if slot in allowed:
+                return slot
+        return None
+
+    length_slot = pick(("trailer_length_ft", "haul_length_ft", "vehicle_length_ft", "trailer_size", "cargo_size"))
+    width_slot = pick(("item_or_trailer_width_ft", "trailer_width_ft", "width_ft", "trailer_size", "cargo_size"))
+    payload_slot = pick(("haul_weight_lbs", "payload_need", "total_weight"))
+
+    if length_slot and metadata_filters.get("length_ft"):
+        updates[length_slot] = metadata_filters["length_ft"]
+    if width_slot and width_slot != length_slot and metadata_filters.get("width_ft"):
+        updates[width_slot] = metadata_filters["width_ft"]
+    if payload_slot and metadata_filters.get("payload_lbs"):
+        updates[payload_slot] = metadata_filters["payload_lbs"]
+    for key in ("hitch_type", "color", "max_price"):
+        if key in allowed and metadata_filters.get(key):
+            updates[key] = metadata_filters[key]
+    return updates
+
+
+def _apply_haul_classification_effects(
+    *,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    classification: HaulClassificationDecision,
+) -> tuple[list[str], dict[str, str]]:
+    if not category:
+        return [], {}
+
+    spec = get_trailer_fields_as_dict(category)
+    required_slots = list(spec.get("required_slots") or [])
+    dynamic_questions: dict[str, str] = {}
+    confident = classification.confidence in _CONFIDENT_CLASSIFICATIONS
+    cat = category.strip().lower()
+
+    if confident and classification.matched_item and not slots.get("haul_item"):
+        if "haul_item" in _category_slots(category):
+            slots["haul_item"] = classification.matched_item
+            logger.info(
+                "classification_haul_item_filled | category=%r | matched_item=%r | reason=%r",
+                category,
+                classification.matched_item,
+                classification.reason,
+            )
+
+    if cat == "utility" and confident and classification.is_lightweight_utility_load:
+        required_slots = [slot for slot in required_slots if slot != "haul_weight_lbs"]
+        if not metadata_filters.get("payload_lbs") and not slots.get("haul_weight_lbs"):
+            metadata_filters["payload_lbs"] = "1500 lbs"
+            logger.info(
+                "utility_lightweight_payload_default_applied | matched_item=%r | reason=%r",
+                classification.matched_item,
+                classification.reason,
+            )
+
+    if (
+        cat not in {"utility", "enclosed"}
+        and confident
+        and classification.needs_width_question
+    ):
+        dynamic_questions[_DYNAMIC_WIDTH_SLOT] = _DYNAMIC_WIDTH_QUESTION
+        if metadata_filters.get("width_ft"):
+            slots[_DYNAMIC_WIDTH_SLOT] = metadata_filters["width_ft"]
+        elif _DYNAMIC_WIDTH_SLOT not in required_slots:
+            required_slots.append(_DYNAMIC_WIDTH_SLOT)
+            logger.info(
+                "dynamic_width_question_added | category=%r | matched_item=%r | reason=%r",
+                category,
+                classification.matched_item,
+                classification.reason,
+            )
+
+    return required_slots, dynamic_questions
+
+
+def _filter_pending_for_effective_requirements(
+    pending: list[QuestionItem],
+    *,
+    category: str | None,
+    required_slots: list[str],
+    dynamic_questions: dict[str, str],
+    classification: HaulClassificationDecision,
+) -> list[QuestionItem]:
+    if not category:
+        return pending
+
+    cat = category.strip().lower()
+    confident = classification.confidence in _CONFIDENT_CLASSIFICATIONS
+    allowed = _category_slots(category)
+    effective = set(required_slots) | set(dynamic_questions) | allowed
+    filtered: list[QuestionItem] = []
+
+    for question in pending:
+        slot = str(question.get("slot") or "")
+        if not slot:
+            filtered.append(question)
+            continue
+        if (
+            cat == "utility"
+            and confident
+            and classification.is_lightweight_utility_load
+            and slot == "haul_weight_lbs"
+        ):
+            logger.info(
+                "utility_lightweight_weight_question_removed | matched_item=%r",
+                classification.matched_item,
+            )
+            continue
+        if slot == _DYNAMIC_WIDTH_SLOT and slot not in effective:
+            logger.info("dynamic_width_question_removed | category=%r", category)
+            continue
+        filtered.append(question)
+
+    return filtered
 
 
 def _last_listing(state: ChatbotState) -> dict[str, Any] | None:
@@ -141,9 +541,12 @@ def _queue_questions(
     slots: dict[str, Any],
     pending: list[QuestionItem],
     optional_slots: list[str],
+    required_slots: list[str] | None = None,
+    questions_override: dict[str, str] | None = None,
 ) -> list[QuestionItem]:
     spec = get_trailer_fields_as_dict(category)
     questions = spec.get("questions") or {}
+    questions = {**questions, **(questions_override or {})}
     queued_slots = {q.get("slot") for q in pending}
     next_queue = list(pending)
 
@@ -156,7 +559,7 @@ def _queue_questions(
         next_queue.append({"slot": slot, "question": question, "required": required})
         queued_slots.add(slot)
 
-    for slot in spec.get("required_slots") or []:
+    for slot in (required_slots if required_slots is not None else (spec.get("required_slots") or [])):
         add_slot(slot, True)
     allowed_optional = set(spec.get("optional_slots") or [])
     for slot in optional_slots or []:
@@ -201,10 +604,17 @@ def _validate_slot_value(slot: str, value: Any) -> tuple[bool, str]:
     return True, ""
 
 
-def _required_slot_state(category: str, slots: dict[str, Any]) -> tuple[list[str], list[str], dict[str, str]]:
+def _required_slot_state(
+    category: str,
+    slots: dict[str, Any],
+    *,
+    required_slots: list[str] | None = None,
+    questions_override: dict[str, str] | None = None,
+) -> tuple[list[str], list[str], dict[str, str]]:
     spec = get_trailer_fields_as_dict(category)
-    required_slots = list(spec.get("required_slots") or [])
+    required_slots = list(required_slots if required_slots is not None else (spec.get("required_slots") or []))
     questions = dict(spec.get("questions") or {})
+    questions.update(questions_override or {})
     missing: list[str] = []
     invalid: list[str] = []
     for slot in required_slots:
@@ -249,7 +659,9 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         },
         "current_category": state.get("trailer_category"),
         "deterministic_category_hint": deterministic_hint,
+        "listing_model_fields": sorted(TrailerListing.model_fields.keys()),
         "slots_collected": state.get("slots_collected") or {},
+        "metadata_filters_collected": state.get("metadata_filters_collected") or {},
         "awaiting_slot": state.get("awaiting_slot"),
         "pending_questions": state.get("pending_questions") or [],
         "asked_questions": state.get("asked_questions") or [],
@@ -284,6 +696,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     decision = dict(state.get("mind_decision") or {})
     slots_before = dict(state.get("slots_collected") or {})
     slots = dict(slots_before)
+    metadata_filters_before = dict(state.get("metadata_filters_collected") or {})
+    metadata_filters = dict(metadata_filters_before)
     invalid_required_slot: str | None = None
     awaiting_slot = state.get("awaiting_slot")
     if awaiting_slot and awaiting_slot not in slots and (state.get("user_message") or "").strip():
@@ -300,24 +714,6 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 candidate_value,
                 reason,
             )
-    for key, value in (decision.get("slots_collected_update") or {}).items():
-        if value in (None, ""):
-            continue
-        is_valid, reason = _validate_slot_value(key, value)
-        if not is_valid:
-            logger.info(
-                "slot_validation_failed | slot=%s | value=%r | reason=%s",
-                key,
-                value,
-                reason,
-            )
-            if not invalid_required_slot:
-                invalid_required_slot = key
-            continue
-        slots[key] = value
-    if awaiting_slot and awaiting_slot in slots:
-        awaiting_slot = None
-
     category_before = state.get("trailer_category")
     category_proposed = decision.get("trailer_category") or category_before
     category_locked_pre_results = bool(category_before) and not bool(
@@ -334,11 +730,124 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     else:
         category = category_proposed
 
+    category_changed = bool(category_before and category and category != category_before)
+    reset_result_state = False
+    if category_changed:
+        logger.info(
+            "category_change_clears_filters | old_category=%r | new_category=%r",
+            category_before,
+            category,
+        )
+        slots = {}
+        metadata_filters = {}
+        awaiting_slot = None
+        reset_result_state = True
+
+    allowed_category_slots = _category_slots(category)
+    for key, value in (decision.get("slots_collected_update") or {}).items():
+        if value in (None, ""):
+            continue
+        if category and key not in allowed_category_slots:
+            continue
+        is_valid, reason = _validate_slot_value(key, value)
+        if not is_valid:
+            logger.info(
+                "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                key,
+                value,
+                reason,
+            )
+            if not invalid_required_slot:
+                invalid_required_slot = key
+            continue
+        slots[key] = value
+
+    latest_message = state.get("user_message") or ""
+    for key, value in _metadata_filters_from_decision(decision, latest_message).items():
+        metadata_filters[key] = value
+    extraction = _extract_filter_decision(
+        {
+            **state,
+            "trailer_category": category,
+            "slots_collected": slots,
+            "metadata_filters_collected": metadata_filters,
+        },
+        category,
+    )
+    extracted_metadata = _metadata_filters_from_extraction(extraction, latest_message)
+    extracted_slots = _slot_updates_from_extraction(extraction, allowed_category_slots)
+    logger.info(
+        "filter_extraction_applied | category=%r | extracted_metadata=%s | extracted_slots=%s",
+        category,
+        json.dumps(extracted_metadata, default=str),
+        json.dumps(extracted_slots, default=str),
+    )
+    for key, value in extracted_metadata.items():
+        if key in _METADATA_FILTER_KEYS and value not in (None, ""):
+            metadata_filters[key] = value
+    for key, value in extracted_slots.items():
+        is_valid, reason = _validate_slot_value(key, value)
+        if is_valid:
+            slots[key] = value
+        else:
+            logger.info(
+                "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                key,
+                value,
+                reason,
+            )
+
+    for key, value in _slot_updates_from_metadata(category, metadata_filters).items():
+        if key in slots or value in (None, ""):
+            continue
+        is_valid, reason = _validate_slot_value(key, value)
+        if is_valid:
+            slots[key] = value
+        else:
+            logger.info(
+                "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                key,
+                value,
+                reason,
+            )
+            if not invalid_required_slot:
+                invalid_required_slot = key
+    if awaiting_slot and awaiting_slot in slots:
+        awaiting_slot = None
+
+    haul_classification = classify_haul_requirements(
+        category=category,
+        user_message=state.get("user_message") or "",
+        recent_messages=state.get("messages") or [],
+        slots_collected=slots,
+        metadata_filters_collected=metadata_filters,
+    )
+    required_slots_override, dynamic_questions = _apply_haul_classification_effects(
+        category=category,
+        slots=slots,
+        metadata_filters=metadata_filters,
+        classification=haul_classification,
+    )
+    if awaiting_slot and awaiting_slot in slots:
+        awaiting_slot = None
+    logger.info(
+        "haul_classification_applied | category=%r | classification=%s | required_slots=%s | dynamic_questions=%s",
+        category,
+        json.dumps(_model_dump(haul_classification), default=str),
+        json.dumps(required_slots_override, default=str),
+        json.dumps(dynamic_questions, default=str),
+    )
+
     missing_required: list[str] = []
     invalid_required: list[str] = []
     questions_by_slot: dict[str, str] = {}
     if category:
-        missing_required, invalid_required, questions_by_slot = _required_slot_state(category, slots)
+        missing_required, invalid_required, questions_by_slot = _required_slot_state(
+            category,
+            slots,
+            required_slots=required_slots_override,
+            questions_override=dynamic_questions,
+        )
         for slot in invalid_required:
             if slot in slots:
                 del slots[slot]
@@ -351,16 +860,26 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         json.dumps(invalid_required),
     )
 
+    pending_source = [] if reset_result_state else (state.get("pending_questions") or [])
     pending = [
-        q for q in (state.get("pending_questions") or [])
+        q for q in pending_source
         if q.get("slot") not in slots
     ]
+    pending = _filter_pending_for_effective_requirements(
+        pending,
+        category=category,
+        required_slots=required_slots_override,
+        dynamic_questions=dynamic_questions,
+        classification=haul_classification,
+    )
     if category:
         pending = _queue_questions(
             category=category,
             slots=slots,
             pending=pending,
             optional_slots=decision.get("optional_question_slots_to_queue") or [],
+            required_slots=required_slots_override,
+            questions_override=dynamic_questions,
         )
 
     valid_actions = {
@@ -386,7 +905,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         action in {"pinecone_search", "respond"} and bool(pending)
     )
 
-    asked = list(state.get("asked_questions") or [])
+    asked = [] if reset_result_state else list(state.get("asked_questions") or [])
     assistant_text = decision.get("assistant_text") or ""
     if should_ask and pending:
         next_question = pending.pop(0)
@@ -426,17 +945,24 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         assistant_text = "How can I help with your trailer search?"
 
     slots_after = dict(slots)
+    metadata_filters_after = dict(metadata_filters)
     slot_changes = {
         k: {"before": slots_before.get(k), "after": slots_after.get(k)}
         for k in set(slots_before.keys()) | set(slots_after.keys())
         if slots_before.get(k) != slots_after.get(k)
     }
+    metadata_filter_changes = {
+        k: {"before": metadata_filters_before.get(k), "after": metadata_filters_after.get(k)}
+        for k in set(metadata_filters_before.keys()) | set(metadata_filters_after.keys())
+        if metadata_filters_before.get(k) != metadata_filters_after.get(k)
+    }
     logger.info(
-        "mind_decision_applied | action=%s | category_before=%r | category_after=%r | slot_changes=%s | pending_count=%s",
+        "mind_decision_applied | action=%s | category_before=%r | category_after=%r | slot_changes=%s | metadata_filter_changes=%s | pending_count=%s",
         action,
         category_before,
         category,
         json.dumps(slot_changes, default=str),
+        json.dumps(metadata_filter_changes, default=str),
         len(pending),
     )
 
@@ -445,9 +971,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         **state,
         "trailer_category": category,
         "slots_collected": slots,
+        "metadata_filters_collected": metadata_filters,
         "awaiting_slot": awaiting_slot,
         "pending_questions": pending,
         "asked_questions": asked,
+        "already_shown_listing_urls": [] if reset_result_state else state.get("already_shown_listing_urls"),
+        "last_listings": [] if reset_result_state else state.get("last_listings"),
         "assistant_text": assistant_text,
         "selected_listing_title": decision.get("selected_listing_title"),
         "selected_listing_url": decision.get("selected_listing_url"),
@@ -468,14 +997,16 @@ def _route_after_mind(state: ChatbotState) -> str:
 
 def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
     logger.info(
-        "pinecone_search_execute | category=%r | slots=%s | shown_count=%s",
+        "pinecone_search_execute | category=%r | slots=%s | metadata_filters=%s | shown_count=%s",
         state.get("trailer_category"),
         json.dumps(state.get("slots_collected") or {}, default=str),
+        json.dumps(state.get("metadata_filters_collected") or {}, default=str),
         len(state.get("already_shown_listing_urls") or []),
     )
     listings = search_pinecone_listings(
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
+        metadata_filters=state.get("metadata_filters_collected") or {},
         user_message=state.get("user_message") or "",
         already_shown_urls=state.get("already_shown_listing_urls") or [],
     )
@@ -547,6 +1078,7 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
     category = (decision.get("faq_category") or "contact_human").strip().lower()
     summary = decision.get("faq_summary") or FAQ_CATEGORY_LABELS.get(category)
     result = send_non_sales_faq_email(
+        session_id=state.get("session_id") or "",
         full_name=state.get("customer_full_name") or "",
         email=state.get("customer_email"),
         phone=state.get("customer_phone") or "",

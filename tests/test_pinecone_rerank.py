@@ -24,7 +24,7 @@ def test_length_first_rerank_prefers_nearest_overage():
     ranked, dbg = ps._rerank_listings_by_fit(
         listings,
         required_length_ft=12.0,
-        required_gvwr_lbs=None,
+        required_payload_lbs=None,
         required_width_ft=None,
         warn_ratio=1.35,
         extreme_ratio=1.9,
@@ -44,7 +44,7 @@ def test_under_length_is_not_preferred_over_valid_lengths():
     ranked, _ = ps._rerank_listings_by_fit(
         listings,
         required_length_ft=12.0,
-        required_gvwr_lbs=None,
+        required_payload_lbs=None,
         required_width_ft=None,
         warn_ratio=1.35,
         extreme_ratio=1.9,
@@ -59,7 +59,7 @@ def test_rerank_skips_when_no_requirements():
     ranked, dbg = ps._rerank_listings_by_fit(
         listings,
         required_length_ft=None,
-        required_gvwr_lbs=None,
+        required_payload_lbs=None,
         required_width_ft=None,
         warn_ratio=1.35,
         extreme_ratio=1.9,
@@ -68,3 +68,22 @@ def test_rerank_skips_when_no_requirements():
     )
     assert dbg["applied"] is False
     assert ranked == listings
+
+
+def test_payload_capacity_is_used_before_gvwr_for_weight_fit():
+    listings = [
+        _mk("high-gvwr-low-payload", "12 ft", 0.9, gvwr="14,000 lbs", payload="1,000 lbs"),
+        _mk("payload-match", "12 ft", 0.2, gvwr="3,500 lbs", payload="3,000 lbs"),
+    ]
+    ranked, dbg = ps._rerank_listings_by_fit(
+        listings,
+        required_length_ft=None,
+        required_payload_lbs=3000.0,
+        required_width_ft=None,
+        warn_ratio=1.35,
+        extreme_ratio=1.9,
+        length_weight=8.0,
+        missing_dim_penalty=0.35,
+    )
+    assert dbg["required_payload_lbs"] == 3000.0
+    assert [x["title"] for x in ranked] == ["payload-match"]

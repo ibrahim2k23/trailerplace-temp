@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from src.email_sender import send_faq_email_sync, send_ticket_notification
-from src.conversation_store import update_lead_item_of_interest
+from src.conversation_store import promote_lead_to_hard, update_lead_item_of_interest
 
 FAQ_CATEGORY_LABELS = {
     "contact_human": "Customer asked to contact a human.",
@@ -30,6 +30,7 @@ def send_interested_listing_email(
         phone=phone,
         item_name=item,
     )
+    promote_lead_to_hard(session_id)
     update_lead_item_of_interest(session_id, item)
     return {
         "status": "sent",
@@ -44,6 +45,7 @@ def send_interested_listing_email(
 
 def send_non_sales_faq_email(
     *,
+    session_id: str = "",
     full_name: str,
     email: Optional[str],
     phone: str,
@@ -64,6 +66,7 @@ def send_non_sales_faq_email(
         subject=f"FAQ inquiry: {category}",
         summary_line=summary_line,
     )
+    promote_lead_to_hard(session_id)
     return {
         "status": "sent",
         "body_preview": (

@@ -10,6 +10,7 @@ def _base_state() -> dict:
         "customer_full_name": "Test User",
         "customer_email": "test@example.com",
         "customer_phone": "979-555-1111",
+        "session_id": "session-123",
         "tool_events": [],
     }
 
@@ -31,6 +32,7 @@ def test_faq_node_prefers_planner_assistant_text(monkeypatch):
 
     assert out["assistant_text"].startswith("We offer financing.")
     assert out["tool_events"][-1]["tool"] == "send_non_sales_faq_email"
+    assert out["tool_events"][-1]["result"]["kwargs"]["session_id"] == "session-123"
 
 
 def test_faq_node_uses_category_fallback_when_planner_text_missing(monkeypatch):

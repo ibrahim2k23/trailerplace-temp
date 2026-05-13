@@ -250,9 +250,11 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     gvwr = str(info.get("gvwr", "")).strip() or None
     gvwr_lbs_num = parse_lbs(gvwr)
     payload = str(info.get("payload_capacity", "")).strip() or None
+    payload_lbs_num = parse_lbs(payload)
     material = str(info.get("trailer_material", "")).strip() or None
     floor = str(info.get("floor", "")).strip() or None
     length_ft_num = parse_length_ft(length)
+    width_ft_num = parse_length_ft(width)
     embedding_text = build_embedding_text(info, title, dealer_notes)
 
     metadata: dict = {
@@ -277,7 +279,9 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         ("gvwr", gvwr),
         ("gvwr_lbs_num", gvwr_lbs_num),
         ("length_ft_num", length_ft_num),
+        ("width_ft_num", width_ft_num),
         ("payload_capacity", payload),
+        ("payload_lbs_num", payload_lbs_num),
         ("trailer_material", material),
         ("floor", floor),
     ]:

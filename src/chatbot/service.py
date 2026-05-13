@@ -61,6 +61,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "messages": [],
         "trailer_category": None,
         "slots_collected": {},
+        "metadata_filters_collected": {},
         "awaiting_slot": None,
         "pending_questions": [],
         "asked_questions": [],
@@ -326,12 +327,17 @@ def _conversation_payload(session: dict[str, Any]) -> list[dict[str, Any]]:
         assistant_msg = messages[idx + 1] if idx + 1 < len(messages) else None
         turn = {
             "user": user_msg.get("content") if user_msg else None,
-            "assistant": assistant_msg.get("content") if assistant_msg else None,
+            "chatbot": assistant_msg.get("content") if assistant_msg else None,
         }
         if assistant_msg:
-            for key in ("tool_events", "listings", "trailer_category", "slots_collected"):
+            for key in ("trailer_category", "metadata_filters_collected"):
                 if assistant_msg.get(key) not in (None, "", [], {}):
                     turn[key] = assistant_msg[key]
+            feedback = assistant_msg.get("feedback")
+            if feedback in (None, ""):
+                feedback = assistant_msg.get("user_feedback")
+            if feedback not in (None, ""):
+                turn["feedback"] = feedback
         turns.append(turn)
     return turns
 
@@ -368,6 +374,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "sales_phase": "main",
         "trailer_category": session.get("trailer_category"),
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
+        "metadata_filters_collected": deepcopy(session.get("metadata_filters_collected") or {}),
         "awaiting_slot": session.get("awaiting_slot"),
         "pending_questions": deepcopy(session.get("pending_questions") or []),
         "asked_questions": list(session.get("asked_questions") or []),
@@ -385,6 +392,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
 def _reset_search_state_for_category_switch(session: dict[str, Any], old_category: str, new_category: str) -> None:
     session["trailer_category"] = None
     session["slots_collected"] = {}
+    session["metadata_filters_collected"] = {}
     session["awaiting_slot"] = None
     session["pending_questions"] = []
     session["asked_questions"] = []
@@ -551,6 +559,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     for key in (
         "trailer_category",
         "slots_collected",
+        "metadata_filters_collected",
         "awaiting_slot",
         "pending_questions",
         "asked_questions",
@@ -580,6 +589,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "listings": result.get("last_listings") or [],
         "trailer_category": result.get("trailer_category"),
         "slots_collected": result.get("slots_collected") or {},
+        "metadata_filters_collected": result.get("metadata_filters_collected") or {},
     }
     session["messages"].append(assistant_msg)
     session["sales_phase"] = "main"
@@ -598,6 +608,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         thinking_context={
             "category": session.get("trailer_category"),
             "slots": session.get("slots_collected") or {},
+            "metadata_filters": session.get("metadata_filters_collected") or {},
             "tool_events": result.get("tool_events") or [],
         },
     )
