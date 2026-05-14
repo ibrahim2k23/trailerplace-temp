@@ -34,6 +34,11 @@ def _use_fallback_extractor(monkeypatch):
         "classify_haul_requirements",
         lambda **kwargs: graph.HaulClassificationDecision(),
     )
+    monkeypatch.setattr(
+        graph,
+        "classify_no_preference",
+        lambda **kwargs: graph.PreferenceNullDecision(),
+    )
 
 
 def _mock_haul_classifier(monkeypatch, **values):
@@ -41,6 +46,14 @@ def _mock_haul_classifier(monkeypatch, **values):
         graph,
         "classify_haul_requirements",
         lambda **kwargs: graph.HaulClassificationDecision(**values),
+    )
+
+
+def _mock_preference_classifier(monkeypatch, **values):
+    monkeypatch.setattr(
+        graph,
+        "classify_no_preference",
+        lambda **kwargs: graph.PreferenceNullDecision(**values),
     )
 
 
@@ -54,6 +67,11 @@ def _mock_extractor(monkeypatch, **values):
         graph,
         "classify_haul_requirements",
         lambda **kwargs: graph.HaulClassificationDecision(),
+    )
+    monkeypatch.setattr(
+        graph,
+        "classify_no_preference",
+        lambda **kwargs: graph.PreferenceNullDecision(),
     )
 
 
@@ -234,6 +252,62 @@ def test_utility_lightweight_user_weight_overrides_payload_default(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_utility_length_without_haul_item_asks_haul_question(monkeypatch):
+    _mock_extractor(monkeypatch, length_ft="12")
+    _mock_haul_classifier(
+        monkeypatch,
+        is_lightweight_utility_load=True,
+        needs_width_question=False,
+        matched_item=None,
+        confidence="high",
+    )
+
+    out = graph._apply_mind_node(_state("I am looking for a 12 ft utility trailer", category="Utility"))
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert out["assistant_text"] == "What will you be hauling on the utility trailer?"
+    assert out["awaiting_slot"] == "haul_item"
+    assert out["metadata_filters_collected"] == {"length_ft": "12"}
+    assert "payload_lbs" not in out["metadata_filters_collected"]
+
+
+def test_utility_generic_request_asks_haul_question(monkeypatch):
+    _mock_extractor(monkeypatch)
+    _mock_haul_classifier(
+        monkeypatch,
+        is_lightweight_utility_load=True,
+        needs_width_question=False,
+        matched_item=None,
+        confidence="high",
+    )
+
+    out = graph._apply_mind_node(_state("I am looking for a utility trailer", category="Utility"))
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert out["assistant_text"] == "What will you be hauling on the utility trailer?"
+    assert out["awaiting_slot"] == "haul_item"
+    assert out["metadata_filters_collected"] == {}
+
+
+def test_no_preference_only_skips_current_question(monkeypatch):
+    _mock_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["haul_item", "haul_weight_lbs"],
+        confidence="high",
+    )
+    state = _state("no preference", category="Utility")
+    state["awaiting_slot"] = "haul_weight_lbs"
+    state["slots_collected"] = {"haul_item": "golf cart"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_skipped"] == ["haul_weight_lbs"]
+    assert out["slots_collected"] == {"haul_item": "golf cart"}
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
 def test_utility_unknown_item_still_asks_weight(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     state = _state("I need a utility trailer for construction equipment", category="Utility")
@@ -354,6 +428,25 @@ def test_utility_does_not_add_dynamic_width_question(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_livestock_does_not_add_dynamic_width_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_haul_classifier(
+        monkeypatch,
+        needs_width_question=True,
+        matched_item="livestock trailer",
+        reason="Classifier confused trailer category for haul item.",
+        confidence="high",
+    )
+    state = _state("I am looking for a 12 feet livestock trailer", category="Livestock")
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["trailer_length_ft"] == "12 feet"
+    assert "item_or_trailer_width_ft" not in out["slots_collected"]
+    assert out["pending_questions"] == []
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
 def test_invalid_hitch_metadata_filter_is_rejected(monkeypatch):
     _mock_extractor(monkeypatch, hitch_type="Tilt")
     state = _state("around 77 inches", category="Tilt")
@@ -396,3 +489,139 @@ def test_subcategory_stored_when_explicitly_requested(monkeypatch):
     out = graph._apply_mind_node(state)
 
     assert out["metadata_filters_collected"]["subcategory"] == "Deckover"
+
+
+def test_aluminum_base_category_maps_to_subcategory_filter(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("utility trailer", category="Aluminum")
+    state["awaiting_slot"] = "base_category"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["base_category"] == "utility trailer"
+    assert out["metadata_filters_collected"]["subcategory"] == "Utility"
+    assert out["awaiting_slot"] == "payload_need"
+
+
+def test_aluminum_base_category_none_leaves_subcategory_unset(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["base_category"],
+        target_metadata_filters=["subcategory"],
+        reason="User has no base category preference.",
+        confidence="high",
+    )
+    state = _state("no preference", category="Aluminum")
+    state["awaiting_slot"] = "base_category"
+    state["metadata_filters_collected"] = {"subcategory": "Utility"}
+
+    out = graph._apply_mind_node(state)
+
+    assert "base_category" not in out["slots_collected"]
+    assert "base_category" in out["slots_skipped"]
+    assert "subcategory" not in out["metadata_filters_collected"]
+    assert out["awaiting_slot"] == "payload_need"
+
+
+def test_aluminum_does_not_add_dynamic_width_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_haul_classifier(
+        monkeypatch,
+        needs_width_question=True,
+        matched_item="10 feet aluminum trailer",
+        reason="Classifier confused trailer phrase for haul item.",
+        confidence="high",
+    )
+    state = _state("I am looking for a 10 feet aluminum trailer", category="Aluminum")
+
+    out = graph._apply_mind_node(state)
+
+    assert "item_or_trailer_width_ft" not in out["slots_collected"]
+    assert all(q.get("slot") != "item_or_trailer_width_ft" for q in out["pending_questions"])
+    assert out["awaiting_slot"] == "base_category"
+
+
+def test_no_preference_skips_aluminum_payload_and_searches(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["payload_need"],
+        target_metadata_filters=["payload_lbs"],
+        reason="User has no payload preference.",
+        confidence="high",
+    )
+    state = _state("no preference regarding that", category="Aluminum")
+    state["awaiting_slot"] = "payload_need"
+    state["slots_skipped"] = ["base_category"]
+    state["metadata_filters_collected"] = {"length_ft": "10", "payload_lbs": "3000 lbs"}
+
+    out = graph._apply_mind_node(state)
+
+    assert "payload_need" not in out["slots_collected"]
+    assert set(out["slots_skipped"]) == {"base_category", "payload_need"}
+    assert out["metadata_filters_collected"] == {"length_ft": "10"}
+    assert out["pending_questions"] == []
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_no_preference_skips_stale_width_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["item_or_trailer_width_ft"],
+        target_metadata_filters=["width_ft"],
+        reason="User has no width preference.",
+        confidence="high",
+    )
+    state = _state("no preference", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "skid steer",
+        "haul_weight_lbs": "7000 lbs",
+        "haul_length_ft": "12 ft",
+    }
+    state["awaiting_slot"] = "item_or_trailer_width_ft"
+    state["pending_questions"] = [
+        {
+            "slot": "item_or_trailer_width_ft",
+            "question": "About how wide is the item, or what trailer width do you need?",
+            "required": True,
+        }
+    ]
+    state["metadata_filters_collected"] = {"width_ft": "6 ft"}
+
+    out = graph._apply_mind_node(state)
+
+    assert "item_or_trailer_width_ft" in out["slots_skipped"]
+    assert "width_ft" not in out["metadata_filters_collected"]
+    assert out["pending_questions"] == []
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_no_preference_skips_equipment_weight(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["haul_weight_lbs"],
+        target_metadata_filters=["payload_lbs"],
+        reason="User has no weight preference.",
+        confidence="high",
+    )
+    state = _state("no preference", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_length_ft": "12 ft",
+    }
+    state["awaiting_slot"] = "haul_weight_lbs"
+    state["metadata_filters_collected"] = {"payload_lbs": "3000 lbs"}
+
+    out = graph._apply_mind_node(state)
+
+    assert "haul_weight_lbs" in out["slots_skipped"]
+    assert "payload_lbs" not in out["metadata_filters_collected"]
+    assert out["pending_questions"] == []
+    assert out["mind_decision"]["action"] == "pinecone_search"

@@ -15,3 +15,6 @@ env/
 # Environment files
 .env
 .env.*
+
+# Runtime logs
+logs/

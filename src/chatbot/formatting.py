@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 _BULLET_FIELDS: list[tuple[str, tuple[str, ...]]] = [
     ("Price", ("price_display", "price")),
     ("Length", ("length",)),
+    ("Width", ("width",)),
     ("GVWR", ("gvwr",)),
     ("Payload Capacity", ("payload_capacity",)),
     ("Hitch Type", ("hitch_type",)),
@@ -84,19 +85,26 @@ def _ordered_bullets(
     if hitch_slot:
         hint["Hitch Type"] += 2
 
+    mandatory_labels = {"Length", "Width"}
+    mandatory_lines: list[str] = []
     candidates: list[tuple[int, str, str]] = []
     for label, keys in _BULLET_FIELDS:
         value = _first_value(listing, *keys)
         if value in (None, ""):
             continue
+        line = f"{label}: {value}"
+        if label in mandatory_labels:
+            mandatory_lines.append(line)
+            continue
         score = hint.get(label, 0)
         if label == "Hitch Type" and hitch_slot and str(value).lower():
             if hitch_slot in str(value).lower() or str(value).lower() in hitch_slot:
                 score += 2
-        candidates.append((score, label, f"{label}: {value}"))
+        candidates.append((score, label, line))
 
     candidates.sort(key=lambda x: (-x[0], x[1]))
-    return [c[2] for c in candidates[:6]]
+    remaining_capacity = max(0, 6 - len(mandatory_lines))
+    return mandatory_lines + [c[2] for c in candidates[:remaining_capacity]]
 
 
 def _why_it_fits_body(
@@ -256,7 +264,7 @@ def format_listing_results(
             block_parts.extend(["", "\n".join(bullet_lines)])
         else:
             block_parts.extend(["", "- *(No spec fields on this listing.)*"])
-        block_parts.extend(["", f"**Why-it-fits:** {why}"])
+        block_parts.extend(["", why])
 
         sections.append("\n".join(block_parts))
 

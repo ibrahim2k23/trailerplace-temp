@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.graph import build_chatbot_graph
+from src.chatbot.tools.email_tools import send_non_sales_faq_email
 from src.conversation_store import (
     create_or_get_soft_lead,
     enqueue_upsert_conversation,
@@ -36,12 +37,22 @@ _GENERAL_INTENT_RE = re.compile(
     r")\b",
     re.I,
 )
+_CONFUSION_ESCALATION_REPLY = (
+    "I've forwarded your request to our sales department, and they will reach out to you soon."
+)
+_CONFUSION_REPEAT_THRESHOLD = 2
+_CONFUSION_HISTORY_WINDOW = 6
 
 
 class ContactExtraction(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+
+
+class ConfusionDetectionDecision(BaseModel):
+    similar_repeat_count: int = 0
+    confused: bool = False
 
 
 def _model_dump(model: BaseModel) -> dict[str, Any]:
@@ -61,6 +72,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "messages": [],
         "trailer_category": None,
         "slots_collected": {},
+        "slots_skipped": [],
         "metadata_filters_collected": {},
         "awaiting_slot": None,
         "pending_questions": [],
@@ -70,6 +82,8 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "tool_events": [],
         "has_shown_search_results": False,
         "active_category_cycle_id": 1,
+        "confusion_escalated": False,
+        "confusion_signal_count": 0,
     }
 
 
@@ -88,6 +102,13 @@ def reset_session(session_id: str) -> None:
 def _contact_llm():
     return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
         ContactExtraction,
+        method="function_calling",
+    )
+
+
+def _confusion_llm():
+    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
+        ConfusionDetectionDecision,
         method="function_calling",
     )
 
@@ -319,6 +340,82 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
         return _has_actionable_intent(user_message)
 
 
+def _recent_user_messages(session: dict[str, Any], limit: int = _CONFUSION_HISTORY_WINDOW) -> list[str]:
+    messages = session.get("messages") or []
+    user_turns = [
+        str(m.get("content") or "").strip()
+        for m in messages
+        if isinstance(m, dict) and m.get("role") == "user" and str(m.get("content") or "").strip()
+    ]
+    return user_turns[-limit:]
+
+
+def _is_confused_user_turn(session: dict[str, Any], user_message: str) -> tuple[bool, int]:
+    recent_user_turns = _recent_user_messages(session)
+    if len(recent_user_turns) < _CONFUSION_REPEAT_THRESHOLD:
+        return False, 0
+
+    try:
+        result = _confusion_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Detect whether the latest user message appears repeatedly similar to recent user messages. "
+                        "Return structured output with:\n"
+                        "- similar_repeat_count: number of recent user messages including the latest that are materially similar to the latest.\n"
+                        "- confused: true only if the user appears confused due to repeating the same/similar ask.\n"
+                        "Only count semantic repeats of the same request; do not count natural follow-ups."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"Latest user message: {user_message}\n"
+                        f"Recent user messages (oldest to latest): {recent_user_turns}"
+                    )
+                ),
+            ]
+        )
+        decision = _model_dump(result)
+        similar_repeat_count = int(decision.get("similar_repeat_count") or 0)
+        confused = bool(decision.get("confused"))
+        return confused and similar_repeat_count >= _CONFUSION_REPEAT_THRESHOLD, similar_repeat_count
+    except Exception:
+        logger.exception("Confusion detector failed; skipping escalation check")
+        return False, 0
+
+
+def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, similar_repeat_count: int) -> ChatResponse:
+    if not session.get("confusion_escalated"):
+        send_non_sales_faq_email(
+            session_id=session.get("session_id") or "",
+            full_name=session.get("customer_full_name") or "",
+            email=session.get("customer_email"),
+            phone=session.get("customer_phone") or "",
+            faq_category="contact_human",
+            summary=(
+                "Customer appears confused due to repeated similar requests; "
+                "please reach out from the sales department."
+            ),
+            user_message=request.message,
+        )
+        session["confusion_escalated"] = True
+    session["confusion_signal_count"] = int(similar_repeat_count)
+    assistant_text = _CONFUSION_ESCALATION_REPLY
+    session["messages"].append({"role": "assistant", "content": assistant_text})
+    _persist(session)
+    _log_chat_turn(request.session_id, request.message, assistant_text)
+    return ChatResponse(
+        assistant_text=assistant_text,
+        sales_phase="main",
+        onboarding_api_messages=request.onboarding_api_messages,
+        customer_full_name=session.get("customer_full_name"),
+        customer_email=session.get("customer_email") or "",
+        customer_phone=session.get("customer_phone"),
+        main_prior_messages=session.get("messages") or [],
+        listings=[],
+    )
+
+
 def _conversation_payload(session: dict[str, Any]) -> list[dict[str, Any]]:
     turns: list[dict[str, Any]] = []
     messages = session.get("messages") or []
@@ -374,6 +471,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "sales_phase": "main",
         "trailer_category": session.get("trailer_category"),
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
+        "slots_skipped": list(session.get("slots_skipped") or []),
         "metadata_filters_collected": deepcopy(session.get("metadata_filters_collected") or {}),
         "awaiting_slot": session.get("awaiting_slot"),
         "pending_questions": deepcopy(session.get("pending_questions") or []),
@@ -392,6 +490,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
 def _reset_search_state_for_category_switch(session: dict[str, Any], old_category: str, new_category: str) -> None:
     session["trailer_category"] = None
     session["slots_collected"] = {}
+    session["slots_skipped"] = []
     session["metadata_filters_collected"] = {}
     session["awaiting_slot"] = None
     session["pending_questions"] = []
@@ -486,6 +585,10 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             listings=[],
         )
 
+    confused_turn, similar_repeat_count = _is_confused_user_turn(session, request.message)
+    if confused_turn:
+        return _handle_confusion_escalation(session, request, similar_repeat_count)
+
     should_route_graph = _should_route_to_graph(session, request.message)
     logger.info(
         "main_phase_route_decision | session_id=%s | should_route_graph=%s | has_last_listings=%s | actionable_intent=%s",
@@ -559,6 +662,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     for key in (
         "trailer_category",
         "slots_collected",
+        "slots_skipped",
         "metadata_filters_collected",
         "awaiting_slot",
         "pending_questions",

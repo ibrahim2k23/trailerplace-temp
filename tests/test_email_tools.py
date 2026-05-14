@@ -44,7 +44,11 @@ def test_non_sales_faq_email_promotes_lead_to_hard(monkeypatch):
         phone="979-555-1111",
         faq_category="financing",
         summary="Customer asked about financing.",
+        user_message="Can you help me with financing?",
     )
 
     assert result["status"] == "sent"
     assert ("promote", "session-456") in calls
+    send_call = calls[0][1]
+    assert "Customer asked about financing." in send_call["summary_line"]
+    assert "Last user message: Can you help me with financing?" in send_call["summary_line"]

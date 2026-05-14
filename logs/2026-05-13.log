@@ -481,3 +481,248 @@
 2026-05-13 17:15:17 INFO [src.chatbot.service] graph_result | session_id=3f806f22-e3a8-4c28-9e7f-c54cf8387546 | action='pinecone_search' | category='Livestock' | tool_events=[{"tool": "pinecone_search", "result_count": 0}]
 2026-05-13 17:15:17 INFO [src.chatbot.service] chat_turn | session_id=3f806f22-e3a8-4c28-9e7f-c54cf8387546 | user_question='I am looking for a 6x12 livestock trailer' | chatbot_response='I could not find a strong inventory match with those details yet. If you can loosen one requirement, I can search again.'
 2026-05-13 17:15:19 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:35:24 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:35:32 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:35:36 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:35:36 INFO [src.chatbot.service] chat_turn | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | user_question='Hello. Ibrahim here and number is 03304388550' | chatbot_response='Thank you for providing your details, Ibrahim! How can I assist you today?'
+2026-05-13 17:35:38 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:35:46 INFO [src.chatbot.service] main_phase_route_decision | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 17:35:49 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:35:51 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:35:51 INFO [src.chatbot.graph] filter_extraction_applied | category=None | extracted_metadata={} | extracted_slots={}
+2026-05-13 17:35:52 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:35:52 INFO [src.chatbot.graph] haul_classification_applied | category=None | classification={"is_lightweight_utility_load": false, "needs_width_question": false, "matched_item": null, "reason": "No specific haul item mentioned in the user's message.", "confidence": "low"} | required_slots=[] | dynamic_questions={}
+2026-05-13 17:35:52 INFO [src.chatbot.graph] required_completion_state | category=None | missing=[] | invalid=[]
+2026-05-13 17:35:52 INFO [src.chatbot.graph] mind_decision_applied | action=send_non_sales_faq_email | category_before=None | category_after=None | slot_changes={} | metadata_filter_changes={} | pending_count=0
+2026-05-13 17:35:55 INFO [src.email_sender] FAQ email sent to configured EMAIL_TO subject='FAQ inquiry: contact_human'
+2026-05-13 17:35:57 INFO [src.chatbot.service] graph_result | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | action='send_non_sales_faq_email' | category=None | tool_events=[{"tool": "send_non_sales_faq_email", "result": {"status": "sent", "body_preview": "Name: Ibrahim\nEmail: Not provided\nPhone Number: 03304388550\n\n[contact_human] For any questions or concerns, you're welcome to reach our team directly at 979-532-1486. They'll be happy to assist you, and I'm here to continue helping with your trailer search as well!"}}]
+2026-05-13 17:35:57 INFO [src.chatbot.service] chat_turn | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | user_question='how can I contact you guys?' | chatbot_response='You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!'
+2026-05-13 17:36:00 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:39:39 INFO [src.chatbot.service] main_phase_route_decision | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 17:39:43 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:39:44 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:39:44 INFO [src.chatbot.graph] filter_extraction_applied | category='Livestock' | extracted_metadata={"length_ft": "12"} | extracted_slots={}
+2026-05-13 17:39:45 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:39:45 INFO [src.chatbot.graph] dynamic_width_question_added | category='Livestock' | matched_item='livestock trailer' | reason='Livestock trailers are typically large and may require a width question for proper classification.'
+2026-05-13 17:39:45 INFO [src.chatbot.graph] haul_classification_applied | category='Livestock' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "livestock trailer", "reason": "Livestock trailers are typically large and may require a width question for proper classification.", "confidence": "high"} | required_slots=["trailer_length_ft", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 17:39:45 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 17:39:45 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={"trailer_length_ft": {"before": null, "after": "12 ft"}} | metadata_filter_changes={"length_ft": {"before": null, "after": "12"}} | pending_count=0
+2026-05-13 17:39:45 INFO [src.chatbot.service] graph_result | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 17:39:45 INFO [src.chatbot.service] chat_turn | session_id=a912bb3c-c36c-4eb7-ba35-a2f982dd4de8 | user_question='I am looking for a 12 ft livestock trailer' | chatbot_response='About how wide is the item, or what trailer width do you need?'
+2026-05-13 17:39:47 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:40:22 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:23 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:23 INFO [src.chatbot.service] chat_turn | session_id=ae326ff1-118e-4653-b3fb-9e1a2176df9f | user_question='I am looking for a livestock trailer' | chatbot_response='Thanks for reaching out! Could you please provide your phone number so we can assist you better with your livestock trailer needs?'
+2026-05-13 17:40:32 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:34 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:40:37 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:37 INFO [src.chatbot.service] chat_turn | session_id=ae326ff1-118e-4653-b3fb-9e1a2176df9f | user_question='Ibrahim. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today with your livestock trailer needs?'
+2026-05-13 17:40:39 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:40:48 INFO [src.chatbot.service] main_phase_route_decision | session_id=ae326ff1-118e-4653-b3fb-9e1a2176df9f | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 17:40:49 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:51 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:51 INFO [src.chatbot.graph] filter_extraction_applied | category='Livestock' | extracted_metadata={"length_ft": "12"} | extracted_slots={}
+2026-05-13 17:40:53 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:40:53 INFO [src.chatbot.graph] dynamic_width_question_added | category='Livestock' | matched_item='livestock trailer' | reason='Livestock trailers are typically large and may require a width question for proper classification.'
+2026-05-13 17:40:53 INFO [src.chatbot.graph] haul_classification_applied | category='Livestock' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "livestock trailer", "reason": "Livestock trailers are typically large and may require a width question for proper classification.", "confidence": "high"} | required_slots=["trailer_length_ft", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 17:40:53 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=["item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 17:40:53 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Livestock' | slot_changes={"trailer_length_ft": {"before": null, "after": "12 feet"}} | metadata_filter_changes={"length_ft": {"before": null, "after": "12"}} | pending_count=0
+2026-05-13 17:40:53 INFO [src.chatbot.service] graph_result | session_id=ae326ff1-118e-4653-b3fb-9e1a2176df9f | action='respond' | category='Livestock' | tool_events=[]
+2026-05-13 17:40:53 INFO [src.chatbot.service] chat_turn | session_id=ae326ff1-118e-4653-b3fb-9e1a2176df9f | user_question='I am looking for a 12 feet livestock trailer' | chatbot_response='About how wide is the item, or what trailer width do you need?'
+2026-05-13 17:40:54 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:56:34 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:56:35 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:56:35 INFO [src.chatbot.service] chat_turn | session_id=d3f72146-9ddc-4b54-9b9e-f5fb7e77e2d9 | user_question='hello there' | chatbot_response='Hi there! Thanks for reaching out. Could you please share your name, email, and phone number so I can assist you better?'
+2026-05-13 17:56:51 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:56:56 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:56:59 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:56:59 INFO [src.chatbot.service] chat_turn | session_id=d3f72146-9ddc-4b54-9b9e-f5fb7e77e2d9 | user_question='name is ibrahim and number is 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 17:57:00 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:57:35 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:57:40 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:57:44 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:57:44 INFO [src.chatbot.service] chat_turn | session_id=8b958b9c-e17e-4057-8f72-de1af6e90561 | user_question='ibrahim here. 03304388550' | chatbot_response='Thanks for providing your details, Ibrahim! How can I assist you today?'
+2026-05-13 17:57:45 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:58:41 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:58:42 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:58:45 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:58:45 INFO [src.chatbot.service] chat_turn | session_id=c1557217-4502-4591-9a07-102fd8498310 | user_question='Ibrahim here. 03304388550' | chatbot_response='Thanks for sharing your details, Ibrahim! How can I assist you today?'
+2026-05-13 17:58:47 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:59:18 INFO [src.chatbot.service] main_phase_route_decision | session_id=c1557217-4502-4591-9a07-102fd8498310 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 17:59:20 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:21 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:21 INFO [src.chatbot.graph] filter_extraction_applied | category='Livestock' | extracted_metadata={"length_ft": "12"} | extracted_slots={}
+2026-05-13 17:59:22 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:22 INFO [src.chatbot.graph] haul_classification_applied | category='Livestock' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "livestock", "reason": "Livestock can be large and may require a width question for proper trailer selection.", "confidence": "high"} | required_slots=["trailer_length_ft"] | dynamic_questions={}
+2026-05-13 17:59:22 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=[] | invalid=[]
+2026-05-13 17:59:22 INFO [src.chatbot.graph] mind_decision_applied | action=pinecone_search | category_before=None | category_after='Livestock' | slot_changes={"trailer_length_ft": {"before": null, "after": "12ft"}} | metadata_filter_changes={"length_ft": {"before": null, "after": "12"}} | pending_count=0
+2026-05-13 17:59:22 INFO [src.chatbot.graph] pinecone_search_execute | category='Livestock' | slots={"trailer_length_ft": "12ft"} | metadata_filters={"length_ft": "12"} | shown_count=0
+2026-05-13 17:59:24 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 200 OK"
+2026-05-13 17:59:24 INFO [src.chatbot.tools.pinecone_search] pinecone_search | category='Livestock' | top_k=50 | max_recommendations=5 | already_shown_url_count=0 | metadata_filter={"$and": [{"category": {"$eq": "Livestock"}}, {"length_ft_num": {"$gte": 12.0}}]} | slots={"trailer_length_ft": "12ft"} | metadata_filters_collected={"length_ft": "12"} | query_text='I am looking for a 12ft trailer for livestock | Category: Livestock | trailer_length_ft: 12ft | filter_length_ft: 12'
+2026-05-13 17:59:24 INFO [pinecone.client.indexes] Describing index 'trailer-recommendations'
+2026-05-13 17:59:26 INFO [httpx] HTTP Request: GET https://api.pinecone.io/indexes/trailer-recommendations "HTTP/1.1 200 OK"
+2026-05-13 17:59:26 INFO [pinecone.index] Index client created for host https://trailer-recommendations-a929752.svc.aped-4627-b74a.pinecone.io
+2026-05-13 17:59:26 INFO [pinecone.index] Querying index with top_k=50
+2026-05-13 17:59:28 INFO [src.chatbot.tools.pinecone_search] rerank_summary | applied=true | required_length_ft=12.0 | required_payload_lbs=None | required_width_ft=None | candidates=34 | kept_pool=34
+2026-05-13 17:59:28 INFO [src.chatbot.tools.pinecone_search] rerank_debug={"applied": true, "required_length_ft": 12.0, "required_payload_lbs": null, "required_width_ft": null, "candidate_count": 34}
+2026-05-13 17:59:28 INFO [src.chatbot.tools.pinecone_search] make_rerank_summary | category='Livestock' | preferred=['Galyean', 'Gooseneck', 'Calico Trailers'] | preferred_found=32 | total=34 | before_top=['Calico Trailers', 'Gooseneck', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers', 'Calico Trailers'] | after_top=['Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean', 'Galyean']
+2026-05-13 17:59:28 INFO [src.chatbot.tools.pinecone_search] make_rerank_debug={"applied": true, "category": "Livestock", "preferred_order": ["Galyean", "Gooseneck", "Calico Trailers"], "preferred_found": 32}
+2026-05-13 17:59:29 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:31 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:32 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:33 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:34 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:34 INFO [src.chatbot.service] graph_result | session_id=c1557217-4502-4591-9a07-102fd8498310 | action='pinecone_search' | category='Livestock' | tool_events=[{"tool": "pinecone_search", "result_count": 5}]
+2026-05-13 17:59:34 INFO [src.chatbot.service] category_cycle_results_shown | session_id=c1557217-4502-4591-9a07-102fd8498310 | active_category_cycle_id=1 | has_shown_search_results=True
+2026-05-13 17:59:34 INFO [src.chatbot.service] chat_turn | session_id=c1557217-4502-4591-9a07-102fd8498310 | user_question='I am looking for a 12ft trailer for livestock' | chatbot_response="1. [2025 Galyean Cattle Trailer - 15220](https://www.trailerplace.com/inventory/2025-galyean-cattle-trailer-15220/)\n\n- Color: Black\n- Hitch Type: Gooseneck\n- Length: 24 ft 0 in\n- Price: $29,750\n\n**Why-it-fits:** This 24 ft Galyean Cattle Trailer features a gooseneck hitch, perfect for transporting livestock securely and efficiently.\n\n---\n\n2. [2025 Galyean Cattle Trailer - 15221](https://www.trailerplace.com/inventory/2025-galyean-cattle-trailer-15221/)\n\n- Color: Silver\n- Hitch Type: Gooseneck\n- Length: 24 ft 0 in\n- Price: $24,600\n\n**Why-it-fits:** This 2025 Galyean Cattle Trailer features a 24-foot length and a gooseneck hitch, making it perfect for transporting livestock efficiently.\n\n---\n\n3. [2026 Galyean Cattle Trailer W/Butterfly Gates 24' - 15181](https://www.trailerplace.com/inventory/2026-galyean-cattle-trailer-w-butterfly-gates-24-15181/)\n\n- Color: Black\n- GVWR: 17150 lbs\n- Hitch Type: Gooseneck\n- Length: 24 ft 0 in\n- Payload Capacity: 10170 lbs\n- Price: $23,995\n\n**Why-it-fits:** This 24' Galyean Cattle Trailer with butterfly gates is perfect for larger livestock needs, offering a robust payload capacity of 10,170 lbs.\n\n---\n\n4. [2025 Galyean 24’X6’8''X6’6'' Cattle Trailer W/ Butterfly Gates - 15174](https://www.trailerplace.com/inventory/2025-galyean-24x68x66-cattle-trailer-w-butterfly-gates-15174/)\n\n- Color: Dark Gray Metallic\n- Hitch Type: Gooseneck\n- Length: 24 ft 0 in\n- Price: $23,995\n\n**Why-it-fits:** This 24-foot cattle trailer with butterfly gates offers ample space and durability for transporting livestock efficiently.\n\n---\n\n5. [2025 Galyean 24’X6’8''X6’6'' Cattle Trailer W/Swing Slide - 15180](https://www.trailerplace.com/inventory/2025-galyean-24x68x66-cattle-trailer-w-swing-slide-15180/)\n\n- Color: Caribou\n- Hitch Type: Gooseneck\n- Length: 24 ft 0 in\n- Price: $24,600\n\n**Why-it-fits:** This 24-foot cattle trailer features a gooseneck hitch for easy towing and ample space for your livestock."
+2026-05-13 17:59:35 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 17:59:42 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:42 INFO [src.chatbot.service] main_phase_route_decision | session_id=c1557217-4502-4591-9a07-102fd8498310 | should_route_graph=True | has_last_listings=True | actionable_intent=False
+2026-05-13 17:59:45 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:48 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:48 INFO [src.chatbot.graph] filter_extraction_applied | category='Livestock' | extracted_metadata={"length_ft": "12"} | extracted_slots={}
+2026-05-13 17:59:48 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 17:59:48 INFO [src.chatbot.graph] haul_classification_applied | category='Livestock' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "Livestock trailer", "reason": "The item is a livestock trailer which is typically large and requires a width question for proper classification.", "confidence": "high"} | required_slots=["trailer_length_ft"] | dynamic_questions={}
+2026-05-13 17:59:48 INFO [src.chatbot.graph] required_completion_state | category='Livestock' | missing=[] | invalid=[]
+2026-05-13 17:59:48 INFO [src.chatbot.graph] mind_decision_applied | action=send_interested_listing_email | category_before='Livestock' | category_after='Livestock' | slot_changes={} | metadata_filter_changes={} | pending_count=0
+2026-05-13 17:59:51 INFO [src.email_sender] Ticket notification email sent to configured EMAIL_TO
+2026-05-13 17:59:54 INFO [src.chatbot.service] graph_result | session_id=c1557217-4502-4591-9a07-102fd8498310 | action='send_interested_listing_email' | category='Livestock' | tool_events=[{"tool": "send_interested_listing_email", "result": {"status": "sent", "body_preview": "Full Name: Ibrahim\nEmail: Not provided\nPhone Number: 03304388550\n\nThe user is interested in \"2025 Galyean 24\u2019X6\u20198''X6\u20196'' Cattle Trailer W/ Butterfly Gates - 15174\""}}]
+2026-05-13 17:59:54 INFO [src.chatbot.service] category_cycle_results_shown | session_id=c1557217-4502-4591-9a07-102fd8498310 | active_category_cycle_id=1 | has_shown_search_results=True
+2026-05-13 17:59:54 INFO [src.chatbot.service] chat_turn | session_id=c1557217-4502-4591-9a07-102fd8498310 | user_question='I like the 4th one' | chatbot_response='Your interest in "2025 Galyean 24’X6’8\'\'X6’6\'\' Cattle Trailer W/ Butterfly Gates - 15174" has been logged. Our team will reach out soon. Meanwhile, you can browse more inventory at https://trailerplace.com or call 979-532-1486.'
+2026-05-13 17:59:56 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:37:12 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:37:17 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:37:21 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:37:21 INFO [src.chatbot.service] chat_turn | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | user_question='Ibrahim here. 03304388550' | chatbot_response='Thanks for sharing your details, Ibrahim! How can I assist you today?'
+2026-05-13 18:37:22 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:37:40 INFO [src.chatbot.service] main_phase_route_decision | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 18:37:42 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:37:43 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:37:43 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:37:44 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:37:44 INFO [src.chatbot.graph] dynamic_width_question_added | category='Aluminum' | matched_item='10 feet aluminum trailer' | reason='The item is likely large and may require a width question.'
+2026-05-13 18:37:44 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question.", "confidence": "high"} | required_slots=["base_category", "payload_need", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 18:37:44 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["base_category", "payload_need", "item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 18:37:44 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={"length_ft": {"before": null, "after": "10"}} | pending_count=2
+2026-05-13 18:37:44 INFO [src.chatbot.service] graph_result | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:37:44 INFO [src.chatbot.service] chat_turn | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | user_question='I am looking for a 10 feet aluminum trailer' | chatbot_response='What type of trailer are you looking for in aluminum — utility, equipment, enclosed, or something else?'
+2026-05-13 18:37:46 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:38:13 INFO [src.chatbot.service] main_phase_route_decision | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | should_route_graph=True | has_last_listings=False | actionable_intent=False
+2026-05-13 18:38:13 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Aluminum' | has_shown_search_results=False | proposed_category=None
+2026-05-13 18:38:15 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:38:16 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:38:16 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:38:17 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:38:17 INFO [src.chatbot.graph] dynamic_width_question_added | category='Aluminum' | matched_item='10 feet aluminum trailer' | reason='The item is likely large and may require a width question.'
+2026-05-13 18:38:17 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question.", "confidence": "medium"} | required_slots=["base_category", "payload_need", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 18:38:17 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["payload_need", "item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 18:38:17 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before='Aluminum' | category_after='Aluminum' | slot_changes={"base_category": {"before": null, "after": "it could be any"}} | metadata_filter_changes={} | pending_count=1
+2026-05-13 18:38:17 INFO [src.chatbot.service] graph_result | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:38:17 INFO [src.chatbot.service] chat_turn | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | user_question='it could be any' | chatbot_response="What's the rough total weight of the load?"
+2026-05-13 18:38:19 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:39:32 INFO [src.chatbot.service] main_phase_route_decision | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | should_route_graph=True | has_last_listings=False | actionable_intent=False
+2026-05-13 18:39:32 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Aluminum' | has_shown_search_results=False | proposed_category=None
+2026-05-13 18:39:36 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:39:36 INFO [src.chatbot.graph] slot_validation_failed | slot=payload_need | value='no preference regarding that' | reason=missing_number
+2026-05-13 18:39:37 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:39:37 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:39:38 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:39:38 INFO [src.chatbot.graph] dynamic_width_question_added | category='Aluminum' | matched_item='10 feet aluminum trailer' | reason='The item is likely large and may require a width question.'
+2026-05-13 18:39:38 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question.", "confidence": "medium"} | required_slots=["base_category", "payload_need", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 18:39:38 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["payload_need", "item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 18:39:38 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before='Aluminum' | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={} | pending_count=1
+2026-05-13 18:39:38 INFO [src.chatbot.service] graph_result | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:39:38 INFO [src.chatbot.service] chat_turn | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | user_question='no preference regarding that' | chatbot_response='About how wide is the item, or what trailer width do you need?'
+2026-05-13 18:39:40 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:40:07 INFO [src.chatbot.service] main_phase_route_decision | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | should_route_graph=True | has_last_listings=False | actionable_intent=False
+2026-05-13 18:40:07 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Aluminum' | has_shown_search_results=False | proposed_category=None
+2026-05-13 18:40:09 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:40:09 INFO [src.chatbot.graph] slot_validation_failed | slot=item_or_trailer_width_ft | value='no preference' | reason=missing_number
+2026-05-13 18:40:11 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:40:11 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:40:12 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:40:12 INFO [src.chatbot.graph] dynamic_width_question_added | category='Aluminum' | matched_item='10 feet aluminum trailer' | reason='The user is looking for a 10 feet aluminum trailer, which may require a width question due to the potential size of the trailer.'
+2026-05-13 18:40:12 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The user is looking for a 10 feet aluminum trailer, which may require a width question due to the potential size of the trailer.", "confidence": "medium"} | required_slots=["base_category", "payload_need", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 18:40:12 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["payload_need", "item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 18:40:12 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before='Aluminum' | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={} | pending_count=1
+2026-05-13 18:40:12 INFO [src.chatbot.service] graph_result | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:40:12 INFO [src.chatbot.service] chat_turn | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | user_question='no preference' | chatbot_response="What's the rough total weight of the load?"
+2026-05-13 18:40:13 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:40:20 INFO [src.chatbot.service] main_phase_route_decision | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | should_route_graph=True | has_last_listings=False | actionable_intent=False
+2026-05-13 18:40:20 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Aluminum' | has_shown_search_results=False | proposed_category=None
+2026-05-13 18:40:21 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:40:21 INFO [src.chatbot.graph] slot_validation_failed | slot=payload_need | value='no preference' | reason=missing_number
+2026-05-13 18:40:22 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:40:22 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:40:23 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:40:23 INFO [src.chatbot.graph] dynamic_width_question_added | category='Aluminum' | matched_item='10 feet aluminum trailer' | reason='The item is likely large and may require a width question for proper trailer selection.'
+2026-05-13 18:40:23 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question for proper trailer selection.", "confidence": "medium"} | required_slots=["base_category", "payload_need", "item_or_trailer_width_ft"] | dynamic_questions={"item_or_trailer_width_ft": "About how wide is the item, or what trailer width do you need?"}
+2026-05-13 18:40:23 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["payload_need", "item_or_trailer_width_ft"] | invalid=[]
+2026-05-13 18:40:23 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before='Aluminum' | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={} | pending_count=1
+2026-05-13 18:40:23 INFO [src.chatbot.service] graph_result | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:40:23 INFO [src.chatbot.service] chat_turn | session_id=2efe9a63-3c72-4da7-900f-3f95bc2c2031 | user_question='no preference' | chatbot_response='About how wide is the item, or what trailer width do you need?'
+2026-05-13 18:40:24 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:52:20 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:52:25 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:52:30 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:52:30 INFO [src.chatbot.service] chat_turn | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | user_question='Ibrahim here. 03304388550' | chatbot_response='Thank you, Ibrahim! How can I assist you today?'
+2026-05-13 18:52:31 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:52:46 INFO [src.chatbot.service] main_phase_route_decision | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | should_route_graph=True | has_last_listings=False | actionable_intent=True
+2026-05-13 18:52:47 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:52:48 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:52:48 INFO [src.chatbot.graph] preference_null_applied | category='Aluminum' | slots=[] | filters=["length_ft"] | removed_filters={} | reason=''
+2026-05-13 18:52:49 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:52:49 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:52:50 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:52:50 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question.", "confidence": "medium"} | required_slots=["base_category", "payload_need"] | dynamic_questions={}
+2026-05-13 18:52:50 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["base_category", "payload_need"] | invalid=[]
+2026-05-13 18:52:50 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before=None | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={"length_ft": {"before": null, "after": "10"}} | pending_count=1
+2026-05-13 18:52:50 INFO [src.chatbot.service] graph_result | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:52:50 INFO [src.chatbot.service] chat_turn | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | user_question='I am looking for a 10 feet aluminum trailer' | chatbot_response='What type of trailer are you looking for in aluminum — utility, equipment, enclosed, or something else?'
+2026-05-13 18:52:52 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:52:56 INFO [src.chatbot.service] main_phase_route_decision | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | should_route_graph=True | has_last_listings=False | actionable_intent=False
+2026-05-13 18:52:56 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Aluminum' | has_shown_search_results=False | proposed_category=None
+2026-05-13 18:52:58 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:00 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:00 INFO [src.chatbot.graph] preference_null_applied | category='Aluminum' | slots=["base_category"] | filters=["subcategory"] | removed_filters={} | reason="User indicated 'none', suggesting no preference for base category and payload need is left unrestricted."
+2026-05-13 18:53:01 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:01 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:53:02 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:02 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question.", "confidence": "medium"} | required_slots=["base_category", "payload_need"] | dynamic_questions={}
+2026-05-13 18:53:02 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=["payload_need"] | invalid=[]
+2026-05-13 18:53:02 INFO [src.chatbot.graph] mind_decision_applied | action=respond | category_before='Aluminum' | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={} | pending_count=0
+2026-05-13 18:53:02 INFO [src.chatbot.service] graph_result | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | action='respond' | category='Aluminum' | tool_events=[]
+2026-05-13 18:53:02 INFO [src.chatbot.service] chat_turn | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | user_question='none' | chatbot_response="What's the rough total weight of the load?"
+2026-05-13 18:53:03 INFO [src.db] Chatbot persistence schema is ready
+2026-05-13 18:53:17 INFO [src.chatbot.service] main_phase_route_decision | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | should_route_graph=True | has_last_listings=False | actionable_intent=False
+2026-05-13 18:53:17 INFO [src.chatbot.graph] category_lock_active | phase=mind_node | category='Aluminum' | has_shown_search_results=False | proposed_category=None
+2026-05-13 18:53:18 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:19 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:19 INFO [src.chatbot.graph] preference_null_applied | category='Aluminum' | slots=["payload_need"] | filters=["payload_lbs"] | removed_filters={} | reason=''
+2026-05-13 18:53:20 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:20 INFO [src.chatbot.graph] filter_extraction_applied | category='Aluminum' | extracted_metadata={"length_ft": "10"} | extracted_slots={}
+2026-05-13 18:53:21 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:21 INFO [src.chatbot.graph] haul_classification_applied | category='Aluminum' | classification={"is_lightweight_utility_load": false, "needs_width_question": true, "matched_item": "10 feet aluminum trailer", "reason": "The item is likely large and may require a width question.", "confidence": "medium"} | required_slots=["base_category", "payload_need"] | dynamic_questions={}
+2026-05-13 18:53:21 INFO [src.chatbot.graph] required_completion_state | category='Aluminum' | missing=[] | invalid=[]
+2026-05-13 18:53:21 INFO [src.chatbot.graph] action_corrected_to_search | previous_action=ask_next_question | category='Aluminum'
+2026-05-13 18:53:21 INFO [src.chatbot.graph] mind_decision_applied | action=pinecone_search | category_before='Aluminum' | category_after='Aluminum' | slot_changes={} | metadata_filter_changes={} | pending_count=0
+2026-05-13 18:53:21 INFO [src.chatbot.graph] pinecone_search_execute | category='Aluminum' | slots={} | metadata_filters={"length_ft": "10"} | shown_count=0
+2026-05-13 18:53:24 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 200 OK"
+2026-05-13 18:53:24 INFO [src.chatbot.tools.pinecone_search] pinecone_search | category='Aluminum' | top_k=50 | max_recommendations=5 | already_shown_url_count=0 | metadata_filter={"$and": [{"category": {"$eq": "Aluminum"}}, {"length_ft_num": {"$gte": 10.0}}]} | slots={} | metadata_filters_collected={"length_ft": "10"} | query_text='no preference | Category: Aluminum | filter_length_ft: 10'
+2026-05-13 18:53:24 INFO [pinecone.client.indexes] Describing index 'trailer-recommendations'
+2026-05-13 18:53:25 INFO [httpx] HTTP Request: GET https://api.pinecone.io/indexes/trailer-recommendations "HTTP/1.1 200 OK"
+2026-05-13 18:53:26 INFO [pinecone.index] Index client created for host https://trailer-recommendations-a929752.svc.aped-4627-b74a.pinecone.io
+2026-05-13 18:53:26 INFO [pinecone.index] Querying index with top_k=50
+2026-05-13 18:53:27 INFO [src.chatbot.tools.pinecone_search] rerank_summary | applied=true | required_length_ft=10.0 | required_payload_lbs=None | required_width_ft=None | candidates=24 | kept_pool=24
+2026-05-13 18:53:27 INFO [src.chatbot.tools.pinecone_search] rerank_debug={"applied": true, "required_length_ft": 10.0, "required_payload_lbs": null, "required_width_ft": null, "candidate_count": 24}
+2026-05-13 18:53:27 INFO [src.chatbot.tools.pinecone_search] make_rerank_summary | category='Aluminum' | preferred=['Aluma'] | preferred_found=24 | total=24 | before_top=['Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma'] | after_top=['Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma', 'Aluma']
+2026-05-13 18:53:27 INFO [src.chatbot.tools.pinecone_search] make_rerank_debug={"applied": true, "category": "Aluminum", "preferred_order": ["Aluma"], "preferred_found": 24}
+2026-05-13 18:53:29 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:30 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:31 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:32 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:34 INFO [httpx] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-05-13 18:53:34 INFO [src.chatbot.service] graph_result | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | action='pinecone_search' | category='Aluminum' | tool_events=[{"tool": "pinecone_search", "result_count": 5}]
+2026-05-13 18:53:34 INFO [src.chatbot.service] category_cycle_results_shown | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | active_category_cycle_id=1 | has_shown_search_results=True
+2026-05-13 18:53:34 INFO [src.chatbot.service] chat_turn | session_id=39b44707-ba50-4170-b6a2-1b1d2b1541a5 | user_question='no preference' | chatbot_response='1. [2027 Aluma Sa Utility 1 2K - 09771](https://www.trailerplace.com/inventory/2027-aluma-sa-utility-1-2k-09771/)\n\n- Color: Silver\n- GVWR: 2000 lbs\n- Hitch Type: Bumper Pull\n- Length: 10 ft 0 in\n- Payload Capacity: 1520 lbs\n- Price: $2,995\n\n**Why-it-fits:** This 10-foot Aluma Sa Utility trailer offers a 2,000 lbs GVWR and a 1,520 lbs payload capacity, making it perfect for your hauling needs.\n\n---\n\n2. [2027 Aluma 5410Tilt S - 10322](https://www.trailerplace.com/inventory/2027-aluma-5410tilt-s-10322/)\n\n- Color: Aluminum\n- GVWR: 2000 lbs\n- Hitch Type: Bumper Pull\n- Length: 10 ft 0 in\n- Payload Capacity: 1690 lbs\n- Price: $2,600\n\n**Why-it-fits:** This 10-foot aluminum trailer with a 2,000 lbs GVWR and 1,690 lbs payload capacity is perfect for your hauling needs.\n\n---\n\n3. [2026 Aluma 6310 Esa W/ Rampgate - 08514](https://www.trailerplace.com/inventory/2026-aluma-6310-esa-w-rampgate-08514/)\n\n- Color: Aluminum\n- GVWR: 2000 lbs\n- Hitch Type: Bumper Pull\n- Length: 10 ft 0 in\n- Payload Capacity: 1520 lbs\n- Price: $2,995\n\n**Why-it-fits:** This 10-foot aluminum trailer features a bumper pull hitch and a payload capacity of 1,520 lbs, making it perfect for your hauling needs.\n\n---\n\n4. [2026 Aluma 6310 Esa Utility W/Ramp Gate - 07543](https://www.trailerplace.com/inventory/2026-aluma-6310-esa-utility-w-ramp-gate-07543/)\n\n- Color: Aluminum\n- Hitch Type: Bumper Pull\n- Length: 10 ft 0 in\n- Price: $2,795\n\n**Why-it-fits:** This 10-foot aluminum utility trailer with a ramp gate is perfect for easy loading and unloading, making your hauling tasks a breeze.\n\n---\n\n5. [2027 Aluma 6810S Tg - 11008](https://www.trailerplace.com/inventory/2027-aluma-6810s-tg-11008/)\n\n- Color: Aluminum\n- GVWR: 2200 lbs\n- Hitch Type: Bumper Pull\n- Length: 10 ft 2 in\n- Payload Capacity: 1700 lbs\n- Price: $3,400\n\n**Why-it-fits:** This 10 ft 2 in aluminum trailer offers a robust payload capacity of 1,700 lbs and a durable bumper pull hitch for easy towing.'
+2026-05-13 18:53:35 INFO [src.db] Chatbot persistence schema is ready

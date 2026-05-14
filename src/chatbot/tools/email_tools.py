@@ -6,7 +6,7 @@ from src.email_sender import send_faq_email_sync, send_ticket_notification
 from src.conversation_store import promote_lead_to_hard, update_lead_item_of_interest
 
 FAQ_CATEGORY_LABELS = {
-    "contact_human": "Customer asked to contact a human.",
+    "contact_human": "Customer asked to contact a person.",
     "financing": "Customer asked about financing.",
     "trade_in": "Customer asked about trade-in.",
     "service_parts": "Customer asked about service or parts.",
@@ -51,6 +51,7 @@ def send_non_sales_faq_email(
     phone: str,
     faq_category: str,
     summary: str | None = None,
+    user_message: str | None = None,
 ) -> dict:
     """Tool 3: notify the business about contact, financing, trade-in, service, or store info."""
     category = (faq_category or "contact_human").strip().lower()
@@ -59,6 +60,9 @@ def send_non_sales_faq_email(
     summary_line = (summary or FAQ_CATEGORY_LABELS[category]).strip()
     if not summary_line.startswith(f"[{category}]"):
         summary_line = f"[{category}] {summary_line}"
+    message_line = (user_message or "").strip()
+    if message_line:
+        summary_line = f"{summary_line}\n\nLast user message: {message_line}"
     send_faq_email_sync(
         full_name=full_name,
         email=email,

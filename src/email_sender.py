@@ -15,6 +15,7 @@ import ssl
 from abc import ABC, abstractmethod
 from email.message import EmailMessage
 from typing import Optional, Protocol, runtime_checkable
+import requests
 
 from dotenv import load_dotenv
 
@@ -75,20 +76,80 @@ class GraphEmailSender(ABC):
         )
 
 
-class _GraphEmailSenderStub(GraphEmailSender):
-    def send_plain_text(self, to_address: str, subject: str, body: str) -> None:
-        _ = (to_address, subject, body)
-        raise NotImplementedError(
-            "EMAIL_BACKEND=graph is not implemented yet. "
-            "Add a GraphEmailSender implementation (client credentials + sendMail), "
-            "or set EMAIL_BACKEND=smtp."
+class _GraphEmailSenderImpl(GraphEmailSender):
+    """Send mail via Microsoft Graph using app-only OAuth2 client credentials."""
+
+    def __init__(self) -> None:
+        self._tenant_id = (os.getenv("TENANT_ID") or "").strip()
+        self._client_id = (os.getenv("CLIENT_ID") or "").strip()
+        self._client_secret = (os.getenv("CLIENT_SECRET") or "").strip()
+        self._sender_email = (os.getenv("SENDER_EMAIL") or os.getenv("SMTP_FROM") or "").strip()
+
+    def _access_token(self) -> str:
+        if not self._tenant_id or not self._client_id or not self._client_secret:
+            raise RuntimeError(
+                "TENANT_ID, CLIENT_ID, and CLIENT_SECRET must be set for EMAIL_BACKEND=graph"
+            )
+        token_url = f"https://login.microsoftonline.com/{self._tenant_id}/oauth2/v2.0/token"
+        response = requests.post(
+            token_url,
+            data={
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "scope": "https://graph.microsoft.com/.default",
+                "grant_type": "client_credentials",
+            },
+            timeout=30,
         )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Graph token request failed: {response.status_code} {response.text[:400]}"
+            )
+        payload = response.json()
+        token = str(payload.get("access_token") or "").strip()
+        if not token:
+            raise RuntimeError("Graph token response did not include access_token")
+        return token
+
+    def send_plain_text(self, to_address: str, subject: str, body: str) -> None:
+        sender = self._sender_email
+        if not sender:
+            raise RuntimeError("SENDER_EMAIL must be set for EMAIL_BACKEND=graph")
+        token = self._access_token()
+        send_url = f"https://graph.microsoft.com/v1.0/users/{sender}/sendMail"
+        payload = {
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "Text", "content": body},
+                "toRecipients": [
+                    {
+                        "emailAddress": {
+                            "address": to_address,
+                        }
+                    }
+                ],
+            },
+            "saveToSentItems": "true",
+        }
+        response = requests.post(
+            send_url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Graph sendMail failed: {response.status_code} {response.text[:400]}"
+            )
 
 
 def get_email_sender() -> EmailSender:
     backend = (os.getenv("EMAIL_BACKEND") or "smtp").strip().lower()
     if backend == "graph":
-        return _GraphEmailSenderStub()
+        return _GraphEmailSenderImpl()
     if backend != "smtp":
         logger.warning("Unknown EMAIL_BACKEND=%r — using smtp", backend)
     return SmtpEmailSender()
@@ -106,9 +167,9 @@ def send_ticket_notification(
 
     Raises on missing configuration or send failure so the agent tool can surface errors.
     """
-    to_addr = (os.getenv("EMAIL_TO") or "").strip()
+    to_addr = (os.getenv("EMAIL_TO") or os.getenv("RECIPIENT_EMAIL") or "").strip()
     if not to_addr:
-        raise RuntimeError("EMAIL_TO is not set in the environment")
+        raise RuntimeError("EMAIL_TO or RECIPIENT_EMAIL is not set in the environment")
 
     email_line = (email or "").strip() or "Not provided"
     body = (
@@ -131,9 +192,9 @@ def send_faq_email_sync(
     summary_line: str,
 ) -> None:
     """Send FAQ / non-sales inquiry email to EMAIL_TO (blocking)."""
-    to_addr = (os.getenv("EMAIL_TO") or "").strip()
+    to_addr = (os.getenv("EMAIL_TO") or os.getenv("RECIPIENT_EMAIL") or "").strip()
     if not to_addr:
-        raise RuntimeError("EMAIL_TO is not set in the environment")
+        raise RuntimeError("EMAIL_TO or RECIPIENT_EMAIL is not set in the environment")
     subj = (subject or "").strip() or "FAQ inquiry"
     email_line = (email or "").strip() or "Not provided"
     summary = (summary_line or "").strip() or "(no summary)"
