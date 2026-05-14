@@ -31,6 +31,7 @@ def test_preference_classifier_returns_llm_decision(monkeypatch):
         slots_collected={},
         metadata_filters_collected={},
         allowed_category_slots=["base_category", "payload_need"],
+        active_question="What's the rough total weight of the load?",
     )
 
     assert result == expected
@@ -58,10 +59,10 @@ def test_preference_classifier_fallback_is_conservative(monkeypatch):
     assert result.target_metadata_filters == []
 
 
-def test_preference_classifier_ignores_plain_search_request(monkeypatch):
+def test_preference_classifier_ignores_plain_search_request_without_active_question(monkeypatch):
     class BadLLM:
         def invoke(self, messages):
-            raise AssertionError("LLM should not be called without no-preference language")
+            raise AssertionError("LLM should not be called without an active question")
 
     monkeypatch.setattr(
         "src.chatbot.mini_preference_classifier._preference_classifier_llm",
@@ -71,6 +72,8 @@ def test_preference_classifier_ignores_plain_search_request(monkeypatch):
     result = classify_no_preference(
         category="Utility",
         user_message="I am looking for a 12 ft utility trailer",
+        awaiting_slot=None,
+        pending_questions=[],
         allowed_category_slots=["haul_item", "haul_weight_lbs"],
     )
 
@@ -126,6 +129,39 @@ def test_preference_classifier_runs_for_no_idea_answer_to_active_question(monkey
         awaiting_slot="haul_weight_lbs",
         pending_questions=[],
         allowed_category_slots=["haul_item", "haul_weight_lbs"],
+        active_question="What's the rough total weight of your load?",
+    )
+
+    assert result == expected
+
+
+def test_preference_classifier_runs_for_no_fixed_size_answer(monkeypatch):
+    expected = PreferenceNullDecision(
+        has_no_preference=True,
+        target_slots=["item_or_trailer_width_ft"],
+        target_metadata_filters=["width_ft"],
+        reason="User has no fixed size requirement.",
+        confidence="high",
+    )
+
+    class FakeLLM:
+        def invoke(self, messages):
+            serialized = str(messages)
+            assert "About how wide is the load" in serialized
+            assert "no fixed size regarding it" in serialized
+            return expected
+
+    monkeypatch.setattr(
+        "src.chatbot.mini_preference_classifier._preference_classifier_llm",
+        lambda: FakeLLM(),
+    )
+
+    result = classify_no_preference(
+        category="Equipment",
+        user_message="no fixed size regarding it",
+        awaiting_slot="item_or_trailer_width_ft",
+        pending_questions=[],
+        active_question="About how wide is the load, or what trailer width do you need?",
     )
 
     assert result == expected

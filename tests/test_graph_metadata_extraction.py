@@ -252,6 +252,26 @@ def test_utility_lightweight_user_weight_overrides_payload_default(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_generic_length_trailer_request_asks_for_category(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+
+    class _FakeMindLLM:
+        def invoke(self, _messages):
+            return graph.MindDecision(
+                action="pinecone_search",
+                trailer_category="Utility",
+            )
+
+    monkeypatch.setattr(graph, "_mind_llm", lambda: _FakeMindLLM())
+
+    planned = graph._mind_node(_state("I am looking for a 12 ft trailer", category=None))
+    out = graph._apply_mind_node(planned)
+
+    assert out["trailer_category"] is None
+    assert out["assistant_text"] == "What kind of trailer are you looking for?"
+    assert out["mind_decision"]["action"] == "respond"
+
+
 def test_utility_length_without_haul_item_asks_haul_question(monkeypatch):
     _mock_extractor(monkeypatch, length_ft="12")
     _mock_haul_classifier(
@@ -268,6 +288,25 @@ def test_utility_length_without_haul_item_asks_haul_question(monkeypatch):
     assert out["assistant_text"] == "What will you be hauling on the utility trailer?"
     assert out["awaiting_slot"] == "haul_item"
     assert out["metadata_filters_collected"] == {"length_ft": "12"}
+    assert "payload_lbs" not in out["metadata_filters_collected"]
+
+
+def test_classifier_trailer_description_does_not_fill_utility_haul_item(monkeypatch):
+    _mock_extractor(monkeypatch, length_ft="12")
+    _mock_haul_classifier(
+        monkeypatch,
+        is_lightweight_utility_load=True,
+        needs_width_question=False,
+        matched_item="12 ft trailer",
+        confidence="high",
+    )
+
+    out = graph._apply_mind_node(_state("I am looking for a 12 ft utility trailer", category="Utility"))
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert out["assistant_text"] == "What will you be hauling on the utility trailer?"
+    assert out["awaiting_slot"] == "haul_item"
+    assert "haul_item" not in out["slots_collected"]
     assert "payload_lbs" not in out["metadata_filters_collected"]
 
 
@@ -339,7 +378,7 @@ def test_heavy_equipment_adds_dynamic_width_question(monkeypatch):
     out = graph._apply_mind_node(state)
 
     assert out["awaiting_slot"] == "item_or_trailer_width_ft"
-    assert out["assistant_text"] == "About how wide is the item, or what trailer width do you need?"
+    assert out["assistant_text"] == "About how wide is the load, or what trailer width do you need?"
     assert out["mind_decision"]["action"] == "respond"
 
 
@@ -455,6 +494,104 @@ def test_invalid_hitch_metadata_filter_is_rejected(monkeypatch):
     out = graph._apply_mind_node(state)
 
     assert "hitch_type" not in out["metadata_filters_collected"]
+
+
+def test_hitch_filter_is_not_overwritten_without_explicit_latest_message(monkeypatch):
+    _mock_extractor(monkeypatch, payload_lbs="1600", hitch_type="gooseneck")
+    state = _state("1600 lbs", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "a car",
+        "haul_length_ft": "12",
+        "item_or_trailer_width_ft": "6",
+        "hitch_type": "Bumper Pull",
+    }
+    state["metadata_filters_collected"] = {
+        "length_ft": "12",
+        "width_ft": "6",
+        "hitch_type": "Bumper Pull",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["hitch_type"] == "Bumper Pull"
+    assert out["metadata_filters_collected"]["payload_lbs"] == "1600"
+
+
+def test_hitch_filter_changes_when_latest_message_is_explicit(monkeypatch):
+    _mock_extractor(monkeypatch, hitch_type="gooseneck")
+    state = _state("make it a gooseneck hitch", category="Equipment")
+    state["metadata_filters_collected"] = {"hitch_type": "Bumper Pull"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["hitch_type"] == "Gooseneck"
+
+
+def test_payload_filter_is_not_overwritten_without_weight_evidence(monkeypatch):
+    _mock_extractor(monkeypatch, payload_lbs="9000")
+    state = _state("make it black", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_weight_lbs": "3000 lbs",
+        "haul_length_ft": "12 ft",
+    }
+    state["metadata_filters_collected"] = {"payload_lbs": "3000 lbs"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["payload_lbs"] == "3000 lbs"
+
+
+def test_width_filter_is_not_overwritten_without_width_evidence(monkeypatch):
+    _mock_extractor(monkeypatch, width_ft="8")
+    state = _state("1600 lbs", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_length_ft": "12 ft",
+    }
+    state["metadata_filters_collected"] = {"width_ft": "6"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+
+
+def test_color_filter_is_not_overwritten_without_color_evidence(monkeypatch):
+    _mock_extractor(monkeypatch, color="red")
+    state = _state("1600 lbs", category="Equipment")
+    state["metadata_filters_collected"] = {"color": "black"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["color"] == "black"
+
+
+def test_bare_length_answer_is_accepted_for_active_length_question(monkeypatch):
+    _mock_extractor(monkeypatch, length_ft="12 ft")
+    state = _state("12 ft", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_weight_lbs": "3000 lbs",
+    }
+    state["awaiting_slot"] = "haul_length_ft"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["haul_length_ft"] == "12 ft"
+    assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
+
+
+def test_mixed_active_answer_and_explicit_hitch_does_not_invent_weight(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("a car. The trailer should be bumper pull", category="Equipment")
+    state["awaiting_slot"] = "haul_item"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["haul_item"] == "a car. The trailer should be bumper pull"
+    assert out["metadata_filters_collected"]["hitch_type"] == "Bumper Pull"
+    assert "payload_lbs" not in out["metadata_filters_collected"]
+    assert out["awaiting_slot"] == "haul_weight_lbs"
 
 
 def test_valid_hitch_metadata_filters_are_normalized(monkeypatch):
@@ -587,7 +724,54 @@ def test_no_preference_skips_stale_width_question(monkeypatch):
     state["pending_questions"] = [
         {
             "slot": "item_or_trailer_width_ft",
-            "question": "About how wide is the item, or what trailer width do you need?",
+            "question": "About how wide is the load, or what trailer width do you need?",
+            "required": True,
+        }
+    ]
+    state["metadata_filters_collected"] = {"width_ft": "6 ft"}
+
+    out = graph._apply_mind_node(state)
+
+    assert "item_or_trailer_width_ft" in out["slots_skipped"]
+    assert "width_ft" not in out["metadata_filters_collected"]
+    assert out["pending_questions"] == []
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_no_fixed_size_answer_skips_active_width_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+
+    def _preference_classifier(**kwargs):
+        assert kwargs["active_question"] == "About how wide is the load, or what trailer width do you need?"
+        assert kwargs["user_message"] == "no fixed size regarding it"
+        assert kwargs["awaiting_slot"] == "item_or_trailer_width_ft"
+        return graph.PreferenceNullDecision(
+            has_no_preference=True,
+            target_slots=["item_or_trailer_width_ft"],
+            target_metadata_filters=["width_ft"],
+            reason="User has no fixed width preference.",
+            confidence="high",
+        )
+
+    monkeypatch.setattr(graph, "classify_no_preference", _preference_classifier)
+    state = _state("no fixed size regarding it", category="Equipment")
+    state["messages"] = [
+        {
+            "role": "assistant",
+            "content": "About how wide is the load, or what trailer width do you need?",
+        },
+        {"role": "user", "content": "no fixed size regarding it"},
+    ]
+    state["slots_collected"] = {
+        "haul_item": "a car",
+        "haul_weight_lbs": "3000 lbs",
+        "haul_length_ft": "12 ft",
+    }
+    state["awaiting_slot"] = "item_or_trailer_width_ft"
+    state["pending_questions"] = [
+        {
+            "slot": "item_or_trailer_width_ft",
+            "question": "About how wide is the load, or what trailer width do you need?",
             "required": True,
         }
     ]

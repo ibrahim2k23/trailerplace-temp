@@ -1,0 +1,17 @@
+.git/
+.pytest_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+build/
+dist/
+wheels/
+
+.env
+.env.*
+logs/
+
+*.log
+~$*

@@ -12,31 +12,6 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-_NO_PREFERENCE_MARKERS = (
-    "any",
-    "anything",
-    "whatever",
-    "no preference",
-    "no pref",
-    "doesn't matter",
-    "does not matter",
-    "dont care",
-    "don't care",
-    "do not care",
-    "not picky",
-    "no idea",
-    "not sure",
-    "unsure",
-    "i don't know",
-    "i dont know",
-    "do not know",
-    "don't know",
-    "flexible",
-    "no specific",
-    "no particular",
-    "surprise me",
-)
-
 
 class PreferenceNullDecision(BaseModel):
     has_no_preference: bool = False
@@ -68,37 +43,37 @@ def classify_no_preference(
     slots_collected: dict[str, Any] | None = None,
     metadata_filters_collected: dict[str, Any] | None = None,
     allowed_category_slots: list[str] | None = None,
+    active_question: str | None = None,
 ) -> PreferenceNullDecision:
-    latest = (user_message or "").strip().lower()
-    if not any(marker in latest for marker in _NO_PREFERENCE_MARKERS):
-        return PreferenceNullDecision(reason="No explicit no-preference language.", confidence="low")
     if not awaiting_slot and not (pending_questions or []):
         return PreferenceNullDecision(reason="No active qualification question to answer.", confidence="low")
 
+    active_slot = awaiting_slot
+    if not active_slot and pending_questions:
+        active_slot = str((pending_questions or [{}])[0].get("slot") or "")
+    question_text = (active_question or "").strip()
+    if not question_text and pending_questions:
+        question_text = str((pending_questions or [{}])[0].get("question") or "").strip()
+
     context = {
-        "category": category,
-        "latest_user_message": user_message,
-        "awaiting_slot": awaiting_slot,
-        "pending_questions": pending_questions or [],
-        "slots_collected": slots_collected or {},
-        "metadata_filters_collected": metadata_filters_collected or {},
-        "allowed_category_slots": allowed_category_slots or [],
+        "active_question": question_text,
+        "user_answer": user_message,
+        "active_slot": active_slot,
     }
     try:
         return _preference_classifier_llm().invoke(
             [
                 SystemMessage(
                     content=(
-                        "Decide whether the latest user message means the customer has no preference "
-                        "for one or more currently relevant trailer qualification questions or search filters.\n"
+                        "Decide whether the user's answer means they have no preference, no fixed requirement, "
+                        "do not know, or want to leave the current qualification question unrestricted.\n"
                         "Rules:\n"
-                        "- Return has_no_preference=true only when the user clearly wants a value left blank, unrestricted, any, flexible, or not filtered.\n"
-                        "- Prefer targeting the current awaiting_slot when the message is a direct answer to a question.\n"
-                        "- Only answer the current awaiting_slot or one of the pending_questions; do not skip unrelated category slots.\n"
-                        "- Use target_slots for category qualification slots that should be considered answered/skipped.\n"
-                        "- Use target_metadata_filters for Pinecone filters to remove/leave unset, such as length_ft, width_ft, payload_lbs, max_price, hitch_type, color, subcategory.\n"
-                        "- Do not mark no preference if the user gives an explicit value in the latest message for that field.\n"
-                        "- Use medium or high confidence only when the no-preference intent is clear."
+                        "- Use only the active_question and user_answer. Do not infer from broader conversation.\n"
+                        "- Return has_no_preference=true for answers like any, whatever, no fixed size, no specific preference, not sure, I don't know, flexible, or doesn't matter.\n"
+                        "- Return has_no_preference=false when the answer provides a concrete value, constraint, item, category, color, hitch, length, width, weight, or price.\n"
+                        "- If true, target_slots should contain only active_slot when active_slot is present.\n"
+                        "- target_metadata_filters may include the corresponding search filter for that active_slot when relevant.\n"
+                        "- Use medium or high confidence only when the answer clearly means unrestricted/no preference for the active question."
                     )
                 ),
                 HumanMessage(

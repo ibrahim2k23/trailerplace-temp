@@ -142,7 +142,7 @@ _ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
 _CONFIDENT_CLASSIFICATIONS = {"medium", "high"}
 _CONFIDENT_PREFERENCE_NULL = {"medium", "high"}
 _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
-_DYNAMIC_WIDTH_QUESTION = "About how wide is the item, or what trailer width do you need?"
+_DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
 _SLOT_METADATA_FILTER_MAP = {
     "base_category": ("subcategory",),
     "bin_size": ("length_ft",),
@@ -159,6 +159,16 @@ _SLOT_METADATA_FILTER_MAP = {
     "vehicle_length_ft": ("length_ft",),
     "width_ft": ("width_ft",),
 }
+
+
+def _is_usable_classifier_haul_item(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if re.search(r"\btrailers?\b", text):
+        return False
+    category_names = {cat.lower() for cat in list_all_categories()}
+    return text not in category_names
 
 
 def _category_slots(category: str | None) -> set[str]:
@@ -181,6 +191,154 @@ def _normalize_allowed_hitch(value: Any) -> str | None:
     return hitch if hitch in _ALLOWED_HITCH_TYPES else None
 
 
+_KNOWN_COLOR_WORDS = {
+    "black",
+    "white",
+    "gray",
+    "grey",
+    "silver",
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "orange",
+    "tan",
+}
+
+
+def _slot_is_length_like(slot: str | None) -> bool:
+    slot_l = str(slot or "").lower()
+    return (
+        "length" in slot_l
+        or "width" in slot_l
+        or "size" in slot_l
+        or "cargo" in slot_l
+        or slot_l == _DYNAMIC_WIDTH_SLOT
+    )
+
+
+def _slot_is_weight_like(slot: str | None) -> bool:
+    slot_l = str(slot or "").lower()
+    return any(token in slot_l for token in ("weight", "payload", "capacity", "gvwr", "total_weight"))
+
+
+def _has_dimension_shorthand(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')?\s*[xX]\s*"
+            r"\d+(?:\.\d+)?\s*(?:ft|feet|foot|')?"
+            r"(?:\s*[xX]\s*\d+(?:\.\d+)?\s*(?:ft|feet|foot|')?)?\b",
+            message or "",
+        )
+    )
+
+
+def _explicit_length_requested(message: str, awaiting_slot: str | None = None) -> bool:
+    text = str(message or "").lower()
+    if _has_dimension_shorthand(text):
+        return True
+    if re.search(r"\b(?:length|long|deck\s+length|trailer\s+length|size|trailer\s+size)\b", text):
+        return bool(re.search(r"\d+(?:\.\d+)?", text))
+    if re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\s*(?:(?:\w+\s+){0,3})?(?:long|length|trailer)\b", text):
+        return True
+    return bool(_slot_is_length_like(awaiting_slot) and re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\b", text))
+
+
+def _explicit_width_requested(message: str, awaiting_slot: str | None = None) -> bool:
+    text = str(message or "").lower()
+    if _has_dimension_shorthand(text):
+        return True
+    if re.search(r"\b(?:width|wide)\b", text):
+        return bool(re.search(r"\d+(?:\.\d+)?", text))
+    return bool(str(awaiting_slot or "") == _DYNAMIC_WIDTH_SLOT and re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\b", text))
+
+
+def _explicit_payload_requested(message: str, awaiting_slot: str | None = None) -> bool:
+    text = str(message or "").lower()
+    has_weight_unit = bool(re.search(r"\b\d[\d,]*(?:\.\d+)?\s*(?:k|m)?\s*(?:lbs?|pounds?|#)\b", text))
+    if has_weight_unit:
+        return True
+    if re.search(r"\b(?:payload|load|haul|carry|weight|weighs?)\b", text):
+        return bool(re.search(r"\d[\d,]*(?:\.\d+)?", text))
+    return bool(_slot_is_weight_like(awaiting_slot) and has_weight_unit)
+
+
+def _explicit_price_requested(message: str) -> bool:
+    text = str(message or "").lower()
+    if "$" in text:
+        return bool(re.search(r"\d[\d,]*(?:\.\d+)?", text))
+    return bool(
+        re.search(r"\b(?:price|budget|cost|under|below|max|maximum|afford|dollars?)\b", text)
+        and re.search(r"\d[\d,]*(?:\.\d+)?", text)
+    )
+
+
+def _explicit_color_requested(message: str) -> bool:
+    text = str(message or "").lower()
+    return any(re.search(rf"\b{re.escape(color)}\b", text) for color in _KNOWN_COLOR_WORDS)
+
+
+def _explicit_hitch_requested(message: str) -> bool:
+    text = str(message or "").lower()
+    return bool(
+        re.search(
+            r"\bgoose\s*neck\b"
+            r"|\bgooseneck\b"
+            r"|\bbumper\s*[- ]?\s*pull\b"
+            r"|\bbumperpull\b"
+            r"|\bhitch\s+type\s+(?:should\s+be|is|to|as|=)\b"
+            r"|\bprefer\s+\w+(?:\s+\w+){0,4}\s+hitch\b"
+            r"|\bmake\s+it\s+\w+(?:\s+\w+){0,4}\s+hitch\b",
+            text,
+        )
+    )
+
+
+def _message_has_filter_evidence(key: str, latest_message: str, awaiting_slot: str | None = None) -> bool:
+    key = str(key)
+    if key == "length_ft":
+        return _explicit_length_requested(latest_message, awaiting_slot)
+    if key == "width_ft":
+        return _explicit_width_requested(latest_message, awaiting_slot)
+    if key == "payload_lbs":
+        return _explicit_payload_requested(latest_message, awaiting_slot)
+    if key == "max_price":
+        return _explicit_price_requested(latest_message)
+    if key == "hitch_type":
+        return _explicit_hitch_requested(latest_message)
+    if key == "subcategory":
+        return _explicit_subcategory_requested(latest_message)
+    if key == "color":
+        return _explicit_color_requested(latest_message)
+    return False
+
+
+def _value_text_appears_in_message(value: Any, latest_message: str) -> bool:
+    value_text = str(value or "").strip().lower()
+    message = str(latest_message or "").lower()
+    if not value_text or not message:
+        return False
+    compact_value = re.sub(r"\s+", " ", value_text)
+    return compact_value in re.sub(r"\s+", " ", message)
+
+
+def _message_has_slot_evidence(slot: str, value: Any, latest_message: str, awaiting_slot: str | None = None) -> bool:
+    slot = str(slot)
+    if awaiting_slot and slot == awaiting_slot:
+        return bool(str(latest_message or "").strip())
+    if _slot_is_weight_like(slot):
+        return _explicit_payload_requested(latest_message, awaiting_slot)
+    if _slot_is_length_like(slot):
+        return _explicit_length_requested(latest_message, awaiting_slot) or _explicit_width_requested(latest_message, awaiting_slot)
+    if slot == "hitch_type":
+        return _explicit_hitch_requested(latest_message)
+    if slot == "color":
+        return _explicit_color_requested(latest_message)
+    if slot == "max_price":
+        return _explicit_price_requested(latest_message)
+    return _value_text_appears_in_message(value, latest_message)
+
+
 def _explicit_subcategory_requested(message: str) -> bool:
     text = str(message or "").lower()
     return bool(
@@ -193,8 +351,20 @@ def _explicit_subcategory_requested(message: str) -> bool:
     )
 
 
-def _sanitize_metadata_filter_update(key: str, value: Any, latest_message: str) -> tuple[str, Any] | None:
+def _sanitize_metadata_filter_update(
+    key: str,
+    value: Any,
+    latest_message: str,
+    awaiting_slot: str | None = None,
+) -> tuple[str, Any] | None:
     if value in (None, "") or key not in _METADATA_FILTER_KEYS:
+        return None
+    if not _message_has_filter_evidence(key, latest_message, awaiting_slot):
+        logger.info(
+            "metadata_filter_rejected | key=%s | value=%r | reason=not_explicit",
+            key,
+            value,
+        )
         return None
     if key == "hitch_type":
         hitch = _normalize_allowed_hitch(value)
@@ -203,9 +373,6 @@ def _sanitize_metadata_filter_update(key: str, value: Any, latest_message: str) 
             return None
         return key, hitch
     if key == "subcategory":
-        if not _explicit_subcategory_requested(latest_message):
-            logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=not_explicit", value)
-            return None
         subcategory = normalize_subcategory(str(value))
         if not subcategory:
             logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=invalid", value)
@@ -325,16 +492,16 @@ def _extract_filter_decision(state: ChatbotState, category: str | None) -> Filte
                         "Extract only explicit trailer search filters and category slot values from the latest user message. "
                         "Use recent messages only as context, not as new updates.\n"
                         "Rules:\n"
-                        "- Return null for fields not explicitly mentioned in the latest user message.\n"
+                        "- Return null for fields not explicitly mentioned in the latest user message; never infer updates from recent messages.\n"
                         "- Width phrases such as 'width should be at least 6 ft' or '6 ft wide' map only to width_ft, never length_ft.\n"
                         "- Length phrases must mention length, long, deck length, trailer length, size, trailer size, or an ambiguous 'make it 14 ft' update.\n"
                         "- Trailer shorthand like '6x12' means width_ft=6 and length_ft=12; '6x12x5' means width_ft=6, length_ft=12, height=5. Do not store height unless there is an allowed slot/filter for it.\n"
                         "- Payload/load/haul weight maps to payload_lbs, not GVWR.\n"
-                        "- hitch_type can only be gooseneck or bumper pull; return null for any other value.\n"
+                        "- hitch_type can only be gooseneck or bumper pull and must be explicitly named in the latest message; return null otherwise.\n"
                         "- subcategory must only be returned when the latest message explicitly asks for a subcategory filter.\n"
                         "- Do not infer subcategory from category words like Tilt, Utility, Dump, Aluminum, or Enclosed.\n"
                         "- Preserve existing values by returning null unless the latest message updates that exact field.\n"
-                        "- slot_updates may include only allowed category slots and only when the latest message provides the value."
+                        "- slot_updates may include only allowed category slots and only when the latest message provides direct evidence for that slot."
                     )
                 ),
                 HumanMessage(
@@ -353,11 +520,12 @@ def _extract_filter_decision(state: ChatbotState, category: str | None) -> Filte
 def _metadata_filters_from_extraction(
     extraction: FilterExtractionDecision,
     latest_message: str = "",
+    awaiting_slot: str | None = None,
 ) -> dict[str, Any]:
     data = _model_dump(extraction)
     updates: dict[str, Any] = {}
     for key in _METADATA_FILTER_KEYS:
-        sanitized = _sanitize_metadata_filter_update(key, data.get(key), latest_message)
+        sanitized = _sanitize_metadata_filter_update(key, data.get(key), latest_message, awaiting_slot)
         if sanitized:
             clean_key, clean_value = sanitized
             updates[clean_key] = clean_value
@@ -367,11 +535,12 @@ def _metadata_filters_from_extraction(
 def _metadata_filters_from_decision(
     decision: dict[str, Any],
     latest_message: str = "",
+    awaiting_slot: str | None = None,
 ) -> dict[str, Any]:
     raw = decision.get("metadata_filters_update") or {}
     updates: dict[str, Any] = {}
     for key, value in raw.items():
-        sanitized = _sanitize_metadata_filter_update(str(key), value, latest_message)
+        sanitized = _sanitize_metadata_filter_update(str(key), value, latest_message, awaiting_slot)
         if sanitized:
             clean_key, clean_value = sanitized
             updates[clean_key] = clean_value
@@ -381,13 +550,39 @@ def _metadata_filters_from_decision(
 def _slot_updates_from_extraction(
     extraction: FilterExtractionDecision,
     allowed_category_slots: set[str],
+    latest_message: str = "",
+    awaiting_slot: str | None = None,
 ) -> dict[str, Any]:
     raw = dict(extraction.slot_updates or {})
-    return {
-        k: v
-        for k, v in raw.items()
-        if k in allowed_category_slots and v not in (None, "")
-    }
+    updates: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in allowed_category_slots or value in (None, ""):
+            continue
+        if not _message_has_slot_evidence(str(key), value, latest_message, awaiting_slot):
+            logger.info("slot_update_rejected | slot=%s | value=%r | reason=not_explicit", key, value)
+            continue
+        updates[key] = value
+    return updates
+
+
+def _slot_updates_from_decision(
+    decision: dict[str, Any],
+    allowed_category_slots: set[str],
+    latest_message: str = "",
+    awaiting_slot: str | None = None,
+) -> dict[str, Any]:
+    raw = dict(decision.get("slots_collected_update") or {})
+    updates: dict[str, Any] = {}
+    for key, value in raw.items():
+        if value in (None, ""):
+            continue
+        if allowed_category_slots and key not in allowed_category_slots:
+            continue
+        if not _message_has_slot_evidence(str(key), value, latest_message, awaiting_slot):
+            logger.info("slot_update_rejected | slot=%s | value=%r | reason=not_explicit", key, value)
+            continue
+        updates[key] = value
+    return updates
 
 
 def _slot_updates_from_metadata(category: str | None, metadata_filters: dict[str, Any]) -> dict[str, Any]:
@@ -563,7 +758,8 @@ def _apply_haul_classification_effects(
     confident = classification.confidence in _CONFIDENT_CLASSIFICATIONS
     cat = category.strip().lower()
 
-    if confident and classification.matched_item and not slots.get("haul_item"):
+    matched_item_is_usable = _is_usable_classifier_haul_item(classification.matched_item)
+    if confident and matched_item_is_usable and classification.matched_item and not slots.get("haul_item"):
         if "haul_item" in _category_slots(category):
             slots["haul_item"] = classification.matched_item
             logger.info(
@@ -573,7 +769,7 @@ def _apply_haul_classification_effects(
                 classification.reason,
             )
 
-    known_haul_item = bool(slots.get("haul_item") or classification.matched_item)
+    known_haul_item = bool(slots.get("haul_item") or matched_item_is_usable)
     if cat == "utility" and confident and classification.is_lightweight_utility_load and known_haul_item:
         required_slots = [slot for slot in required_slots if slot != "haul_weight_lbs"]
         if not metadata_filters.get("payload_lbs") and not slots.get("haul_weight_lbs"):
@@ -784,6 +980,13 @@ def _required_slot_state(
     return missing, invalid, questions
 
 
+def _last_assistant_text(messages: list[dict[str, Any]] | None) -> str:
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return str(message.get("content") or "").strip()
+    return ""
+
+
 def _mind_node(state: ChatbotState) -> ChatbotState:
     resolution = resolve_category_from_text(state.get("user_message") or "")
     if resolution.needs_clarification and not state.get("trailer_category"):
@@ -846,6 +1049,18 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         if deterministic_hint and not decision.trailer_category:
             decision.trailer_category = deterministic_hint
 
+    if (
+        not deterministic_hint
+        and not state.get("trailer_category")
+        and decision.trailer_category
+    ):
+        logger.info(
+            "llm_category_ignored_without_deterministic_match | proposed_category=%r | user_message=%r",
+            decision.trailer_category,
+            state.get("user_message"),
+        )
+        decision.trailer_category = None
+
     return {**state, "mind_decision": _model_dump(decision)}
 
 
@@ -899,6 +1114,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         slots_collected=slots,
         metadata_filters_collected=metadata_filters,
         allowed_category_slots=sorted(allowed_category_slots),
+        active_question=_last_assistant_text(state.get("messages") or []),
     )
     awaiting_slot, slots_skipped, _removed_filters = _apply_preference_null_decision(
         category=category,
@@ -908,6 +1124,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         slots_skipped=slots_skipped,
         decision=preference_decision,
     )
+    evidence_awaiting_slot = awaiting_slot
 
     if awaiting_slot and awaiting_slot not in slots and awaiting_slot not in slots_skipped and latest_message.strip():
         candidate_value = latest_message.strip()
@@ -925,11 +1142,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 reason,
             )
 
-    for key, value in (decision.get("slots_collected_update") or {}).items():
-        if value in (None, ""):
-            continue
-        if category and key not in allowed_category_slots:
-            continue
+    for key, value in _slot_updates_from_decision(
+        decision,
+        allowed_category_slots,
+        latest_message,
+        evidence_awaiting_slot,
+    ).items():
         is_valid, reason = _validate_slot_value(key, value)
         if not is_valid:
             logger.info(
@@ -944,7 +1162,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         slots[key] = value
         slots_skipped.discard(str(key))
 
-    for key, value in _metadata_filters_from_decision(decision, latest_message).items():
+    for key, value in _metadata_filters_from_decision(decision, latest_message, evidence_awaiting_slot).items():
         metadata_filters[key] = value
     extraction = _extract_filter_decision(
         {
@@ -955,8 +1173,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         },
         category,
     )
-    extracted_metadata = _metadata_filters_from_extraction(extraction, latest_message)
-    extracted_slots = _slot_updates_from_extraction(extraction, allowed_category_slots)
+    extracted_metadata = _metadata_filters_from_extraction(extraction, latest_message, evidence_awaiting_slot)
+    extracted_slots = _slot_updates_from_extraction(
+        extraction,
+        allowed_category_slots,
+        latest_message,
+        evidence_awaiting_slot,
+    )
     logger.info(
         "filter_extraction_applied | category=%r | extracted_metadata=%s | extracted_slots=%s",
         category,

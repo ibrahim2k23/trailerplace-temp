@@ -24,7 +24,11 @@ def test_confusion_detector_requires_two_similar_repeats(monkeypatch):
 
     class _StubLLM:
         def invoke(self, _messages):
-            return service.ConfusionDetectionDecision(similar_repeat_count=2, confused=True)
+            return service.ConfusionDetectionDecision(
+                similar_repeat_count=2,
+                confusion_score=90,
+                confused=True,
+            )
 
     monkeypatch.setattr(service, "_confusion_llm", lambda: _StubLLM())
     confused, count = service._is_confused_user_turn(
@@ -33,6 +37,218 @@ def test_confusion_detector_requires_two_similar_repeats(monkeypatch):
 
     assert confused is True
     assert count == 2
+
+
+def test_confusion_detector_ignores_genuine_answer_to_assistant_question(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000106")
+    session["messages"] = [
+        {"role": "user", "content": "I need a trailer"},
+        {"role": "assistant", "content": "What kind of trailer are you looking for?"},
+        {"role": "user", "content": "A utility trailer"},
+    ]
+
+    class _StubLLM:
+        def invoke(self, _messages):
+            return service.ConfusionDetectionDecision(
+                similar_repeat_count=2,
+                confusion_score=92,
+                is_answer_to_assistant_question=True,
+                confused=True,
+            )
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _StubLLM())
+
+    confused, count = service._is_confused_user_turn(session, "A utility trailer")
+
+    assert confused is False
+    assert count == 2
+
+
+def test_confusion_detector_requires_score_at_least_85(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000107")
+    session["messages"] = [
+        {"role": "user", "content": "Do you have utility trailers?"},
+        {"role": "assistant", "content": "What will you be hauling?"},
+        {"role": "user", "content": "Do you have utility trailers?"},
+    ]
+
+    class _StubLLM:
+        def invoke(self, _messages):
+            return service.ConfusionDetectionDecision(
+                similar_repeat_count=2,
+                confusion_score=84,
+                confused=True,
+            )
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _StubLLM())
+
+    confused, count = service._is_confused_user_turn(session, "Do you have utility trailers?")
+
+    assert confused is False
+    assert count == 2
+
+
+def test_result_navigation_after_listings_requires_three_repeats(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000109")
+    session["last_listings"] = [{"title": "Trailer A"}]
+    session["messages"] = [
+        {"role": "user", "content": "show more results"},
+        {"role": "assistant", "content": "Here are more options."},
+        {"role": "user", "content": "show more results"},
+    ]
+
+    class _StubLLM:
+        def invoke(self, _messages):
+            return service.ConfusionDetectionDecision(
+                similar_repeat_count=2,
+                confusion_score=95,
+                confused=True,
+            )
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _StubLLM())
+
+    confused, count = service._is_confused_user_turn(session, "show more results")
+
+    assert confused is False
+    assert count == 2
+
+
+def test_result_navigation_after_listings_escalates_at_three_repeats(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000110")
+    session["already_shown_listing_urls"] = ["https://example.test/trailer-a"]
+    session["messages"] = [
+        {"role": "user", "content": "show more results"},
+        {"role": "assistant", "content": "Here are more options."},
+        {"role": "user", "content": "more options"},
+        {"role": "assistant", "content": "Here are more options."},
+        {"role": "user", "content": "next"},
+    ]
+
+    class _StubLLM:
+        def invoke(self, _messages):
+            return service.ConfusionDetectionDecision(
+                similar_repeat_count=3,
+                confusion_score=95,
+                confused=True,
+            )
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _StubLLM())
+
+    confused, count = service._is_confused_user_turn(session, "next")
+
+    assert confused is True
+    assert count == 3
+
+
+def test_confusion_detector_excludes_contact_only_message(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000104")
+    session["messages"] = [
+        {"role": "user", "content": "Ibrahim. 03304388550"},
+        {"role": "assistant", "content": "Thank you, Ibrahim! How can I assist you today?"},
+        {"role": "user", "content": "I am looking for a 12 feet utility trailer"},
+    ]
+
+    class _BadLLM:
+        def invoke(self, _messages):
+            raise AssertionError("Confusion LLM should not run on the first eligible main request")
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _BadLLM())
+
+    confused, count = service._is_confused_user_turn(
+        session,
+        "I am looking for a 12 feet utility trailer",
+    )
+
+    assert confused is False
+    assert count == 0
+
+
+def test_first_main_request_after_contact_does_not_escalate(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000000105"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["customer_full_name"] = "Ibrahim"
+    session["customer_phone"] = "03304388550"
+    session["sales_phase"] = "main"
+    session["messages"] = [
+        {"role": "user", "content": "Ibrahim. 03304388550"},
+        {"role": "assistant", "content": "Thank you, Ibrahim! How can I assist you today?"},
+    ]
+    email_calls = []
+    monkeypatch.setattr(
+        service,
+        "send_non_sales_faq_email",
+        lambda **kwargs: email_calls.append(kwargs) or {"status": "sent"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: {
+            "assistant_text": "What will you be hauling on the utility trailer?",
+            "tool_events": [],
+            "last_listings": [],
+            "trailer_category": "Utility",
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "I am looking for a 12 feet utility trailer"))
+
+    assert response.assistant_text == "What will you be hauling on the utility trailer?"
+    assert email_calls == []
+
+
+def test_active_qualification_answer_bypasses_confusion_detection(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000000108"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["customer_full_name"] = "Ibrahim"
+    session["customer_phone"] = "03304388550"
+    session["sales_phase"] = "main"
+    session["trailer_category"] = "Equipment"
+    session["awaiting_slot"] = "haul_item"
+    session["pending_questions"] = [
+        {
+            "slot": "haul_weight_lbs",
+            "question": "What's the rough total weight of the equipment?",
+            "required": True,
+        }
+    ]
+    session["messages"] = [
+        {"role": "user", "content": "I am looking for a 6x12 equipment trailer"},
+        {
+            "role": "assistant",
+            "content": "What equipment will you be hauling (e.g. skid steer, mini excavator, tractor)?",
+        },
+    ]
+    email_calls = []
+    monkeypatch.setattr(
+        service,
+        "send_non_sales_faq_email",
+        lambda **kwargs: email_calls.append(kwargs) or {"status": "sent"},
+    )
+
+    def _bad_confusion(*_args, **_kwargs):
+        raise AssertionError("Confusion detection should not run while answering a qualification question")
+
+    monkeypatch.setattr(service, "_is_confused_user_turn", _bad_confusion)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: {
+            "assistant_text": "What's the rough total weight of the equipment?",
+            "tool_events": [],
+            "last_listings": [],
+            "trailer_category": "Equipment",
+            "awaiting_slot": "haul_weight_lbs",
+        },
+    )
+
+    response = service.handle_chat(
+        _req(session_id, "a car. The trailer should be a bumper pull one as well")
+    )
+
+    assert response.assistant_text == "What's the rough total weight of the equipment?"
+    assert email_calls == []
 
 
 def test_confusion_escalation_sends_email_and_fixed_reply_once(monkeypatch):

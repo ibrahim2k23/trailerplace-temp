@@ -38,8 +38,8 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         optional=["hitch_type", "loading_style"],
         questions={
             "haul_item":       "What equipment will you be hauling (e.g. skid steer, mini excavator, tractor)?",
-            "haul_weight_lbs": "What's the rough total weight of the equipment?",
-            "haul_length_ft":  "About how long is the equipment (or what deck length do you need)?",
+            "haul_weight_lbs": "What's the rough total weight of the load?",
+            "haul_length_ft":  "About how long is the load (or what deck length do you need)?",
             "hitch_type":      "Do you prefer a bumper pull or gooseneck hitch?",
             "loading_style":   "How will you load it — ramps, deckover, or drive-over fenders?",
         },

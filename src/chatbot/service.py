@@ -41,7 +41,9 @@ _CONFUSION_ESCALATION_REPLY = (
     "I've forwarded your request to our sales department, and they will reach out to you soon."
 )
 _CONFUSION_REPEAT_THRESHOLD = 2
+_RESULT_NAV_CONFUSION_REPEAT_THRESHOLD = 3
 _CONFUSION_HISTORY_WINDOW = 6
+_CONFUSION_SCORE_THRESHOLD = 85
 
 
 class ContactExtraction(BaseModel):
@@ -53,6 +55,8 @@ class ContactExtraction(BaseModel):
 class ConfusionDetectionDecision(BaseModel):
     similar_repeat_count: int = 0
     confused: bool = False
+    confusion_score: int = 0
+    is_answer_to_assistant_question: bool = False
 
 
 def _model_dump(model: BaseModel) -> dict[str, Any]:
@@ -340,45 +344,122 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
         return _has_actionable_intent(user_message)
 
 
-def _recent_user_messages(session: dict[str, Any], limit: int = _CONFUSION_HISTORY_WINDOW) -> list[str]:
+def _is_contact_only_message(message: str) -> bool:
+    contact = _regex_contact(message or "")
+    has_contact_detail = any(contact.get(key) for key in ("full_name", "email", "phone"))
+    return has_contact_detail and not _has_actionable_intent(message)
+
+
+def _has_listing_context(session: dict[str, Any]) -> bool:
+    return bool(session.get("last_listings") or session.get("already_shown_listing_urls"))
+
+
+def _is_result_navigation_request(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"\bshow\s+more(?:\s+(?:results?|options?|trailers?|like\s+this))?\b"
+            r"|\bmore(?:\s+(?:results?|options?|trailers?|like\s+this))?\b"
+            r"|\bnext(?:\s+(?:ones?|results?|options?|trailers?))?\b"
+            r"|\bany\s+others?\b"
+            r"|\banother\s+(?:one|option|trailer|result)\b"
+            r"|\bshow\s+me\s+another\b",
+            text,
+        )
+    )
+
+
+def _confusion_repeat_threshold_for_message(session: dict[str, Any], message: str) -> tuple[int, str]:
+    if _has_listing_context(session) and _is_result_navigation_request(message):
+        return _RESULT_NAV_CONFUSION_REPEAT_THRESHOLD, "result_navigation"
+    return _CONFUSION_REPEAT_THRESHOLD, "default"
+
+
+def _is_confusion_eligible_user_message(message: str, session: dict[str, Any] | None = None) -> bool:
+    if _is_contact_only_message(message):
+        return False
+    if session and _has_listing_context(session) and _is_result_navigation_request(message):
+        return True
+    return _has_actionable_intent(message)
+
+
+def _recent_confusion_user_messages(session: dict[str, Any], limit: int = _CONFUSION_HISTORY_WINDOW) -> list[str]:
     messages = session.get("messages") or []
     user_turns = [
         str(m.get("content") or "").strip()
         for m in messages
-        if isinstance(m, dict) and m.get("role") == "user" and str(m.get("content") or "").strip()
+        if (
+            isinstance(m, dict)
+            and m.get("role") == "user"
+            and str(m.get("content") or "").strip()
+            and _is_confusion_eligible_user_message(str(m.get("content") or ""), session)
+        )
     ]
     return user_turns[-limit:]
 
 
 def _is_confused_user_turn(session: dict[str, Any], user_message: str) -> tuple[bool, int]:
-    recent_user_turns = _recent_user_messages(session)
+    if not _is_confusion_eligible_user_message(user_message, session):
+        return False, 0
+    recent_user_turns = _recent_confusion_user_messages(session)
+    repeat_threshold, threshold_type = _confusion_repeat_threshold_for_message(session, user_message)
     if len(recent_user_turns) < _CONFUSION_REPEAT_THRESHOLD:
         return False, 0
 
     try:
+        recent_messages = (session.get("messages") or [])[-8:]
         result = _confusion_llm().invoke(
             [
                 SystemMessage(
                     content=(
-                        "Detect whether the latest user message appears repeatedly similar to recent user messages. "
+                        "Detect whether the latest user message shows genuine customer confusion. "
                         "Return structured output with:\n"
                         "- similar_repeat_count: number of recent user messages including the latest that are materially similar to the latest.\n"
-                        "- confused: true only if the user appears confused due to repeating the same/similar ask.\n"
-                        "Only count semantic repeats of the same request; do not count natural follow-ups."
+                        "- confusion_score: 0-100 confidence that the customer is genuinely confused and needs human follow-up.\n"
+                        "- is_answer_to_assistant_question: true when the latest message is a direct answer or clarification to the assistant's last question.\n"
+                        "- confused: true only when confusion_score is at least 85.\n"
+                        "Do not classify normal answers to assistant questions as confused, even if they reuse words like trailer, livestock,utility, or need. "
+                        "Do not classify natural narrowing or clarification as confused, e.g. user asks for a trailer, assistant asks type, user says utility trailer. "
+                        "Result-navigation requests after listings, such as show more results, more options, next, or any others, are normal workflow. "
+                        "Only consider result-navigation requests confused when they are repeated excessively or include real confusion language; code applies a higher repeat threshold for these. "
+                        "Classify as confused only for high-confidence cases such as spamming the same simple request repeatedly, asking the same question again and again without progress, "
+                        "or indirectly indicating inability to decide/understand (for example: I am confused, I don't know what to choose, this is not helping, I keep asking the same thing)."
                     )
                 ),
                 HumanMessage(
                     content=(
                         f"Latest user message: {user_message}\n"
-                        f"Recent user messages (oldest to latest): {recent_user_turns}"
+                        f"Recent eligible user messages (oldest to latest): {recent_user_turns}\n"
+                        f"Recent full conversation messages (oldest to latest): {recent_messages}"
                     )
                 ),
             ]
         )
         decision = _model_dump(result)
         similar_repeat_count = int(decision.get("similar_repeat_count") or 0)
+        confusion_score = int(decision.get("confusion_score") or 0)
         confused = bool(decision.get("confused"))
-        return confused and similar_repeat_count >= _CONFUSION_REPEAT_THRESHOLD, similar_repeat_count
+        is_answer = bool(decision.get("is_answer_to_assistant_question"))
+        final_confused = (
+            confused
+            and not is_answer
+            and confusion_score >= _CONFUSION_SCORE_THRESHOLD
+            and similar_repeat_count >= repeat_threshold
+        )
+        logger.info(
+            "confusion_detection_result | confused=%s | final_confused=%s | confusion_score=%s | threshold=%s | similar_repeat_count=%s | repeat_threshold=%s | threshold_type=%s | is_answer_to_assistant_question=%s",
+            confused,
+            final_confused,
+            confusion_score,
+            _CONFUSION_SCORE_THRESHOLD,
+            similar_repeat_count,
+            repeat_threshold,
+            threshold_type,
+            is_answer,
+        )
+        return final_confused, similar_repeat_count
     except Exception:
         logger.exception("Confusion detector failed; skipping escalation check")
         return False, 0
@@ -585,9 +666,11 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             listings=[],
         )
 
-    confused_turn, similar_repeat_count = _is_confused_user_turn(session, request.message)
-    if confused_turn:
-        return _handle_confusion_escalation(session, request, similar_repeat_count)
+    has_active_qualification_question = bool(session.get("awaiting_slot") or session.get("pending_questions"))
+    if not has_active_qualification_question:
+        confused_turn, similar_repeat_count = _is_confused_user_turn(session, request.message)
+        if confused_turn:
+            return _handle_confusion_escalation(session, request, similar_repeat_count)
 
     should_route_graph = _should_route_to_graph(session, request.message)
     logger.info(
