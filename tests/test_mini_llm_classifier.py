@@ -37,3 +37,12 @@ def test_fallback_does_not_add_width_for_utility_or_enclosed():
 
     assert utility.needs_width_question is False
     assert enclosed.needs_width_question is False
+
+
+def test_fallback_does_not_add_width_for_flatbed():
+    result = fallback_haul_classification(
+        category="Flatbed",
+        user_message="I need a flatbed trailer to haul a skid steer",
+    )
+
+    assert result.needs_width_question is False

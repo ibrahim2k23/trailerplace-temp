@@ -143,6 +143,8 @@ _CONFIDENT_CLASSIFICATIONS = {"medium", "high"}
 _CONFIDENT_PREFERENCE_NULL = {"medium", "high"}
 _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
 _DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
+_DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed"}
+_FLATBED_DEFAULT_WIDTH_FT = "8 ft"
 _SLOT_METADATA_FILTER_MAP = {
     "base_category": ("subcategory",),
     "bin_size": ("length_ft",),
@@ -159,6 +161,28 @@ _SLOT_METADATA_FILTER_MAP = {
     "vehicle_length_ft": ("length_ft",),
     "width_ft": ("width_ft",),
 }
+
+
+def _has_width_requirement(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> bool:
+    if metadata_filters.get("width_ft"):
+        return True
+    width_slots = (
+        _DYNAMIC_WIDTH_SLOT,
+        "trailer_width_ft",
+        "width_ft",
+        "trailer_size",
+        "cargo_size",
+    )
+    return any(bool(slots.get(slot)) for slot in width_slots)
+
+
+def _apply_flatbed_default_width(category: str | None, slots: dict[str, Any], metadata_filters: dict[str, Any]) -> None:
+    if str(category or "").strip().lower() != "flatbed":
+        return
+    if _has_width_requirement(slots, metadata_filters):
+        return
+    metadata_filters["width_ft"] = _FLATBED_DEFAULT_WIDTH_FT
+    logger.info("flatbed_default_width_applied | width_ft=%r", _FLATBED_DEFAULT_WIDTH_FT)
 
 
 def _is_usable_classifier_haul_item(value: Any) -> bool:
@@ -781,7 +805,7 @@ def _apply_haul_classification_effects(
             )
 
     if (
-        cat not in {"utility", "enclosed", "livestock", "aluminum"}
+        cat not in _DYNAMIC_WIDTH_EXCLUDED_CATEGORIES
         and confident
         and classification.needs_width_question
     ):
@@ -1222,6 +1246,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         awaiting_slot = None
 
     _apply_aluminum_base_category_filter(category, slots, metadata_filters)
+    _apply_flatbed_default_width(category, slots, metadata_filters)
 
     haul_classification = classify_haul_requirements(
         category=category,

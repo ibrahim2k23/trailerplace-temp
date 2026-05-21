@@ -425,6 +425,60 @@ def test_heavy_equipment_width_filter_fills_dynamic_width_slot(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_flatbed_does_not_add_dynamic_width_question_and_defaults_width(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_haul_classifier(
+        monkeypatch,
+        needs_width_question=True,
+        matched_item="tractor",
+        reason="Heavy-duty equipment.",
+        confidence="high",
+    )
+    state = _state("ready to search", category="Flatbed")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_weight_lbs": "7000 lbs",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["width_ft"] == "8 ft"
+    assert "item_or_trailer_width_ft" not in out["slots_collected"]
+    assert all(q.get("slot") != "item_or_trailer_width_ft" for q in out["pending_questions"])
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_flatbed_default_width_is_metadata_only(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("ready to search", category="Flatbed")
+    state["slots_collected"] = {
+        "haul_item": "hay",
+        "haul_weight_lbs": "5000 lbs",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["width_ft"] == "8 ft"
+    assert "item_or_trailer_width_ft" not in out["slots_collected"]
+    assert "width_ft" not in out["slots_collected"]
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_flatbed_explicit_width_overrides_default_width(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("make it 7 ft wide", category="Flatbed")
+    state["slots_collected"] = {
+        "haul_item": "hay",
+        "haul_weight_lbs": "5000 lbs",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["width_ft"] == "7 ft"
+    assert "item_or_trailer_width_ft" not in out["slots_collected"]
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
 def test_enclosed_does_not_add_dynamic_width_question(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     _mock_haul_classifier(

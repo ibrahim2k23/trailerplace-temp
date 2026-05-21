@@ -107,7 +107,7 @@ def fallback_haul_classification(
         )
 
     heavy = _contains_keyword(text, HEAVY_DUTY_KEYWORDS)
-    if cat not in {"utility", "enclosed"} and heavy:
+    if cat not in {"utility", "enclosed", "flatbed"} and heavy:
         return HaulClassificationDecision(
             is_lightweight_utility_load=False,
             needs_width_question=True,
@@ -144,9 +144,9 @@ def classify_haul_requirements(
                         "Classify whether trailer qualification questions should be adjusted.\n"
                         "Rules:\n"
                         "- For Utility only, mark is_lightweight_utility_load when the haul item is likely 1500 lbs or less.\n"
-                        "- For categories except Utility and Enclosed, mark needs_width_question when the item is very large, wide, heavy0duty or a item of a vehicle brand or similar nature such as cars, tractors etc.\n"
+                        "- For categories except Utility, Enclosed, and Flatbed, mark needs_width_question when the item is very large, wide, heavy-duty or an item of a vehicle brand or similar nature such as cars, tractors etc.\n"
                         "- Treat the keyword lists as strong examples, but similar items may qualify.\n"
-                        "- Do not request a width question for Utility or Enclosed.\n"
+                        "- Do not request a width question for Utility, Enclosed, or Flatbed.\n"
                         "- Use medium or high confidence only when the item is clear."
                     )
                 ),
