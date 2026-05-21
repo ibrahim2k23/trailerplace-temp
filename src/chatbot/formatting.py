@@ -238,9 +238,9 @@ def format_listing_results(
         url = str(listing.get("url") or "").strip()
 
         if url:
-            line1 = f"{i}. [{title}]({url})"
+            line1 = f"Trailer #{i}: [{title}]({url})"
         else:
-            line1 = f"{i}. {title}"
+            line1 = f"Trailer #{i}: {title}"
 
         raw_bullets = _ordered_bullets(listing, user_message=user_message, slots=slots or {})
         bullet_lines = [f"- {text}" for text in raw_bullets]
@@ -268,4 +268,7 @@ def format_listing_results(
 
         sections.append("\n".join(block_parts))
 
-    return "\n\n---\n\n".join(sections)
+    return (
+        "\n\n---\n\n".join(sections)
+        + "\n\nAre you interested in any of the trailers above?"
+    )
