@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
 
-from src.normalizer import normalize_category, normalize_color, normalize_hitch, normalize_subcategory
+from src.normalizer import normalize_category, normalize_hitch, normalize_subcategory
 
 load_dotenv()
 
@@ -171,8 +171,9 @@ def _metadata_filter(
 ) -> dict[str, Any]:
     metadata_filters = metadata_filters or {}
     filters: list[dict[str, Any]] = []
+    normalized_category = normalize_category(category) if category else None
     if category:
-        filters.append({"category": {"$eq": normalize_category(category)}})
+        filters.append({"category": {"$eq": normalized_category}})
 
     hitch_value = metadata_filters.get("hitch_type") or slots.get("hitch_type")
     if hitch_value:
@@ -181,18 +182,12 @@ def _metadata_filter(
             filters.append({"hitch_type": {"$eq": hitch}})
         else:
             logger.info("pinecone_hitch_filter_rejected | value=%r | normalized=%r", hitch_value, hitch)
+
     subcategory_value = metadata_filters.get("subcategory")
-    if subcategory_value:
+    if normalized_category == "Aluminum" and subcategory_value:
         subcategory = normalize_subcategory(str(subcategory_value))
         if subcategory:
             filters.append({"subcategory": {"$eq": subcategory}})
-    color_value = metadata_filters.get("color") or slots.get("color")
-    if color_value:
-        filters.append({"color": {"$eq": normalize_color(str(color_value))}})
-
-    max_price = _parse_number(metadata_filters.get("max_price") or slots.get("max_price") or slots.get("budget"))
-    if max_price:
-        filters.append({"price": {"$lte": max_price}})
 
     min_length = (
         _parse_length_ft(metadata_filters.get("length_ft"))
@@ -203,24 +198,6 @@ def _metadata_filter(
     )
     if min_length:
         filters.append({"length_ft_num": {"$gte": min_length}})
-
-    min_width = (
-        _parse_length_ft(metadata_filters.get("width_ft"))
-        or _parse_length_ft(slots.get("item_or_trailer_width_ft"))
-        or _parse_length_ft(slots.get("trailer_width_ft"))
-        or _parse_length_ft(slots.get("width_ft"))
-    )
-    if min_width:
-        filters.append({"width_ft_num": {"$gte": min_width}})
-
-    min_payload = _parse_number(
-        metadata_filters.get("payload_lbs")
-        or slots.get("haul_weight_lbs")
-        or slots.get("payload_need")
-        or slots.get("total_weight")
-    )
-    if min_payload:
-        filters.append({"payload_lbs_num": {"$gte": min_payload}})
 
     if not filters:
         return {}
