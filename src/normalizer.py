@@ -49,6 +49,7 @@ MAKE_MAP = {
 
 HITCH_MAP = {
     "bumper pull": "Bumper Pull",
+    "bumperpull": "Bumper Pull",
     "bumper-pull": "Bumper Pull",
     "gooseneck": "Gooseneck",
     "goose neck": "Gooseneck",
