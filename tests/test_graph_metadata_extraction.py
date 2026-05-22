@@ -99,6 +99,180 @@ def test_livestock_width_is_metadata_filter_not_category_slot(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_make_only_request_with_multiple_categories_asks_user_to_choose(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I am looking for a 6x12 Iron Bull trailer", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["awaiting_slot"] == "make_category_choice"
+    assert "Flatbed" in out["make_category_options"]
+    assert "Which category" in out["assistant_text"]
+    assert out["mind_decision"]["action"] == "respond"
+
+
+def test_make_category_no_preference_keeps_existing_length_and_asks_payload_only(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("any type", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Iron Bull Trailers",
+        "width_ft": "6",
+        "length_ft": "12",
+    }
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert out["pending_questions"] == []
+    assert "payload" in out["assistant_text"].lower() or "weight" in out["assistant_text"].lower()
+
+
+def test_make_category_no_idea_is_treated_as_no_preference(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("no idea", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Iron Bull Trailers",
+        "width_ft": "6",
+        "length_ft": "12",
+    }
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert "Which category should I use" not in out["assistant_text"]
+
+
+def test_make_category_no_type_in_mind_is_treated_as_no_preference(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("honestly, I have no type in mind", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Iron Bull Trailers",
+        "width_ft": "6",
+        "length_ft": "12",
+    }
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert "Which category should I use" not in out["assistant_text"]
+
+
+def test_make_category_no_preference_uses_mini_classifier(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+
+    def _preference_classifier(**kwargs):
+        if kwargs["awaiting_slot"] == "make_category_choice":
+            assert "Which category should I use" in kwargs["active_question"]
+            return graph.PreferenceNullDecision(
+                has_no_preference=True,
+                target_slots=["make_category_choice"],
+                reason="User is flexible on category.",
+                confidence="high",
+            )
+        return graph.PreferenceNullDecision()
+
+    monkeypatch.setattr(graph, "classify_no_preference", _preference_classifier)
+    state = _state("I'm flexible on the category", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Iron Bull Trailers",
+        "width_ft": "6",
+        "length_ft": "12",
+    }
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert "Which category should I use" not in out["assistant_text"]
+
+
+def test_make_category_no_preference_searches_when_size_and_payload_known(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("any type", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Iron Bull Trailers",
+        "width_ft": "6",
+        "length_ft": "12",
+        "payload_lbs": "2000 pounds",
+    }
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["pending_questions"] == []
+    assert out["awaiting_slot"] is None
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_make_category_choice_preserves_payload_hitch_and_budget(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I want an Iron Bull gooseneck trailer under 10000 with 2000 pounds payload", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["awaiting_slot"] == "make_category_choice"
+    assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
+    assert out["metadata_filters_collected"]["hitch_type"] == "Gooseneck"
+    assert out["metadata_filters_collected"]["max_price"] == "10000"
+    assert out["metadata_filters_collected"]["payload_lbs"] == "2000 pounds"
+
+
+def test_make_and_category_request_sets_both_without_choice(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I need a Diamond C flatbed trailer", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Flatbed"
+    assert out["metadata_filters_collected"]["make"] == "Diamond C"
+    assert out["awaiting_slot"] == "haul_item"
+
+
+def test_gooseneck_hitch_does_not_set_make_filter(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I need a gooseneck flatbed trailer", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Flatbed"
+    assert "make" not in out["metadata_filters_collected"]
+    assert out["metadata_filters_collected"]["hitch_type"] == "Gooseneck"
+
+
+def test_make_category_no_preference_falls_back_to_length_capacity(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I do not know", category=None)
+    state["metadata_filters_collected"] = {"make": "Diamond C"}
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Car Hauler", "Dump", "Equipment", "Flatbed"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["make"] == "Diamond C"
+    assert out["awaiting_slot"] == "trailer_length_ft"
+    assert out["pending_questions"][0]["slot"] == "haul_weight_lbs"
+
+
 def test_dimension_shorthand_uses_width_by_length(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     out = graph._apply_mind_node(_state("I am looking for a 6x12 livestock trailer", category="Livestock"))

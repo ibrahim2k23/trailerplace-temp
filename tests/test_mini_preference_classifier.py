@@ -165,3 +165,34 @@ def test_preference_classifier_runs_for_no_fixed_size_answer(monkeypatch):
     )
 
     assert result == expected
+
+
+def test_preference_classifier_runs_for_category_choice_no_preference(monkeypatch):
+    expected = PreferenceNullDecision(
+        has_no_preference=True,
+        target_slots=["make_category_choice"],
+        reason="User has no category preference.",
+        confidence="high",
+    )
+
+    class FakeLLM:
+        def invoke(self, messages):
+            serialized = str(messages)
+            assert "Which category should I use" in serialized
+            assert "no type in mind" in serialized
+            return expected
+
+    monkeypatch.setattr(
+        "src.chatbot.mini_preference_classifier._preference_classifier_llm",
+        lambda: FakeLLM(),
+    )
+
+    result = classify_no_preference(
+        category=None,
+        user_message="honestly, I have no type in mind",
+        awaiting_slot="make_category_choice",
+        pending_questions=[],
+        active_question="Which category should I use: Dump, Equipment, Flatbed?",
+    )
+
+    assert result == expected

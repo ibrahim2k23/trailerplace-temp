@@ -24,6 +24,8 @@ from src.chatbot.mini_preference_classifier import (
     PreferenceNullDecision,
     classify_no_preference,
 )
+from src.chatbot.make_inventory import categories_for_make
+from src.chatbot.make_resolver import resolve_make_from_text
 from src.chatbot.prompts import MIND_SYSTEM_PROMPT
 from src.chatbot.state import ChatbotState, QuestionItem
 from src.models import TrailerListing
@@ -93,6 +95,7 @@ class FilterExtractionDecision(BaseModel):
     max_price: Optional[str] = None
     hitch_type: Optional[str] = None
     subcategory: Optional[str] = None
+    make: Optional[str] = None
     color: Optional[str] = None
     slot_updates: dict[str, Any] = Field(default_factory=dict)
 
@@ -136,6 +139,7 @@ _METADATA_FILTER_KEYS = {
     "max_price",
     "hitch_type",
     "subcategory",
+    "make",
     "color",
 }
 _ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
@@ -145,6 +149,13 @@ _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
 _DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
 _DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed"}
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
+_MAKE_CATEGORY_CHOICE_SLOT = "make_category_choice"
+_MAKE_GENERIC_LENGTH_SLOT = "trailer_length_ft"
+_MAKE_GENERIC_PAYLOAD_SLOT = "haul_weight_lbs"
+_MAKE_GENERIC_QUESTIONS = {
+    _MAKE_GENERIC_LENGTH_SLOT: "What trailer length would you prefer?",
+    _MAKE_GENERIC_PAYLOAD_SLOT: "What payload or weight capacity do you need?",
+}
 _SLOT_METADATA_FILTER_MAP = {
     "base_category": ("subcategory",),
     "bin_size": ("length_ft",),
@@ -332,6 +343,8 @@ def _message_has_filter_evidence(key: str, latest_message: str, awaiting_slot: s
         return _explicit_hitch_requested(latest_message)
     if key == "subcategory":
         return _explicit_subcategory_requested(latest_message)
+    if key == "make":
+        return _explicit_make_requested(latest_message)
     if key == "color":
         return _explicit_color_requested(latest_message)
     return False
@@ -375,6 +388,10 @@ def _explicit_subcategory_requested(message: str) -> bool:
     )
 
 
+def _explicit_make_requested(message: str) -> bool:
+    return bool(resolve_make_from_text(message or "", use_llm_fallback=False).make)
+
+
 def _sanitize_metadata_filter_update(
     key: str,
     value: Any,
@@ -402,6 +419,14 @@ def _sanitize_metadata_filter_update(
             logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=invalid", value)
             return None
         return key, subcategory
+    if key == "make":
+        resolution = resolve_make_from_text(str(value), use_llm_fallback=False)
+        if not resolution.make:
+            resolution = resolve_make_from_text(latest_message or "", use_llm_fallback=False)
+        if not resolution.make:
+            logger.info("metadata_filter_rejected | key=make | value=%r | reason=unknown", value)
+            return None
+        return key, resolution.make
     return key, value
 
 
@@ -489,6 +514,10 @@ def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision
     if color_match:
         updates["color"] = color_match.group(1)
 
+    make_resolution = resolve_make_from_text(text, use_llm_fallback=False)
+    if make_resolution.make:
+        updates["make"] = make_resolution.make
+
     return FilterExtractionDecision(**updates, slot_updates=slot_updates)
 
 
@@ -522,6 +551,7 @@ def _extract_filter_decision(state: ChatbotState, category: str | None) -> Filte
                         "- Trailer shorthand like '6x12' means width_ft=6 and length_ft=12; '6x12x5' means width_ft=6, length_ft=12, height=5. Do not store height unless there is an allowed slot/filter for it.\n"
                         "- Payload/load/haul weight maps to payload_lbs, not GVWR.\n"
                         "- hitch_type can only be gooseneck or bumper pull and must be explicitly named in the latest message; return null otherwise.\n"
+                        "- make is the trailer manufacturer only; never use Gooseneck as make unless the user explicitly says it is the brand/manufacturer.\n"
                         "- subcategory must only be returned when the latest message explicitly asks for a subcategory filter.\n"
                         "- Do not infer subcategory from category words like Tilt, Utility, Dump, Aluminum, or Enclosed.\n"
                         "- Preserve existing values by returning null unless the latest message updates that exact field.\n"
@@ -1088,6 +1118,209 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
     return {**state, "mind_decision": _model_dump(decision)}
 
 
+def _normalize_choice_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _category_from_choice(text: str, options: list[str]) -> str | None:
+    resolution = resolve_category_from_text(text)
+    if resolution.category and resolution.category in options:
+        return resolution.category
+
+    normalized = _normalize_choice_text(text)
+    for option in options:
+        option_l = _normalize_choice_text(option)
+        if normalized == option_l or option_l in normalized:
+            return option
+    return None
+
+
+def _is_no_category_preference(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b("
+            r"any|either|whatever|no\s+preference|no\s+idea|not\s+sure|don't\s+know|dont\s+know|"
+            r"do\s+not\s+know|can't\s+choose|cant\s+choose|you\s+pick|recommend"
+            r")\b",
+            text or "",
+            re.I,
+        )
+        or bool(
+            re.search(
+                r"\b(?:no|not|none)\s+(?:specific\s+)?(?:type|category|kind)\b"
+                r"|\b(?:no|not|none)\s+(?:specific\s+)?(?:type|category|kind)\s+in\s+mind\b"
+                r"|\b(?:i\s+have|have)\s+no\s+(?:type|category|kind)\s+in\s+mind\b",
+                text or "",
+                re.I,
+            )
+        )
+    )
+
+
+def _classify_make_category_no_preference(
+    *,
+    user_message: str,
+    make_category_options: list[str],
+    metadata_filters: dict[str, Any],
+    slots: dict[str, Any],
+) -> bool:
+    category_text = ", ".join(make_category_options)
+    active_question = (
+        f"Which category should I use: {category_text}?"
+        if category_text
+        else "Which category should I use?"
+    )
+    decision = classify_no_preference(
+        category=None,
+        user_message=user_message,
+        awaiting_slot=_MAKE_CATEGORY_CHOICE_SLOT,
+        pending_questions=[],
+        slots_collected=slots,
+        metadata_filters_collected=metadata_filters,
+        allowed_category_slots=[],
+        active_question=active_question,
+    )
+    data = _model_dump(decision)
+    if data.get("has_no_preference") and data.get("confidence") in _CONFIDENT_PREFERENCE_NULL:
+        return True
+    return _is_no_category_preference(user_message)
+
+
+def _make_category_question(make: str, categories: tuple[str, ...]) -> str:
+    category_text = ", ".join(categories)
+    return (
+        f"We have {make} trailers in these categories: {category_text}. "
+        "Which category should I look at?"
+    )
+
+
+def _make_only_missing_slots(
+    *,
+    category: str | None,
+    metadata_filters: dict[str, Any],
+    slots: dict[str, Any],
+    slots_skipped: set[str],
+) -> list[str]:
+    if category or not metadata_filters.get("make"):
+        return []
+
+    missing: list[str] = []
+    if (
+        not metadata_filters.get("length_ft")
+        and not slots.get(_MAKE_GENERIC_LENGTH_SLOT)
+        and _MAKE_GENERIC_LENGTH_SLOT not in slots_skipped
+    ):
+        missing.append(_MAKE_GENERIC_LENGTH_SLOT)
+    if (
+        not metadata_filters.get("payload_lbs")
+        and not slots.get(_MAKE_GENERIC_PAYLOAD_SLOT)
+        and _MAKE_GENERIC_PAYLOAD_SLOT not in slots_skipped
+    ):
+        missing.append(_MAKE_GENERIC_PAYLOAD_SLOT)
+    return missing
+
+
+def _queue_make_only_questions(
+    pending: list[QuestionItem],
+    missing_slots: list[str],
+) -> list[QuestionItem]:
+    existing = {str(q.get("slot") or "") for q in pending}
+    for slot in missing_slots:
+        if slot not in existing:
+            pending.append(
+                {
+                    "slot": slot,
+                    "question": _MAKE_GENERIC_QUESTIONS[slot],
+                    "required": True,
+                }
+            )
+    return pending
+
+
+def _allow_llm_make_fallback(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:brand|make|manufacturer|made\s+by|called|named)\b",
+            text or "",
+            re.I,
+        )
+    )
+
+
+def _apply_make_resolution(
+    *,
+    latest_message: str,
+    category: str | None,
+    metadata_filters: dict[str, Any],
+) -> tuple[str | None, list[str], str | None]:
+    explicit_category = resolve_category_from_text(latest_message).category
+    if explicit_category and not category:
+        category = explicit_category
+
+    resolution = resolve_make_from_text(
+        latest_message,
+        use_llm_fallback=_allow_llm_make_fallback(latest_message),
+    )
+    if not resolution.make:
+        return category, [], None
+
+    metadata_filters["make"] = resolution.make
+    available_categories = list(categories_for_make(resolution.make))
+    if category:
+        return category, [], None
+    if len(available_categories) == 1:
+        return available_categories[0], [], None
+    if len(available_categories) > 1:
+        return category, available_categories, _make_category_question(
+            resolution.make,
+            tuple(available_categories),
+        )
+    return category, [], None
+
+
+def _apply_explicit_filter_extraction(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    latest_message: str,
+    awaiting_slot: str | None,
+    apply_slot_updates: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    allowed_category_slots = _category_slots(category)
+    extraction = _extract_filter_decision(
+        {
+            **state,
+            "trailer_category": category,
+            "slots_collected": slots,
+            "metadata_filters_collected": metadata_filters,
+        },
+        category,
+    )
+    extracted_metadata = _metadata_filters_from_extraction(extraction, latest_message, awaiting_slot)
+    extracted_slots = (
+        _slot_updates_from_extraction(
+            extraction,
+            allowed_category_slots,
+            latest_message,
+            awaiting_slot,
+        )
+        if apply_slot_updates and category
+        else {}
+    )
+    logger.info(
+        "filter_extraction_applied | category=%r | extracted_metadata=%s | extracted_slots=%s",
+        category,
+        json.dumps(extracted_metadata, default=str),
+        json.dumps(extracted_slots, default=str),
+    )
+    for key, value in extracted_metadata.items():
+        if key in _METADATA_FILTER_KEYS and value not in (None, ""):
+            metadata_filters[key] = value
+    return extracted_slots, extracted_metadata
+
+
 def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     decision = dict(state.get("mind_decision") or {})
     slots_before = dict(state.get("slots_collected") or {})
@@ -1128,8 +1361,74 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         awaiting_slot = None
         reset_result_state = True
 
-    allowed_category_slots = _category_slots(category)
     latest_message = state.get("user_message") or ""
+    make_category_options = list(state.get("make_category_options") or [])
+    if awaiting_slot == _MAKE_CATEGORY_CHOICE_SLOT:
+        chosen_category = _category_from_choice(latest_message, make_category_options)
+        if chosen_category:
+            category = chosen_category
+            awaiting_slot = None
+            make_category_options = []
+            reset_result_state = True
+        elif _classify_make_category_no_preference(
+            user_message=latest_message,
+            make_category_options=make_category_options,
+            metadata_filters=metadata_filters,
+            slots=slots,
+        ):
+            awaiting_slot = None
+            make_category_options = []
+        else:
+            assistant_text = (
+                "Which category should I use: "
+                f"{', '.join(make_category_options)}?"
+                if make_category_options
+                else "Which category should I use?"
+            )
+            decision["action"] = "respond"
+            return {
+                **state,
+                "trailer_category": category,
+                "slots_collected": slots,
+                "slots_skipped": sorted(slots_skipped),
+                "metadata_filters_collected": metadata_filters,
+                "make_category_options": make_category_options,
+                "awaiting_slot": _MAKE_CATEGORY_CHOICE_SLOT,
+                "pending_questions": [],
+                "assistant_text": assistant_text,
+                "mind_decision": decision,
+            }
+
+    category, category_options, make_question = _apply_make_resolution(
+        latest_message=latest_message,
+        category=category,
+        metadata_filters=metadata_filters,
+    )
+    if category_options and make_question:
+        _apply_explicit_filter_extraction(
+            state=state,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=awaiting_slot,
+            apply_slot_updates=False,
+        )
+        decision["action"] = "respond"
+        return {
+            **state,
+            "trailer_category": category,
+            "slots_collected": slots,
+            "slots_skipped": sorted(slots_skipped),
+            "metadata_filters_collected": metadata_filters,
+            "make_category_options": category_options,
+            "awaiting_slot": _MAKE_CATEGORY_CHOICE_SLOT,
+            "pending_questions": [],
+            "assistant_text": make_question,
+            "mind_decision": decision,
+        }
+
+    allowed_category_slots = _category_slots(category)
     preference_decision = classify_no_preference(
         category=category,
         user_message=latest_message,
@@ -1188,31 +1487,15 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
 
     for key, value in _metadata_filters_from_decision(decision, latest_message, evidence_awaiting_slot).items():
         metadata_filters[key] = value
-    extraction = _extract_filter_decision(
-        {
-            **state,
-            "trailer_category": category,
-            "slots_collected": slots,
-            "metadata_filters_collected": metadata_filters,
-        },
-        category,
+    extracted_slots, _extracted_metadata = _apply_explicit_filter_extraction(
+        state=state,
+        category=category,
+        slots=slots,
+        metadata_filters=metadata_filters,
+        latest_message=latest_message,
+        awaiting_slot=evidence_awaiting_slot,
+        apply_slot_updates=True,
     )
-    extracted_metadata = _metadata_filters_from_extraction(extraction, latest_message, evidence_awaiting_slot)
-    extracted_slots = _slot_updates_from_extraction(
-        extraction,
-        allowed_category_slots,
-        latest_message,
-        evidence_awaiting_slot,
-    )
-    logger.info(
-        "filter_extraction_applied | category=%r | extracted_metadata=%s | extracted_slots=%s",
-        category,
-        json.dumps(extracted_metadata, default=str),
-        json.dumps(extracted_slots, default=str),
-    )
-    for key, value in extracted_metadata.items():
-        if key in _METADATA_FILTER_KEYS and value not in (None, ""):
-            metadata_filters[key] = value
     for key, value in extracted_slots.items():
         is_valid, reason = _validate_slot_value(key, value)
         if is_valid:
@@ -1316,6 +1599,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             required_slots=required_slots_override,
             questions_override=dynamic_questions,
         )
+    make_only_missing = _make_only_missing_slots(
+        category=category,
+        metadata_filters=metadata_filters,
+        slots=slots,
+        slots_skipped=slots_skipped,
+    )
+    if make_only_missing:
+        pending = _queue_make_only_questions(pending, make_only_missing)
 
     valid_actions = {
         "ask_next_question",
@@ -1327,7 +1618,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     action = decision.get("action") or "respond"
     if action not in valid_actions:
         action = "respond"
-    required_complete = bool(category) and not missing_required and not invalid_required
+    make_only_complete = bool(metadata_filters.get("make")) and not category and not make_only_missing
+    required_complete = (bool(category) and not missing_required and not invalid_required) or make_only_complete
     if required_complete and action not in {"send_interested_listing_email", "send_non_sales_faq_email"}:
         if action != "pinecone_search":
             logger.info(
@@ -1365,7 +1657,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 awaiting_slot = unresolved_slot
             elif not assistant_text.strip():
                 assistant_text = "Could you share a little more detail so I can narrow this down?"
-    elif action == "pinecone_search" and not category:
+    elif action == "pinecone_search" and not category and not make_only_complete:
         assistant_text = "What kind of trailer are you looking for?"
         action = "respond"
     elif invalid_required_slot and action != "pinecone_search":
@@ -1408,6 +1700,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "slots_collected": slots,
         "slots_skipped": sorted(slots_skipped),
         "metadata_filters_collected": metadata_filters,
+        "make_category_options": make_category_options,
         "awaiting_slot": awaiting_slot,
         "pending_questions": pending,
         "asked_questions": asked,

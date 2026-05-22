@@ -12,6 +12,7 @@ from openai import OpenAI
 from pinecone import Pinecone
 
 from src.normalizer import normalize_category, normalize_hitch, normalize_subcategory
+from src.chatbot.make_inventory import make_filter_values
 
 load_dotenv()
 
@@ -174,6 +175,14 @@ def _metadata_filter(
     normalized_category = normalize_category(category) if category else None
     if category:
         filters.append({"category": {"$eq": normalized_category}})
+
+    make_value = metadata_filters.get("make")
+    if make_value:
+        values = [value for value in make_filter_values(str(make_value)) if value]
+        if len(values) == 1:
+            filters.append({"make": {"$eq": values[0]}})
+        elif values:
+            filters.append({"make": {"$in": values}})
 
     hitch_value = metadata_filters.get("hitch_type") or slots.get("hitch_type")
     if hitch_value:

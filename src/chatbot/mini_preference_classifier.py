@@ -70,6 +70,7 @@ def classify_no_preference(
                         "Rules:\n"
                         "- Use only the active_question and user_answer. Do not infer from broader conversation.\n"
                         "- Return has_no_preference=true for answers like any, whatever, no fixed size, no specific preference, not sure, I don't know, flexible, or doesn't matter.\n"
+                        "- For a category/type/kind choice question, answers like no idea, no type in mind, any type, or no category preference also mean no preference.\n"
                         "- Return has_no_preference=false when the answer provides a concrete value, constraint, item, category, color, hitch, length, width, weight, or price.\n"
                         "- If true, target_slots should contain only active_slot when active_slot is present.\n"
                         "- target_metadata_filters may include the corresponding search filter for that active_slot when relevant.\n"

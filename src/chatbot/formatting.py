@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 
 # (display label, listing keys in preference order)
 _BULLET_FIELDS: list[tuple[str, tuple[str, ...]]] = [
+    ("Category", ("category",)),
     ("Price", ("price_display", "price")),
     ("Length", ("length",)),
     ("Width", ("width",)),

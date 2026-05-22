@@ -78,6 +78,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "slots_collected": {},
         "slots_skipped": [],
         "metadata_filters_collected": {},
+        "make_category_options": [],
         "awaiting_slot": None,
         "pending_questions": [],
         "asked_questions": [],
@@ -554,6 +555,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
         "slots_skipped": list(session.get("slots_skipped") or []),
         "metadata_filters_collected": deepcopy(session.get("metadata_filters_collected") or {}),
+        "make_category_options": list(session.get("make_category_options") or []),
         "awaiting_slot": session.get("awaiting_slot"),
         "pending_questions": deepcopy(session.get("pending_questions") or []),
         "asked_questions": list(session.get("asked_questions") or []),
@@ -573,6 +575,7 @@ def _reset_search_state_for_category_switch(session: dict[str, Any], old_categor
     session["slots_collected"] = {}
     session["slots_skipped"] = []
     session["metadata_filters_collected"] = {}
+    session["make_category_options"] = []
     session["awaiting_slot"] = None
     session["pending_questions"] = []
     session["asked_questions"] = []
@@ -747,6 +750,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "slots_collected",
         "slots_skipped",
         "metadata_filters_collected",
+        "make_category_options",
         "awaiting_slot",
         "pending_questions",
         "asked_questions",

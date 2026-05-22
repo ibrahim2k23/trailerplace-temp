@@ -40,6 +40,19 @@ def test_valid_hitch_filter_is_added():
     assert {"hitch_type": {"$eq": "Gooseneck"}} in filt["$and"]
 
 
+def test_make_filter_is_added_with_known_variants():
+    filt = ps._metadata_filter("Flatbed", {}, {"make": "Diamond C"})
+
+    assert {"category": {"$eq": "Flatbed"}} in filt["$and"]
+    assert {"make": {"$in": ["Diamond C", "Diamond C Trailers"]}} in filt["$and"]
+
+
+def test_make_only_filter_is_allowed_without_category():
+    filt = ps._metadata_filter(None, {}, {"make": "Aluma"})
+
+    assert filt == {"make": {"$eq": "Aluma"}}
+
+
 def test_invalid_hitch_filter_is_rejected():
     filt = ps._metadata_filter("Tilt", {}, {"hitch_type": "Tilt"})
 
