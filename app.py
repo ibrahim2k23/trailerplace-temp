@@ -264,7 +264,7 @@ if "auth_ok" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "sales_phase" not in st.session_state:
-    st.session_state.sales_phase = "onboarding"
+    st.session_state.sales_phase = "main"
 if "onboarding_api_messages" not in st.session_state:
     st.session_state.onboarding_api_messages = []
 
@@ -300,13 +300,6 @@ if not st.session_state.auth_ok:
 
 if "chat_session_id" not in st.session_state:
     st.session_state.chat_session_id = str(uuid.uuid4())
-if st.session_state.sales_phase == "main":
-    if not (
-        st.session_state.get("customer_full_name")
-        and st.session_state.get("customer_phone")
-    ):
-        st.session_state.sales_phase = "onboarding"
-        st.session_state.onboarding_api_messages = []
 if "last_thinking_result" not in st.session_state:
     st.session_state.last_thinking_result = None
 if "thinking_status" not in st.session_state:
@@ -351,11 +344,7 @@ elif (
 # ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🚛 TrailerPlace")
-    st.caption(
-        "AI Sales Assistant"
-        if st.session_state.sales_phase == "main"
-        else "Share your name, email & phone in chat (any wording)"
-    )
+    st.caption("AI Sales Assistant")
     st.divider()
     st.markdown("📍 Wharton, TX")
     st.markdown("📞 (979) 532-1486")
@@ -366,7 +355,7 @@ with st.sidebar:
         old_sid = st.session_state.get("chat_session_id")
         if old_sid:
             _reset_api_session(old_sid)
-        st.session_state.sales_phase = "onboarding"
+        st.session_state.sales_phase = "main"
         st.session_state.onboarding_api_messages = []
         st.session_state.messages = []
         for k in ("main_prior_messages", "customer_full_name", "customer_email", "customer_phone"):
@@ -406,11 +395,7 @@ with st.sidebar:
 # HEADER
 # ─────────────────────────────────────────────────────────────
 st.markdown("### Sales Chat")
-st.caption(
-    "Ask about any trailer in our inventory"
-    if st.session_state.sales_phase == "main"
-    else "First, tell us your name, email, and phone — casual messages are fine."
-)
+st.caption("Ask about any trailer in our inventory")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -418,11 +403,8 @@ st.caption(
 # ─────────────────────────────────────────────────────────────
 if not st.session_state.messages:
     _welcome_hint = (
-        "Start by sharing your <strong>name</strong>, <strong>email</strong>, and <strong>phone</strong> "
-        "in your own words — for example: Hi, I'm Alex — alex@email.com, 979-555-0142. "
-        "After that, we'll help you find a trailer."
-        if st.session_state.sales_phase == "onboarding"
-        else "Tell us what you're looking for — trailers, towing needs, or budget — and we'll help you find a match."
+        "Tell us what you're looking for — trailers, towing needs, or budget — and we'll help you find a match. "
+        "You can share contact details if you'd like, but it isn't required to start."
     )
     st.markdown(
         f"""
@@ -540,13 +522,7 @@ else:
 # CHAT INPUT
 # ─────────────────────────────────────────────────────────────
 placeholder = (
-    "Hi — I'm … my email is … and phone is …"
-    if st.session_state.sales_phase == "onboarding" and not st.session_state.messages
-    else (
-        "Add anything missing (name, email, or phone)…"
-        if st.session_state.sales_phase == "onboarding"
-        else ("Type a message…" if st.session_state.messages else "What kind of trailer are you looking for?")
-    )
+    "Type a message…" if st.session_state.messages else "What kind of trailer are you looking for?"
 )
 
 if prompt := st.chat_input(placeholder):

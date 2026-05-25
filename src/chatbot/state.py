@@ -18,6 +18,7 @@ class ChatbotState(TypedDict, total=False):
     customer_email: Optional[str]
     customer_phone: Optional[str]
     lead_id: Optional[str]
+    contact_status: str
     sales_phase: str
     trailer_category: Optional[str]
     category_needs_clarification: bool
@@ -36,3 +37,7 @@ class ChatbotState(TypedDict, total=False):
     mind_decision: dict[str, Any]
     has_shown_search_results: bool
     active_category_cycle_id: int
+    initial_contact_request_asked: bool
+    contact_request_asked_after_recommendation: bool
+    pending_contact_action: Optional[dict[str, Any]]
+    pending_initial_user_message: Optional[str]

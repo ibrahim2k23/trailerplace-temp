@@ -46,6 +46,7 @@ class ChatResponse(BaseModel):
     customer_full_name: Optional[str] = None
     customer_email: Optional[str] = None
     customer_phone: Optional[str] = None
+    contact_status: Optional[str] = None
     main_prior_messages: list[dict[str, Any]] = Field(default_factory=list)
     listings: list[dict[str, Any]] = Field(default_factory=list)
     thinking_context: Optional[dict[str, Any]] = None

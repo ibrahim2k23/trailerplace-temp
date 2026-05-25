@@ -67,6 +67,10 @@ _INTEREST_GENERIC_FALLBACK_NO_ITEM = (
 _INTEREST_SAFE_FALLBACK = (
     "Great, I sent your interest in that trailer to the team. They can follow up with you shortly."
 )
+_RECOMMENDATION_CONTACT_ASK = (
+    "If you'd like, you can share your phone number or email address so our team can follow up "
+    "with you about these trailer options."
+)
 
 
 class MindDecision(BaseModel):
@@ -130,6 +134,21 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 def _safe_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=True, default=str)
+
+
+def _has_contact(state: ChatbotState) -> bool:
+    return bool(
+        state.get("customer_full_name")
+        and (state.get("customer_phone") or state.get("customer_email"))
+    )
+
+
+def _optional_contact_request(reason: str) -> str:
+    clean_reason = str(reason or "this request").strip()
+    return (
+        "Could you please share your phone number or email address so our team can "
+        f"contact you regarding {clean_reason}?"
+    )
 
 
 _METADATA_FILTER_KEYS = {
@@ -1070,6 +1089,7 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             "name": state.get("customer_full_name"),
             "email": state.get("customer_email"),
             "phone": state.get("customer_phone"),
+            "contact_status": state.get("contact_status"),
         },
         "current_category": state.get("trailer_category"),
         "deterministic_category_hint": deterministic_hint,
@@ -1745,6 +1765,13 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         slots=state.get("slots_collected") or {},
         user_message=state.get("user_message") or "",
     )
+    ask_after_recommendation = bool(
+        listings
+        and not _has_contact(state)
+        and not state.get("contact_request_asked_after_recommendation")
+    )
+    if ask_after_recommendation:
+        assistant_text = f"{assistant_text}\n\n{_RECOMMENDATION_CONTACT_ASK}"
     shown = list(state.get("already_shown_listing_urls") or [])
     shown.extend([str(x.get("url")) for x in listings if x.get("url")])
     events = list(state.get("tool_events") or [])
@@ -1755,6 +1782,9 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         "last_listings": listings,
         "already_shown_listing_urls": sorted(set(shown)),
         "tool_events": events,
+        "contact_request_asked_after_recommendation": (
+            True if ask_after_recommendation else state.get("contact_request_asked_after_recommendation", False)
+        ),
     }
 
 
@@ -1767,6 +1797,22 @@ def _interest_email_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "assistant_text": "Which listing are you interested in?",
+        }
+    if not _has_contact(state):
+        events = list(state.get("tool_events") or [])
+        events.append({"tool": "send_interested_listing_email", "result": {"status": "deferred_missing_contact"}})
+        return {
+            **state,
+            "assistant_text": (
+                "Would you like to share your phone number or email address so our team can "
+                f"follow up with you about your interest in {title}?"
+            ),
+            "pending_contact_action": {
+                "type": "interest",
+                "item_name": str(title),
+                "selected_listing_url": decision.get("selected_listing_url") or state.get("selected_listing_url"),
+            },
+            "tool_events": events,
         }
     result = send_interested_listing_email(
         session_id=state.get("session_id") or "",
@@ -1808,6 +1854,20 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
     if category not in FAQ_CATEGORY_LABELS:
         category = "contact_human"
     summary = FAQ_CATEGORY_LABELS[category]
+    if not _has_contact(state):
+        events = list(state.get("tool_events") or [])
+        events.append({"tool": "send_non_sales_faq_email", "result": {"status": "deferred_missing_contact"}})
+        return {
+            **state,
+            "assistant_text": _optional_contact_request(summary.lower()),
+            "pending_contact_action": {
+                "type": "faq",
+                "faq_category": category,
+                "summary": summary,
+                "user_message": state.get("user_message") or "",
+            },
+            "tool_events": events,
+        }
     result = send_non_sales_faq_email(
         session_id=state.get("session_id") or "",
         full_name=state.get("customer_full_name") or "",

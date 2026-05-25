@@ -65,9 +65,9 @@ def ensure_persistence_schema() -> None:
 def create_or_get_soft_lead(
     *,
     session_id: str,
-    full_name: str,
-    email: Optional[str],
-    phone: str,
+    full_name: Optional[str] = None,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
     item_of_interest: str = "Trailer inquiry",
 ) -> Optional[str]:
     if not persistence_enabled():
@@ -78,24 +78,74 @@ def create_or_get_soft_lead(
             select(ChatbotLead).where(ChatbotLead.psid == session_id)
         ).scalar_one_or_none()
         if existing:
-            existing.name = full_name
-            existing.phone_number = phone
-            existing.email = email or None
+            if full_name:
+                existing.name = full_name
+            if phone:
+                existing.phone_number = phone
+            if email is not None:
+                existing.email = email or None
+            existing.contact_status = (
+                "contact_available"
+                if (existing.phone_number or existing.email)
+                else "missing_contact"
+            )
             if item_of_interest:
                 existing.item_of_interest = item_of_interest
             session.commit()
             return str(existing.lead_id)
 
+        contact_status = "contact_available" if (phone or email) else "missing_contact"
         lead = ChatbotLead(
             lead_id=uuid.uuid4(),
             psid=session_id,
-            name=full_name,
-            phone_number=phone,
+            name=full_name or None,
+            phone_number=phone or None,
             email=email or None,
             lead_type="soft",
+            contact_status=contact_status,
             item_of_interest=item_of_interest,
         )
         session.add(lead)
+        session.commit()
+        return str(lead.lead_id)
+
+
+def update_lead_contact(
+    *,
+    session_id: str,
+    full_name: Optional[str] = None,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+) -> Optional[str]:
+    if not persistence_enabled():
+        return None
+    ensure_persistence_schema()
+    with _session() as session:
+        lead = session.execute(
+            select(ChatbotLead).where(ChatbotLead.psid == session_id)
+        ).scalar_one_or_none()
+        if not lead:
+            lead = ChatbotLead(
+                lead_id=uuid.uuid4(),
+                psid=session_id,
+                name=full_name or None,
+                phone_number=phone or None,
+                email=email or None,
+                lead_type="soft",
+                contact_status="contact_available" if (phone or email) else "missing_contact",
+                item_of_interest="Trailer inquiry",
+            )
+            session.add(lead)
+        else:
+            if full_name:
+                lead.name = full_name
+            if email is not None:
+                lead.email = email or None
+            if phone:
+                lead.phone_number = phone
+            lead.contact_status = (
+                "contact_available" if (lead.phone_number or lead.email) else "missing_contact"
+            )
         session.commit()
         return str(lead.lead_id)
 

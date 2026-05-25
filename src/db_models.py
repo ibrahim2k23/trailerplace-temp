@@ -26,10 +26,16 @@ class ChatbotLead(Base):
         server_default=func.gen_random_uuid(),
     )
     psid: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    phone_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     lead_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    contact_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="missing_contact",
+        server_default="missing_contact",
+    )
     item_of_interest: Mapped[str] = mapped_column(Text, nullable=False)
 
     conversations: Mapped[list["ChatbotConversation"]] = relationship(
