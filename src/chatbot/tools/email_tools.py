@@ -12,6 +12,13 @@ FAQ_CATEGORY_LABELS = {
     "service_parts": "Customer asked about service or parts.",
     "store_info": "Customer asked about store information.",
 }
+FAQ_ITEM_OF_INTEREST_LABELS = {
+    "contact_human": "Wants to talk to a sales representative",
+    "financing": "Finance Query",
+    "trade_in": "Trade-In Query",
+    "service_parts": "Spare Parts Query",
+    "store_info": "Store Information Query",
+}
 
 
 def send_interested_listing_email(
@@ -71,6 +78,10 @@ def send_non_sales_faq_email(
         summary_line=summary_line,
     )
     promote_lead_to_hard(session_id)
+    update_lead_item_of_interest(
+        session_id,
+        FAQ_ITEM_OF_INTEREST_LABELS.get(category, "Wants to talk to a sales representative"),
+    )
     return {
         "status": "sent",
         "body_preview": (

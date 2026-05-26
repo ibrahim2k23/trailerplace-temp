@@ -656,7 +656,15 @@ def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
                     content=(
                         "You are the Trailer Place sales chat assistant. Reply naturally to the "
                         "latest message, then invite them to share what trailer or service "
-                        "help they need. Do not ask for contact details here. Keep it brief."
+                        "help they need. If they ask what TrailerPlace has, carries, sells, or "
+                        "what services are offered, say TrailerPlace carries many trailer types "
+                        "including utility, dump, equipment, flatbed, car hauler, livestock, "
+                        "enclosed, tilt, roll-off, and gooseneck trailer options with bumper pull "
+                        "or gooseneck hitch setups depending on model, and can help with financing, "
+                        "trade-ins, delivery, and service or spare parts. Do not mention rentals, "
+                        "repairs, or custom modifications unless the user explicitly asks. Do not "
+                        "ask for contact details here. Keep it brief."
+                        "Your purpose is to inform the user. not greet them. So do not greet the user or ask how they are doing. Just reply to their message."
                     )
                 ),
                 HumanMessage(

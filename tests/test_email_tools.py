@@ -36,6 +36,11 @@ def test_non_sales_faq_email_promotes_lead_to_hard(monkeypatch):
         "promote_lead_to_hard",
         lambda session_id: calls.append(("promote", session_id)),
     )
+    monkeypatch.setattr(
+        email_tools,
+        "update_lead_item_of_interest",
+        lambda session_id, item: calls.append(("interest", session_id, item)),
+    )
 
     result = email_tools.send_non_sales_faq_email(
         session_id="session-456",
@@ -49,6 +54,44 @@ def test_non_sales_faq_email_promotes_lead_to_hard(monkeypatch):
 
     assert result["status"] == "sent"
     assert ("promote", "session-456") in calls
+    assert ("interest", "session-456", "Finance Query") in calls
     send_call = calls[0][1]
     assert "Customer asked about financing." in send_call["summary_line"]
     assert "Last user message: Can you help me with financing?" in send_call["summary_line"]
+
+
+def test_non_sales_faq_email_sets_item_of_interest_by_category(monkeypatch):
+    calls = []
+    monkeypatch.setattr(email_tools, "send_faq_email_sync", lambda **kwargs: calls.append(("send", kwargs)))
+    monkeypatch.setattr(
+        email_tools,
+        "promote_lead_to_hard",
+        lambda session_id: calls.append(("promote", session_id)),
+    )
+    monkeypatch.setattr(
+        email_tools,
+        "update_lead_item_of_interest",
+        lambda session_id, item: calls.append(("interest", session_id, item)),
+    )
+
+    email_tools.send_non_sales_faq_email(
+        session_id="session-parts",
+        full_name="Test User",
+        email=None,
+        phone="979-555-1111",
+        faq_category="service_parts",
+    )
+    email_tools.send_non_sales_faq_email(
+        session_id="session-human",
+        full_name="Test User",
+        email=None,
+        phone="979-555-1111",
+        faq_category="contact_human",
+    )
+
+    assert ("interest", "session-parts", "Spare Parts Query") in calls
+    assert (
+        "interest",
+        "session-human",
+        "Wants to talk to a sales representative",
+    ) in calls

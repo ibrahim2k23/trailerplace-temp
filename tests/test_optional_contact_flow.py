@@ -596,3 +596,44 @@ def test_metadata_only_followups_route_to_graph_with_search_context():
         "Diamond C",
     ):
         assert service._should_route_to_graph(base_session, message) is True
+
+
+def test_business_overview_questions_stay_in_smalltalk_path():
+    session = service._new_session("overview-route")
+
+    for message in (
+        "what services do you guys offer?",
+        "what do you guys have?",
+        "what trailers do you carry?",
+    ):
+        assert service._should_route_to_graph(session, message) is False
+
+
+def test_business_overview_smalltalk_prompt_guides_llm(monkeypatch):
+    session = service._new_session("overview-response")
+    captured = {}
+
+    class _OverviewLLM:
+        def __init__(self, **_kwargs):
+            pass
+
+        def invoke(self, messages):
+            captured["system"] = messages[0].content
+
+            class _Response:
+                content = "LLM overview response"
+
+            return _Response()
+
+    monkeypatch.setattr(service, "ChatOpenAI", _OverviewLLM)
+
+    response = service._main_smalltalk_response(session, "what services do you guys offer?")
+
+    assert response == "LLM overview response"
+    assert "utility, dump, equipment" in captured["system"]
+    assert "bumper pull" in captured["system"]
+    assert "gooseneck" in captured["system"]
+    assert "financing" in captured["system"]
+    assert "trade-ins" in captured["system"]
+    assert "service or spare parts" in captured["system"]
+    assert "Do not mention rentals" in captured["system"]
