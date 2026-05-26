@@ -196,3 +196,35 @@ def test_preference_classifier_runs_for_category_choice_no_preference(monkeypatc
     )
 
     assert result == expected
+
+
+def test_preference_classifier_prompt_includes_make_category_no_preference_examples(monkeypatch):
+    captured = {}
+
+    class FakeLLM:
+        def invoke(self, messages):
+            captured["system"] = messages[0].content
+            return PreferenceNullDecision(
+                has_no_preference=True,
+                target_slots=["make_category_choice"],
+                reason="User kept make but declined category.",
+                confidence="high",
+            )
+
+    monkeypatch.setattr(
+        "src.chatbot.mini_preference_classifier._preference_classifier_llm",
+        lambda: FakeLLM(),
+    )
+
+    result = classify_no_preference(
+        category=None,
+        user_message="the category doesn't matter. I am looking for any Iron Bull trailer",
+        awaiting_slot="make_category_choice",
+        pending_questions=[],
+        active_question="Which category should I use: Dump, Equipment, Flatbed?",
+    )
+
+    assert result.has_no_preference is True
+    assert "category doesn't matter" in captured["system"]
+    assert "any <make> trailer" in captured["system"]
+    assert "retained make or brand name is not a category choice" in captured["system"]

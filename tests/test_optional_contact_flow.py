@@ -557,6 +557,105 @@ def test_pending_interest_sends_once_after_contact(monkeypatch):
     assert service._get_session(session_id)["pending_contact_action"] is None
 
 
+def test_contact_only_after_results_acknowledges_without_graph(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001016"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["last_listings"] = [{"title": "Trailer A", "url": "https://example.test/a"}]
+    session["already_shown_listing_urls"] = ["https://example.test/a"]
+    session["has_shown_search_results"] = True
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009016")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009016")
+    monkeypatch.setattr(
+        service,
+        "_should_route_to_graph",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("contact-only should not route")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("contact-only should not invoke graph")),
+    )
+
+    response = service.handle_chat(_req(session_id, "my name is Ibrahim and number is 03304388550"))
+    saved = service._get_session(session_id)
+
+    assert response.assistant_text == service._CONTACT_ONLY_ACK
+    assert response.contact_status == "contact_available"
+    assert response.customer_full_name == "Ibrahim"
+    assert response.customer_phone == "03304388550"
+    assert saved["last_listings"] == [{"title": "Trailer A", "url": "https://example.test/a"}]
+
+
+def test_contact_plus_listing_interest_routes_to_graph(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001017"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["last_listings"] = [{"title": "Trailer A", "url": "https://example.test/a"}]
+    session["already_shown_listing_urls"] = ["https://example.test/a"]
+    session["has_shown_search_results"] = True
+    routed = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009017")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009017")
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda _session, message: routed.append(message) or True)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda _session, message, _shown: {
+            "assistant_text": f"Graph handled: {message}",
+            "tool_events": [{"tool": "send_interested_listing_email", "status": "sent"}],
+            "last_listings": session["last_listings"],
+        },
+    )
+
+    response = service.handle_chat(
+        _req(session_id, "my name is Ibrahim and number is 03304388550 and I am interested in trailer #1")
+    )
+
+    assert "Graph handled:" in response.assistant_text
+    assert routed[-1].endswith("I am interested in trailer #1")
+    assert response.customer_full_name == "Ibrahim"
+    assert response.customer_phone == "03304388550"
+
+
+def test_contact_plus_new_trailer_request_routes_to_graph(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001018"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["last_listings"] = [{"title": "Trailer A", "url": "https://example.test/a"}]
+    session["already_shown_listing_urls"] = ["https://example.test/a"]
+    session["has_shown_search_results"] = True
+    routed = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009018")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009018")
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda _session, message: routed.append(message) or True)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda _session, message, _shown: {
+            "assistant_text": f"Graph handled: {message}",
+            "tool_events": [],
+            "last_listings": [],
+        },
+    )
+
+    response = service.handle_chat(
+        _req(session_id, "my name is Ibrahim and number is 03304388550 and show me dump trailers")
+    )
+
+    assert "Graph handled:" in response.assistant_text
+    assert routed[-1].endswith("show me dump trailers")
+    assert response.customer_phone == "03304388550"
+
+
 def test_recommendation_contact_ask_happens_once_without_contact(monkeypatch):
     state = {
         "trailer_category": "Utility",

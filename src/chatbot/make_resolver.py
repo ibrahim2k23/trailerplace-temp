@@ -197,14 +197,10 @@ def _llm():
     )
 
 
-def resolve_make_from_text(text: str, *, use_llm_fallback: bool = True) -> MakeResolution:
-    deterministic = _resolve_deterministic(text)
-    if deterministic.make or not use_llm_fallback:
-        return deterministic
-
+def _resolve_with_llm(text: str) -> MakeResolution:
     valid = known_makes()
     if not valid or not str(text or "").strip():
-        return deterministic
+        return MakeResolution()
     try:
         result = _llm().invoke(
             [
@@ -222,11 +218,20 @@ def resolve_make_from_text(text: str, *, use_llm_fallback: bool = True) -> MakeR
             ]
         )
     except Exception:
-        return deterministic
+        return MakeResolution()
 
     make = result.make if result.make in valid else None
     if not make or result.confidence not in {"medium", "high"}:
-        return deterministic
+        return MakeResolution()
     if not _candidate_allowed(make, text):
         return MakeResolution(None, "none", None, "gooseneck_without_brand_context")
     return MakeResolution(make, result.confidence, "llm", result.reason)
+
+
+def resolve_make_from_text(text: str, *, use_llm_fallback: bool = True) -> MakeResolution:
+    if use_llm_fallback:
+        llm_resolution = _resolve_with_llm(text)
+        if llm_resolution.make or llm_resolution.reason == "gooseneck_without_brand_context":
+            return llm_resolution
+
+    return _resolve_deterministic(text)

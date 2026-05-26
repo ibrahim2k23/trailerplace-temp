@@ -6,7 +6,7 @@ import pandas as pd
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("PINECONE_API_KEY", "test-pinecone-key")
 
-from src.ingest import build_record
+from src.ingest import build_record, build_vector_id
 
 
 def test_build_record_adds_numeric_payload_width_and_length_metadata():
@@ -41,3 +41,22 @@ def test_build_record_adds_numeric_payload_width_and_length_metadata():
     assert metadata["width_ft_num"] == 6.0
     assert metadata["payload_lbs_num"] == 5200.0
     assert metadata["gvwr_lbs_num"] == 7000.0
+
+
+def test_vector_id_uses_url_hash_to_avoid_stock_number_collisions():
+    first = pd.Series(
+        {
+            "stock_number": "15174",
+            "url": "https://www.trailerplace.com/inventory/first/",
+        }
+    )
+    second = pd.Series(
+        {
+            "stock_number": "15174",
+            "url": "https://www.trailerplace.com/inventory/second/",
+        }
+    )
+
+    assert build_vector_id(first, 1).startswith("stock_15174_")
+    assert build_vector_id(second, 2).startswith("stock_15174_")
+    assert build_vector_id(first, 1) != build_vector_id(second, 2)

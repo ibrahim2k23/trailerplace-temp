@@ -61,7 +61,7 @@ def test_confusion_detector_ignores_genuine_answer_to_assistant_question(monkeyp
     confused, count = service._is_confused_user_turn(session, "A utility trailer")
 
     assert confused is False
-    assert count == 2
+    assert count == 0
 
 
 def test_confusion_detector_requires_score_at_least_85(monkeypatch):
@@ -88,6 +88,130 @@ def test_confusion_detector_requires_score_at_least_85(monkeypatch):
     assert count == 2
 
 
+def test_non_duplicate_actionable_message_does_not_call_confusion_llm(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000111")
+    session["messages"] = [
+        {"role": "user", "content": "I need a 7x16 utility trailer"},
+        {"role": "assistant", "content": "Here are some options."},
+        {"role": "user", "content": "what financing options do you have?"},
+    ]
+
+    class _BadLLM:
+        def invoke(self, _messages):
+            raise AssertionError("Confusion LLM should not run without duplicate/confusion evidence")
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _BadLLM())
+
+    confused, count = service._is_confused_user_turn(
+        session,
+        "what financing options do you have?",
+    )
+
+    assert confused is False
+    assert count == 0
+
+
+def test_store_contact_questions_are_not_confusion_eligible():
+    session = service._new_session("00000000-0000-0000-0000-000000000112")
+    session["last_listings"] = [{"title": "Trailer A"}]
+
+    for message in (
+        "how can I contact you guys?",
+        "what is your phone number?",
+        "where are you located?",
+        "what are your hours?",
+        "how do I reach sales?",
+    ):
+        assert service._is_confusion_eligible_user_message(message, session) is False
+
+
+def test_contact_question_after_interest_does_not_escalate(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000000113"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["customer_full_name"] = "Ibrahim"
+    session["customer_phone"] = "03304388550"
+    session["sales_phase"] = "main"
+    session["last_listings"] = [{"title": "Trailer A", "url": "https://example.test/a"}]
+    session["has_shown_search_results"] = True
+    session["messages"] = [
+        {"role": "user", "content": "yeah. I'm interested in the 4th trailer"},
+        {"role": "assistant", "content": "Your interest has been logged."},
+        {"role": "user", "content": "how can I contact you guys?"},
+    ]
+    email_calls = []
+
+    class _BadLLM:
+        def invoke(self, _messages):
+            raise AssertionError("Confusion LLM should not run for contact-info questions")
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _BadLLM())
+    monkeypatch.setattr(
+        service,
+        "send_non_sales_faq_email",
+        lambda **kwargs: email_calls.append(kwargs) or {"status": "sent"},
+    )
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        service,
+        "_main_smalltalk_response",
+        lambda *_args, **_kwargs: "You can call us at 979-532-1486.",
+    )
+
+    response = service.handle_chat(_req(session_id, "how can I contact you guys?"))
+
+    assert response.assistant_text == "You can call us at 979-532-1486."
+    assert email_calls == []
+
+
+def test_explicit_confusion_outside_active_qna_can_escalate(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000114")
+    session["messages"] = [
+        {"role": "user", "content": "I need a trailer"},
+        {"role": "assistant", "content": "What kind of trailer do you need?"},
+        {"role": "user", "content": "I am confused and I don't know what to choose"},
+    ]
+
+    class _StubLLM:
+        def invoke(self, _messages):
+            return service.ConfusionDetectionDecision(
+                similar_repeat_count=1,
+                confusion_score=90,
+                confused=True,
+            )
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _StubLLM())
+
+    confused, count = service._is_confused_user_turn(
+        session,
+        "I am confused and I don't know what to choose",
+    )
+
+    assert confused is True
+    assert count == 1
+
+
+def test_explicit_confusion_during_active_qna_does_not_run_confusion_llm(monkeypatch):
+    session = service._new_session("00000000-0000-0000-0000-000000000115")
+    session["awaiting_slot"] = "haul_item"
+    session["messages"] = [
+        {"role": "user", "content": "I need an equipment trailer"},
+        {"role": "assistant", "content": "What equipment will you be hauling?"},
+        {"role": "user", "content": "I am confused"},
+    ]
+
+    class _BadLLM:
+        def invoke(self, _messages):
+            raise AssertionError("Confusion LLM should not run during active Q&A")
+
+    monkeypatch.setattr(service, "_confusion_llm", lambda: _BadLLM())
+
+    confused, count = service._is_confused_user_turn(session, "I am confused")
+
+    assert confused is False
+    assert count == 0
+
+
 def test_result_navigation_after_listings_requires_three_repeats(monkeypatch):
     session = service._new_session("00000000-0000-0000-0000-000000000109")
     session["last_listings"] = [{"title": "Trailer A"}]
@@ -110,7 +234,7 @@ def test_result_navigation_after_listings_requires_three_repeats(monkeypatch):
     confused, count = service._is_confused_user_turn(session, "show more results")
 
     assert confused is False
-    assert count == 2
+    assert count == 0
 
 
 def test_result_navigation_after_listings_escalates_at_three_repeats(monkeypatch):

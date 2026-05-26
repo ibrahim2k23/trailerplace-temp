@@ -1,4 +1,4 @@
-from src.chatbot import graph
+from src.chatbot import graph, make_resolver
 
 
 def _state(message: str, *, category: str) -> dict:
@@ -38,6 +38,14 @@ def _use_fallback_extractor(monkeypatch):
         graph,
         "classify_no_preference",
         lambda **kwargs: graph.PreferenceNullDecision(),
+    )
+    monkeypatch.setattr(
+        graph,
+        "resolve_make_from_text",
+        lambda text, *, use_llm_fallback=True: make_resolver.resolve_make_from_text(
+            text,
+            use_llm_fallback=False,
+        ),
     )
 
 
@@ -114,6 +122,28 @@ def test_make_only_request_with_multiple_categories_asks_user_to_choose(monkeypa
     assert out["mind_decision"]["action"] == "respond"
 
 
+def test_make_resolution_uses_llm_for_rd_trailer(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    llm_enabled_calls = []
+
+    def _resolve_make(text, *, use_llm_fallback=True):
+        if use_llm_fallback:
+            llm_enabled_calls.append(text)
+            return make_resolver.MakeResolution("RD TRAILERS", "high", "llm", "Resolved RD as make.")
+        return make_resolver.MakeResolution()
+
+    monkeypatch.setattr(graph, "resolve_make_from_text", _resolve_make)
+    monkeypatch.setattr(graph, "categories_for_make", lambda make: ["Dump", "Utility"])
+    state = _state("I am looking for an RD trailer", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["make"] == "RD TRAILERS"
+    assert out["awaiting_slot"] == "make_category_choice"
+    assert "Which category" in out["assistant_text"]
+    assert llm_enabled_calls == ["I am looking for an RD trailer"]
+
+
 def test_make_category_no_preference_keeps_existing_length_and_asks_payload_only(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     state = _state("any type", category=None)
@@ -135,6 +165,43 @@ def test_make_category_no_preference_keeps_existing_length_and_asks_payload_only
     assert out["pending_questions"] == []
     assert "payload" in out["assistant_text"].lower() or "weight" in out["assistant_text"].lower()
     assert "make_category_choice" in out["slots_skipped"]
+
+
+def test_make_category_doesnt_matter_with_make_reuse_asks_payload(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("the category doesn't matter. I am looking for any iron bull trailer", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Iron Bull Trailers",
+        "width_ft": "7",
+        "length_ft": "14",
+    }
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
+    assert out["metadata_filters_collected"]["length_ft"] == "14"
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert out["assistant_text"] == "What payload or weight capacity do you need?"
+    assert "Which category should I look at" not in out["assistant_text"]
+
+
+def test_make_category_doesnt_matter_without_length_asks_length(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("the category doesn't matter. I am looking for any iron bull trailer", category=None)
+    state["metadata_filters_collected"] = {"make": "Iron Bull Trailers"}
+    state["awaiting_slot"] = "make_category_choice"
+    state["make_category_options"] = ["Dump", "Equipment", "Flatbed", "Roll Off", "Tilt", "Utility"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
+    assert out["awaiting_slot"] == "trailer_length_ft"
+    assert out["assistant_text"] == "What trailer length would you prefer?"
+    assert "Which category should I look at" not in out["assistant_text"]
 
 
 def test_make_category_no_idea_is_treated_as_no_preference(monkeypatch):

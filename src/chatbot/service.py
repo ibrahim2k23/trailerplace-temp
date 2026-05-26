@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from copy import deepcopy
+from difflib import SequenceMatcher
 from threading import RLock
 from typing import Any, Literal, Optional
 
@@ -60,6 +61,11 @@ _CONFUSION_REPEAT_THRESHOLD = 2
 _RESULT_NAV_CONFUSION_REPEAT_THRESHOLD = 3
 _CONFUSION_HISTORY_WINDOW = 6
 _CONFUSION_SCORE_THRESHOLD = 85
+_CONFUSION_SIMILARITY_THRESHOLD = 0.86
+_CONTACT_ONLY_ACK = (
+    "Thanks for sharing your contact details. I've saved them. "
+    "Let me know if you need help with anything else."
+)
 _INITIAL_CONTACT_REQUEST = (
     "Thank you for contacting TrailerPlace. Before we get started, could I get your name, "
     "email, and phone number? Sharing contact details is optional, and I can still help with your trailer search."
@@ -718,6 +724,9 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     LLM-first routing for the main phase.
     This prevents regex misses (for example "I like the 4th one") from falling into smalltalk.
     """
+    if _is_contact_only_message(user_message):
+        return False
+
     if session.get("awaiting_slot") or session.get("pending_questions"):
         return True
 
@@ -761,9 +770,26 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
 
 
 def _is_contact_only_message(message: str) -> bool:
+    if _has_explicit_confusion_language(message):
+        return False
     contact = _regex_contact(message or "")
     has_contact_detail = any(contact.get(key) for key in ("full_name", "email", "phone"))
-    return has_contact_detail and not _has_actionable_intent(message)
+    return has_contact_detail and not _has_actionable_intent(message) and not _has_listing_followup_intent(message)
+
+
+def _has_listing_followup_intent(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:interested|interest|like|want|take|buy|purchase|call|contact|follow\s*up)\b.*"
+            r"\b(?:trailer|item|listing|option|one|first|second|third|fourth|fifth|#?\d+)\b"
+            r"|\b(?:trailer|item|listing|option|one|first|second|third|fourth|fifth|#?\d+)\b.*"
+            r"\b(?:interested|interest|like|want|take|buy|purchase|call|contact|follow\s*up)\b",
+            text,
+        )
+    )
 
 
 def _has_listing_context(session: dict[str, Any]) -> bool:
@@ -788,14 +814,89 @@ def _is_result_navigation_request(message: str) -> bool:
 
 
 def _confusion_repeat_threshold_for_message(session: dict[str, Any], message: str) -> tuple[int, str]:
+    if _has_explicit_confusion_language(message):
+        return 1, "explicit_confusion"
     if _has_listing_context(session) and _is_result_navigation_request(message):
         return _RESULT_NAV_CONFUSION_REPEAT_THRESHOLD, "result_navigation"
     return _CONFUSION_REPEAT_THRESHOLD, "default"
 
 
+def _has_store_or_contact_info_question(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:how|what|where|when|can|could|do)\b.*\b(?:contact|call|phone|number|reach|location|located|address|hours|open|store|sales)\b"
+            r"|\b(?:contact|call|phone|number|reach|location|located|address|hours|open|store|sales)\b.*\b(?:you|guys|trailerplace|team)\b",
+            text,
+        )
+    )
+
+
+def _has_explicit_confusion_language(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:i\s+am|i'm|im|getting|feel(?:ing)?)\s+confused\b"
+            r"|\bconfused\b"
+            r"|\bi\s+don['’]?t\s+understand\b"
+            r"|\bthis\s+is\s+not\s+helping\b"
+            r"|\bi\s+don['’]?t\s+know\s+what\s+to\s+choose\b"
+            r"|\bi\s+keep\s+asking\b"
+            r"|\bsame\s+thing\s+again\b",
+            text,
+        )
+    )
+
+
+def _normalized_confusion_text(message: str) -> str:
+    text = (message or "").lower()
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
+    text = re.sub(r"\b\d{7,}\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _messages_materially_similar(left: str, right: str) -> bool:
+    left_norm = _normalized_confusion_text(left)
+    right_norm = _normalized_confusion_text(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    if left_norm in right_norm or right_norm in left_norm:
+        return min(len(left_norm), len(right_norm)) >= 12
+    return SequenceMatcher(None, left_norm, right_norm).ratio() >= _CONFUSION_SIMILARITY_THRESHOLD
+
+
+def _has_repeated_confusion_candidate(
+    session: dict[str, Any],
+    latest_message: str,
+    recent_user_turns: list[str],
+    repeat_threshold: int,
+) -> bool:
+    if _has_listing_context(session) and _is_result_navigation_request(latest_message):
+        return sum(1 for message in recent_user_turns if _is_result_navigation_request(message)) >= repeat_threshold
+    return (
+        sum(
+            1
+            for message in recent_user_turns
+            if _messages_materially_similar(latest_message, message)
+        )
+        >= repeat_threshold
+    )
+
+
 def _is_confusion_eligible_user_message(message: str, session: dict[str, Any] | None = None) -> bool:
     if _is_contact_only_message(message):
         return False
+    if _has_store_or_contact_info_question(message):
+        return False
+    if _has_explicit_confusion_language(message):
+        return True
     if session and _has_listing_context(session) and _is_result_navigation_request(message):
         return True
     return _has_actionable_intent(message)
@@ -817,11 +918,21 @@ def _recent_confusion_user_messages(session: dict[str, Any], limit: int = _CONFU
 
 
 def _is_confused_user_turn(session: dict[str, Any], user_message: str) -> tuple[bool, int]:
+    if session.get("awaiting_slot") or session.get("pending_questions"):
+        return False, 0
     if not _is_confusion_eligible_user_message(user_message, session):
         return False, 0
     recent_user_turns = _recent_confusion_user_messages(session)
     repeat_threshold, threshold_type = _confusion_repeat_threshold_for_message(session, user_message)
-    if len(recent_user_turns) < _CONFUSION_REPEAT_THRESHOLD:
+    has_explicit_confusion = _has_explicit_confusion_language(user_message)
+    if len(recent_user_turns) < repeat_threshold:
+        return False, 0
+    if not has_explicit_confusion and not _has_repeated_confusion_candidate(
+        session,
+        user_message,
+        recent_user_turns,
+        repeat_threshold,
+    ):
         return False, 0
 
     try:
@@ -840,6 +951,9 @@ def _is_confused_user_turn(session: dict[str, Any], user_message: str) -> tuple[
                         "Do not classify natural narrowing or clarification as confused, e.g. user asks for a trailer, assistant asks type, user says utility trailer. "
                         "Result-navigation requests after listings, such as show more results, more options, next, or any others, are normal workflow. "
                         "Only consider result-navigation requests confused when they are repeated excessively or include real confusion language; code applies a higher repeat threshold for these. "
+                        "Do not classify normal store or contact-info questions as confused, such as asking how to contact TrailerPlace, the phone number, location, or hours. "
+                        "A user saying they are interested in a listing and then asking how to contact the store is a normal sales flow, not confusion. "
+                        "similar_repeat_count must count only materially duplicate or repeated user requests, not generally related conversation turns. "
                         "Classify as confused only for high-confidence cases such as spamming the same simple request repeatedly, asking the same question again and again without progress, "
                         "or indirectly indicating inability to decide/understand (for example: I am confused, I don't know what to choose, this is not helping, I keep asking the same thing)."
                     )
@@ -1113,6 +1227,27 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 request.message,
             ),
         }
+    if (
+        not contact_reply_action
+        and not had_pending_contact_action
+        and _has_contact(session)
+        and _is_contact_only_message(request.message)
+    ):
+        assistant_text = _CONTACT_ONLY_ACK
+        session["messages"].append({"role": "assistant", "content": assistant_text})
+        _persist(session)
+        _log_chat_turn(request.session_id, request.message, assistant_text)
+        return ChatResponse(
+            assistant_text=assistant_text,
+            sales_phase="main",
+            onboarding_api_messages=request.onboarding_api_messages,
+            customer_full_name=session.get("customer_full_name"),
+            customer_email=session.get("customer_email") or "",
+            customer_phone=session.get("customer_phone"),
+            contact_status=session.get("contact_status"),
+            main_prior_messages=session.get("messages") or [],
+            listings=[],
+        )
     actionable_intent = _has_actionable_intent(effective_message)
 
     has_active_qualification_question = bool(session.get("awaiting_slot") or session.get("pending_questions"))

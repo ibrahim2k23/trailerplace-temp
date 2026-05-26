@@ -1291,6 +1291,15 @@ def _is_no_category_preference(text: str) -> bool:
                 re.I,
             )
         )
+        or bool(
+            re.search(
+                r"\b(?:type|category|kind)\s+(?:doesn['\u2019]?t|does\s+not)\s+matter\b"
+                r"|\b(?:type|category|kind)\s+(?:is\s+)?(?:irrelevant|unimportant)\b"
+                r"|\bi\s+don['\u2019]?t\s+care\s+about\s+(?:the\s+)?(?:type|category|kind)\b",
+                text or "",
+                re.I,
+            )
+        )
     )
 
 
@@ -1452,16 +1461,6 @@ def _has_generic_trailer_request(text: str) -> bool:
     )
 
 
-def _allow_llm_make_fallback(text: str) -> bool:
-    return bool(
-        re.search(
-            r"\b(?:brand|make|manufacturer|made\s+by|called|named)\b",
-            text or "",
-            re.I,
-        )
-    )
-
-
 def _apply_make_resolution(
     *,
     latest_message: str,
@@ -1474,7 +1473,7 @@ def _apply_make_resolution(
 
     resolution = resolve_make_from_text(
         latest_message,
-        use_llm_fallback=_allow_llm_make_fallback(latest_message),
+        use_llm_fallback=True,
     )
     if not resolution.make:
         return category, [], None
@@ -1648,6 +1647,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         category=category,
         metadata_filters=metadata_filters,
     )
+    if _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped:
+        category_options = []
+        make_question = None
     if category_options and make_question:
         _apply_explicit_filter_extraction(
             state=state,

@@ -194,12 +194,15 @@ def _money_from_info(info: dict, *keys: str) -> Optional[float]:
 
 def build_vector_id(row: pd.Series, row_idx: int) -> str:
     stock_number = str(row.get("stock_number", "")).strip()
+    url = str(row.get("url", "")).strip()
     if stock_number:
+        if url:
+            short = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+            return f"stock_{stock_number}_{short}"
         return f"stock_{stock_number}"
     hin = str(row.get("hin", "")).strip()
     if hin:
         return f"hin_{hin}"
-    url = str(row.get("url", "")).strip()
     if url:
         short = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
         return f"url_{short}"
