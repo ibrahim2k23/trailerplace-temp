@@ -41,6 +41,11 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 _SITE_URL = (os.getenv("TRAILERPLACE_SITE_URL") or "https://trailerplace.com").strip()
+_CATALOGUE_REDIRECT_REPLY = (
+    f"To see the full lineup of available trailers, the best place to browse is [TrailerPlace]({_SITE_URL}). "
+    "You can compare inventory at your pace, and I can still help narrow things down whenever you have a "
+    "trailer type, size, or use case in mind."
+)
 _FAQ_REPLY_FALLBACKS: dict[str, str] = {
     "contact_human": (
         "You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!"
@@ -168,6 +173,8 @@ _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
 _DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
 _DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed"}
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
+_GENERIC_CATEGORY_CHOICE_SLOT = "generic_category_choice"
+_GENERIC_CATEGORY_QUESTION = "What type of trailer are you looking for?"
 _MAKE_CATEGORY_CHOICE_SLOT = "make_category_choice"
 _MAKE_GENERIC_LENGTH_SLOT = "trailer_length_ft"
 _MAKE_GENERIC_PAYLOAD_SLOT = "haul_weight_lbs"
@@ -293,6 +300,8 @@ def _explicit_length_requested(message: str, awaiting_slot: str | None = None) -
         return True
     if re.search(r"\b(?:length|long|deck\s+length|trailer\s+length|size|trailer\s+size)\b", text):
         return bool(re.search(r"\d+(?:\.\d+)?", text))
+    if re.search(r"\b(?:make\s+it|change\s+it\s+to|instead)\D{0,20}\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\b", text):
+        return True
     if re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\s*(?:(?:\w+\s+){0,3})?(?:long|length|trailer)\b", text):
         return True
     return bool(_slot_is_length_like(awaiting_slot) and re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\b", text))
@@ -1060,6 +1069,114 @@ def _last_assistant_text(messages: list[dict[str, Any]] | None) -> str:
     return ""
 
 
+def _is_generic_trailer_type_question(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\bwhat\s+(?:kind|type)\s+of\s+trailer\b"
+            r"|\bwhat\s+kind\s+of\s+trailer\s+are\s+you\s+looking\s+for\b"
+            r"|\bwhich\s+(?:kind|type|category)\s+(?:of\s+trailer\s+)?(?:should|do|would|are)\b",
+            text or "",
+            re.I,
+        )
+    )
+
+
+def _has_obvious_catalogue_intent(text: str) -> bool:
+    normalized = _normalize_choice_text(text)
+    return bool(
+        re.search(
+            r"\b(?:show|list|see|view|browse|send|give)\s+(?:me\s+)?(?:all|everything|the\s+whole|the\s+full)\s+"
+            r"(?:of\s+)?(?:your\s+|the\s+)?(?:trailers?|products?|inventory|stock)\b"
+            r"|\b(?:browse|see|view)\s+(?:your\s+|the\s+)?(?:inventory|stock|catalog(?:ue)?)\b"
+            r"|\b(?:full|complete|whole)\s+(?:trailer\s+)?(?:inventory|catalog(?:ue)?|stock|lineup)\b"
+            r"|\b(?:catalog|catalogue)\b"
+            r"|\b(?:everything|all)\s+(?:you\s+have|you\s+carry|in\s+stock)\b",
+            normalized,
+            re.I,
+        )
+    )
+
+
+def _latest_message_has_inventory_constraint(text: str) -> bool:
+    return bool(
+        resolve_category_from_text(text).category
+        or resolve_make_from_text(text, use_llm_fallback=False).make
+        or _explicit_length_requested(text)
+        or _explicit_width_requested(text)
+        or _explicit_payload_requested(text)
+        or _explicit_price_requested(text)
+        or _explicit_hitch_requested(text)
+        or _explicit_subcategory_requested(text)
+        or _explicit_color_requested(text)
+    )
+
+
+def _has_inventory_constraints(
+    state: ChatbotState,
+    *,
+    category: str | None = None,
+    latest_message: str = "",
+) -> bool:
+    return bool(
+        category
+        or state.get("trailer_category")
+        or (state.get("slots_collected") or {})
+        or (state.get("metadata_filters_collected") or {})
+        or _latest_message_has_inventory_constraint(latest_message)
+    )
+
+
+def _catalogue_redirect_allowed(
+    state: ChatbotState,
+    *,
+    category: str | None,
+    latest_message: str,
+    no_preference_decision: PreferenceNullDecision | None = None,
+) -> bool:
+    if _has_inventory_constraints(state, category=category, latest_message=latest_message):
+        return False
+    if _has_obvious_catalogue_intent(latest_message):
+        return True
+    if state.get("awaiting_slot") == _GENERIC_CATEGORY_CHOICE_SLOT:
+        return False
+
+    previous_assistant = _last_assistant_text(state.get("messages") or [])
+    if not _is_generic_trailer_type_question(previous_assistant):
+        return False
+
+    if no_preference_decision is not None:
+        data = _model_dump(no_preference_decision)
+        if data.get("has_no_preference") and data.get("confidence") in _CONFIDENT_PREFERENCE_NULL:
+            return True
+
+    return _is_no_category_preference(latest_message)
+
+
+def _catalogue_redirect_state(
+    state: ChatbotState,
+    *,
+    decision: dict[str, Any],
+    category: str | None,
+    slots: dict[str, Any],
+    slots_skipped: set[str],
+    metadata_filters: dict[str, Any],
+) -> ChatbotState:
+    decision["action"] = "respond"
+    logger.info("catalogue_redirect_applied | user_message=%r", state.get("user_message"))
+    return {
+        **state,
+        "trailer_category": category,
+        "slots_collected": slots,
+        "slots_skipped": sorted(slots_skipped),
+        "metadata_filters_collected": metadata_filters,
+        "make_category_options": [],
+        "awaiting_slot": None,
+        "pending_questions": [],
+        "assistant_text": _CATALOGUE_REDIRECT_REPLY,
+        "mind_decision": decision,
+    }
+
+
 def _mind_node(state: ChatbotState) -> ChatbotState:
     resolution = resolve_category_from_text(state.get("user_message") or "")
     if resolution.needs_clarification and not state.get("trailer_category"):
@@ -1206,6 +1323,28 @@ def _classify_make_category_no_preference(
     return _is_no_category_preference(user_message)
 
 
+def _classify_generic_category_no_preference(
+    *,
+    user_message: str,
+    metadata_filters: dict[str, Any],
+    slots: dict[str, Any],
+) -> bool:
+    decision = classify_no_preference(
+        category=None,
+        user_message=user_message,
+        awaiting_slot=_GENERIC_CATEGORY_CHOICE_SLOT,
+        pending_questions=[],
+        slots_collected=slots,
+        metadata_filters_collected=metadata_filters,
+        allowed_category_slots=[],
+        active_question=_GENERIC_CATEGORY_QUESTION,
+    )
+    data = _model_dump(decision)
+    if data.get("has_no_preference") and data.get("confidence") in _CONFIDENT_PREFERENCE_NULL:
+        return True
+    return _is_no_category_preference(user_message)
+
+
 def _make_category_question(make: str, categories: tuple[str, ...]) -> str:
     category_text = ", ".join(categories)
     return (
@@ -1240,6 +1379,36 @@ def _make_only_missing_slots(
     return missing
 
 
+def _generic_category_no_preference_active(slots_skipped: set[str]) -> bool:
+    return _GENERIC_CATEGORY_CHOICE_SLOT in slots_skipped
+
+
+def _generic_no_category_missing_slots(
+    *,
+    category: str | None,
+    metadata_filters: dict[str, Any],
+    slots: dict[str, Any],
+    slots_skipped: set[str],
+) -> list[str]:
+    if category or not _generic_category_no_preference_active(slots_skipped):
+        return []
+
+    missing: list[str] = []
+    if (
+        not metadata_filters.get("length_ft")
+        and not slots.get(_MAKE_GENERIC_LENGTH_SLOT)
+        and _MAKE_GENERIC_LENGTH_SLOT not in slots_skipped
+    ):
+        missing.append(_MAKE_GENERIC_LENGTH_SLOT)
+    if (
+        not metadata_filters.get("payload_lbs")
+        and not slots.get(_MAKE_GENERIC_PAYLOAD_SLOT)
+        and _MAKE_GENERIC_PAYLOAD_SLOT not in slots_skipped
+    ):
+        missing.append(_MAKE_GENERIC_PAYLOAD_SLOT)
+    return missing
+
+
 def _queue_make_only_questions(
     pending: list[QuestionItem],
     missing_slots: list[str],
@@ -1255,6 +1424,32 @@ def _queue_make_only_questions(
                 }
             )
     return pending
+
+
+def _queue_generic_no_category_questions(
+    pending: list[QuestionItem],
+    missing_slots: list[str],
+) -> list[QuestionItem]:
+    return _queue_make_only_questions(pending, missing_slots)
+
+
+def _has_generic_trailer_request(text: str) -> bool:
+    normalized = _normalize_choice_text(text)
+    if not normalized:
+        return False
+    if _has_obvious_catalogue_intent(normalized):
+        return False
+    if resolve_category_from_text(normalized).category:
+        return False
+    return bool(
+        re.search(r"\btrailers?\b", normalized)
+        or _explicit_length_requested(normalized)
+        or _explicit_width_requested(normalized)
+        or _explicit_payload_requested(normalized)
+        or _explicit_price_requested(normalized)
+        or _explicit_hitch_requested(normalized)
+        or _explicit_color_requested(normalized)
+    )
 
 
 def _allow_llm_make_fallback(text: str) -> bool:
@@ -1383,6 +1578,20 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
 
     latest_message = state.get("user_message") or ""
     make_category_options = list(state.get("make_category_options") or [])
+    if _catalogue_redirect_allowed(
+        state,
+        category=category,
+        latest_message=latest_message,
+    ):
+        return _catalogue_redirect_state(
+            state,
+            decision=decision,
+            category=category,
+            slots=slots,
+            slots_skipped=slots_skipped,
+            metadata_filters=metadata_filters,
+        )
+
     if awaiting_slot == _MAKE_CATEGORY_CHOICE_SLOT:
         chosen_category = _category_from_choice(latest_message, make_category_options)
         if chosen_category:
@@ -1398,6 +1607,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         ):
             awaiting_slot = None
             make_category_options = []
+            slots_skipped.add(_MAKE_CATEGORY_CHOICE_SLOT)
         else:
             assistant_text = (
                 "Which category should I use: "
@@ -1418,6 +1628,20 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 "assistant_text": assistant_text,
                 "mind_decision": decision,
             }
+
+    if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT:
+        chosen_category = resolve_category_from_text(latest_message).category
+        if chosen_category:
+            category = chosen_category
+            awaiting_slot = None
+            reset_result_state = True
+        elif _classify_generic_category_no_preference(
+            user_message=latest_message,
+            metadata_filters=metadata_filters,
+            slots=slots,
+        ):
+            awaiting_slot = None
+            slots_skipped.add(_GENERIC_CATEGORY_CHOICE_SLOT)
 
     category, category_options, make_question = _apply_make_resolution(
         latest_message=latest_message,
@@ -1459,6 +1683,20 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         allowed_category_slots=sorted(allowed_category_slots),
         active_question=_last_assistant_text(state.get("messages") or []),
     )
+    if _catalogue_redirect_allowed(
+        state,
+        category=category,
+        latest_message=latest_message,
+        no_preference_decision=preference_decision,
+    ):
+        return _catalogue_redirect_state(
+            state,
+            decision=decision,
+            category=category,
+            slots=slots,
+            slots_skipped=slots_skipped,
+            metadata_filters=metadata_filters,
+        )
     awaiting_slot, slots_skipped, _removed_filters = _apply_preference_null_decision(
         category=category,
         awaiting_slot=awaiting_slot,
@@ -1548,6 +1786,42 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     if awaiting_slot and awaiting_slot in slots:
         awaiting_slot = None
 
+    if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT and not category:
+        decision["action"] = "respond"
+        return {
+            **state,
+            "trailer_category": category,
+            "slots_collected": slots,
+            "slots_skipped": sorted(slots_skipped),
+            "metadata_filters_collected": metadata_filters,
+            "make_category_options": make_category_options,
+            "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+            "pending_questions": [],
+            "assistant_text": _GENERIC_CATEGORY_QUESTION,
+            "mind_decision": decision,
+        }
+
+    if (
+        not category
+        and awaiting_slot != _GENERIC_CATEGORY_CHOICE_SLOT
+        and not _generic_category_no_preference_active(slots_skipped)
+        and not (metadata_filters.get("make") and _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped)
+        and _has_generic_trailer_request(latest_message)
+    ):
+        decision["action"] = "respond"
+        return {
+            **state,
+            "trailer_category": category,
+            "slots_collected": slots,
+            "slots_skipped": sorted(slots_skipped),
+            "metadata_filters_collected": metadata_filters,
+            "make_category_options": make_category_options,
+            "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+            "pending_questions": [],
+            "assistant_text": _GENERIC_CATEGORY_QUESTION,
+            "mind_decision": decision,
+        }
+
     _apply_aluminum_base_category_filter(category, slots, metadata_filters)
     _apply_flatbed_default_width(category, slots, metadata_filters)
 
@@ -1627,6 +1901,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     )
     if make_only_missing:
         pending = _queue_make_only_questions(pending, make_only_missing)
+    generic_no_category_missing = _generic_no_category_missing_slots(
+        category=category,
+        metadata_filters=metadata_filters,
+        slots=slots,
+        slots_skipped=slots_skipped,
+    )
+    if generic_no_category_missing:
+        pending = _queue_generic_no_category_questions(pending, generic_no_category_missing)
 
     valid_actions = {
         "ask_next_question",
@@ -1639,7 +1921,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     if action not in valid_actions:
         action = "respond"
     make_only_complete = bool(metadata_filters.get("make")) and not category and not make_only_missing
-    required_complete = (bool(category) and not missing_required and not invalid_required) or make_only_complete
+    generic_no_category_complete = (
+        _generic_category_no_preference_active(slots_skipped)
+        and not category
+        and not generic_no_category_missing
+    )
+    required_complete = (
+        (bool(category) and not missing_required and not invalid_required)
+        or make_only_complete
+        or generic_no_category_complete
+    )
     if required_complete and action not in {"send_interested_listing_email", "send_non_sales_faq_email"}:
         if action != "pinecone_search":
             logger.info(
@@ -1677,8 +1968,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 awaiting_slot = unresolved_slot
             elif not assistant_text.strip():
                 assistant_text = "Could you share a little more detail so I can narrow this down?"
-    elif action == "pinecone_search" and not category and not make_only_complete:
-        assistant_text = "What kind of trailer are you looking for?"
+    elif action == "pinecone_search" and not category and not make_only_complete and not generic_no_category_complete:
+        assistant_text = _GENERIC_CATEGORY_QUESTION
+        awaiting_slot = _GENERIC_CATEGORY_CHOICE_SLOT
         action = "respond"
     elif invalid_required_slot and action != "pinecone_search":
         action = "respond"

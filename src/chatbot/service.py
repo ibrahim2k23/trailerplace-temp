@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.graph import build_chatbot_graph
+from src.chatbot.make_resolver import resolve_make_from_text
 from src.chatbot.tools.email_tools import (
     send_interested_listing_email,
     send_non_sales_faq_email,
@@ -37,9 +38,19 @@ _GREETING_RE = re.compile(r"^\s*(hi|hello|hey|good\s+(morning|afternoon|evening)
 _GENERAL_INTENT_RE = re.compile(
     r"\b("
     r"trailer|haul|hauling|buy|looking|want|need|search|show|more|"
+    r"gooseneck|bumper\s*[- ]?\s*pull|hitch|payload|capacity|"
     r"financ(?:e|ing)|trade(?:-|\s)?in|service|parts|human|contact|"
     r"store|hours|location|interested"
     r")\b",
+    re.I,
+)
+_METADATA_UPDATE_RE = re.compile(
+    r"\b(?:gooseneck|bumper\s*[- ]?\s*pull|hitch|payload|capacity|under|below|max|budget|"
+    r"length|long|width|wide|make\s+it|change\s+it|black|white|gray|grey|silver|red|blue|"
+    r"green|yellow|orange|tan)\b"
+    r"|\$\s*\d"
+    r"|\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|'|lbs?|pounds?|#)\b"
+    r"|\b\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\b",
     re.I,
 )
 _CONFUSION_ESCALATION_REPLY = (
@@ -51,7 +62,7 @@ _CONFUSION_HISTORY_WINDOW = 6
 _CONFUSION_SCORE_THRESHOLD = 85
 _INITIAL_CONTACT_REQUEST = (
     "Thank you for contacting TrailerPlace. Before we get started, could I get your name, "
-    "email, and phone number? "
+    "email, and phone number? Sharing contact details is optional, and I can still help with your trailer search."
 )
 
 
@@ -440,7 +451,7 @@ def _initial_contact_request_text(session: dict[str, Any]) -> str:
         fields = f"your {missing[0]}"
     return (
         "Thank you for contacting TrailerPlace. Before we get started, could I get "
-        f"{fields}?"
+        f"{fields}? Sharing contact details is optional, and I can still help with your trailer search."
     )
 
 
@@ -674,6 +685,26 @@ def _has_actionable_intent(message: str) -> bool:
     return bool(_GENERAL_INTENT_RE.search(text))
 
 
+def _has_trailer_search_context(session: dict[str, Any]) -> bool:
+    return bool(
+        session.get("trailer_category")
+        or session.get("slots_collected")
+        or session.get("metadata_filters_collected")
+        or session.get("make_category_options")
+        or session.get("last_listings")
+        or session.get("already_shown_listing_urls")
+    )
+
+
+def _has_metadata_update_intent(message: str) -> bool:
+    text = (message or "").strip()
+    if not text:
+        return False
+    if _METADATA_UPDATE_RE.search(text):
+        return True
+    return bool(resolve_make_from_text(text, use_llm_fallback=False).make)
+
+
 def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     """
     LLM-first routing for the main phase.
@@ -684,6 +715,8 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
 
     # Keep deterministic fast-paths for obvious intent.
     if _has_actionable_intent(user_message):
+        return True
+    if _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
         return True
 
     # If we have shown listings before, let the model decide whether this turn is

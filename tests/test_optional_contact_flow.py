@@ -580,3 +580,19 @@ def test_recommendation_contact_ask_happens_once_without_contact(monkeypatch):
 
     assert "phone number or email address" in first["assistant_text"]
     assert "phone number or email address" not in second["assistant_text"]
+
+
+def test_metadata_only_followups_route_to_graph_with_search_context():
+    base_session = service._new_session("metadata-route")
+    base_session["metadata_filters_collected"] = {"length_ft": "12"}
+
+    for message in (
+        "bumper pull",
+        "under 10000",
+        "make it 14 ft",
+        "6 feet wide",
+        "3000 pounds",
+        "black",
+        "Diamond C",
+    ):
+        assert service._should_route_to_graph(base_session, message) is True

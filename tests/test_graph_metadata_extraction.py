@@ -134,6 +134,7 @@ def test_make_category_no_preference_keeps_existing_length_and_asks_payload_only
     assert out["awaiting_slot"] == "haul_weight_lbs"
     assert out["pending_questions"] == []
     assert "payload" in out["assistant_text"].lower() or "weight" in out["assistant_text"].lower()
+    assert "make_category_choice" in out["slots_skipped"]
 
 
 def test_make_category_no_idea_is_treated_as_no_preference(monkeypatch):
@@ -271,6 +272,39 @@ def test_make_category_no_preference_falls_back_to_length_capacity(monkeypatch):
     assert out["metadata_filters_collected"]["make"] == "Diamond C"
     assert out["awaiting_slot"] == "trailer_length_ft"
     assert out["pending_questions"][0]["slot"] == "haul_weight_lbs"
+    assert "make_category_choice" in out["slots_skipped"]
+
+
+def test_make_category_declined_then_dimension_asks_payload_not_category(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("a 8x18", category=None)
+    state["metadata_filters_collected"] = {"make": "Diamond C"}
+    state["slots_skipped"] = ["make_category_choice"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["make"] == "Diamond C"
+    assert out["metadata_filters_collected"]["width_ft"] == "8"
+    assert out["metadata_filters_collected"]["length_ft"] == "18"
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert out["assistant_text"] == "What payload or weight capacity do you need?"
+
+
+def test_make_category_declined_searches_when_length_and_payload_known(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("3000 pounds", category=None)
+    state["metadata_filters_collected"] = {
+        "make": "Diamond C",
+        "length_ft": "18",
+        "width_ft": "8",
+    }
+    state["slots_skipped"] = ["make_category_choice"]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["payload_lbs"] == "3000 pounds"
+    assert out["mind_decision"]["action"] == "pinecone_search"
 
 
 def test_dimension_shorthand_uses_width_by_length(monkeypatch):
@@ -442,8 +476,180 @@ def test_generic_length_trailer_request_asks_for_category(monkeypatch):
     out = graph._apply_mind_node(planned)
 
     assert out["trailer_category"] is None
-    assert out["assistant_text"] == "What kind of trailer are you looking for?"
+    assert out["assistant_text"] == "What type of trailer are you looking for?"
+    assert out["awaiting_slot"] == "generic_category_choice"
+    assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
     assert out["mind_decision"]["action"] == "respond"
+
+
+def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I am looking for a 6x12 trailer", category=None)
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["assistant_text"] == "What type of trailer are you looking for?"
+    assert out["awaiting_slot"] == "generic_category_choice"
+    assert out["mind_decision"]["action"] == "respond"
+
+
+def test_generic_category_no_preference_reuses_length_and_asks_payload(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["generic_category_choice"],
+        reason="User has no category preference.",
+        confidence="high",
+    )
+    state = _state("any type", category=None)
+    state["awaiting_slot"] = "generic_category_choice"
+    state["metadata_filters_collected"] = {"width_ft": "6", "length_ft": "12"}
+    state["messages"] = [
+        {"role": "assistant", "content": "What type of trailer are you looking for?"},
+        {"role": "user", "content": "any type"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert out["assistant_text"] == "What payload or weight capacity do you need?"
+    assert "generic_category_choice" in out["slots_skipped"]
+
+
+def test_generic_category_no_preference_without_length_asks_length_first(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_preference_classifier(
+        monkeypatch,
+        has_no_preference=True,
+        target_slots=["generic_category_choice"],
+        reason="User has no category preference.",
+        confidence="high",
+    )
+    state = _state("no preference", category=None)
+    state["awaiting_slot"] = "generic_category_choice"
+    state["messages"] = [
+        {"role": "assistant", "content": "What type of trailer are you looking for?"},
+        {"role": "user", "content": "no preference"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["awaiting_slot"] == "trailer_length_ft"
+    assert out["assistant_text"] == "What trailer length would you prefer?"
+
+
+def test_generic_no_category_searches_when_length_and_payload_known(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("3000 pounds payload", category=None)
+    state["slots_skipped"] = ["generic_category_choice"]
+    state["metadata_filters_collected"] = {"length_ft": "12"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["payload_lbs"] == "3000 pounds"
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_generic_category_followup_preserves_metadata_and_reasks_category(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("it must be a bumper pull", category=None)
+    state["awaiting_slot"] = "generic_category_choice"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["hitch_type"] == "Bumper Pull"
+    assert out["awaiting_slot"] == "generic_category_choice"
+    assert out["assistant_text"] == "What type of trailer are you looking for?"
+
+
+def test_categoryless_followups_update_supported_metadata(monkeypatch):
+    cases = [
+        ("under 10000", "max_price", "10000"),
+        ("make it 14 ft", "length_ft", "14 ft"),
+        ("6 feet wide", "width_ft", "6 feet"),
+        ("around 3000 pounds payload", "payload_lbs", "3000 pounds"),
+        ("black", "color", "black"),
+        ("Diamond C", "make", "Diamond C"),
+    ]
+    for message, key, expected in cases:
+        _use_fallback_extractor(monkeypatch)
+        state = _state(message, category=None)
+        state["awaiting_slot"] = "generic_category_choice"
+
+        out = graph._apply_mind_node(state)
+
+        assert out["metadata_filters_collected"][key] == expected
+
+
+def test_broad_catalogue_request_redirects_to_website(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("list me all your products", category=None)
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert "[TrailerPlace](https://trailerplace.com)" in out["assistant_text"]
+    assert out["pending_questions"] == []
+
+
+def test_catalogue_word_redirects_to_website(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+
+    out = graph._apply_mind_node(_state("I want to see a catalogue", category=None))
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert "[TrailerPlace](https://trailerplace.com)" in out["assistant_text"]
+
+
+def test_broad_catalogue_request_with_budget_does_not_redirect(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("list all your products under 10000", category=None)
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    assert "[TrailerPlace](https://trailerplace.com)" not in out["assistant_text"]
+    assert out["metadata_filters_collected"]["max_price"] == "10000"
+    assert out["assistant_text"] == "What type of trailer are you looking for?"
+    assert out["awaiting_slot"] == "generic_category_choice"
+
+
+def test_browse_after_generic_type_question_redirects_when_unconstrained(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I just want to browse the inventory", category=None)
+    state["messages"] = [
+        {"role": "assistant", "content": "What type of trailer are you looking for?"},
+        {"role": "user", "content": "I just want to browse the inventory"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert "[TrailerPlace](https://trailerplace.com)" in out["assistant_text"]
+    assert out["awaiting_slot"] is None
+
+
+def test_show_more_after_results_still_searches(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("show me more options", category="Utility")
+    state["has_shown_search_results"] = True
+    state["last_listings"] = [{"title": "Trailer A", "url": "https://example.com/a"}]
+    state["slots_collected"] = {"haul_item": "mower", "haul_weight_lbs": "900 lbs"}
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert "[TrailerPlace](https://trailerplace.com)" not in out["assistant_text"]
 
 
 def test_utility_length_without_haul_item_asks_haul_question(monkeypatch):
