@@ -52,6 +52,46 @@ def test_first_message_without_contact_creates_lead_and_asks_for_details(monkeyp
     assert lead_calls[0]["phone"] is None
 
 
+def test_exact_inventory_lookup_answers_before_initial_contact_prompt(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001019"
+    service.reset_session(session_id)
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009019")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009019")
+    monkeypatch.setattr(service, "should_attempt_chat_lookup", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: {
+            "reply": "Yes, that trailer is available in inventory: Trailer A. Stock number: 13066.",
+            "entity_type": "STOCK_SEARCH",
+            "confidence": 1.0,
+            "top_matches": [{"title": "Trailer A", "stock_number": "13066"}],
+            "extraction": {"stock_number": "13066"},
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "do you have stock 13066?"))
+
+    assert "available in inventory" in response.assistant_text
+    assert "Before we get started" not in response.assistant_text
+    assert service._get_session(session_id)["initial_contact_request_asked"] is False
+
+
+def test_pure_make_lookup_still_uses_initial_contact_flow(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001020"
+    service.reset_session(session_id)
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009020")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009020")
+    monkeypatch.setattr(service, "should_attempt_chat_lookup", lambda *_args, **_kwargs: False)
+
+    response = service.handle_chat(_req(session_id, "Diamond C trailer"))
+
+    assert "Before we get started" in response.assistant_text
+    assert service._get_session(session_id)["pending_initial_user_message"] == "Diamond C trailer"
+
+
 def test_contact_extraction_uses_llm_before_regex_for_flexible_phrasing(monkeypatch):
     monkeypatch.setattr(
         service,

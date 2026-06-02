@@ -22,6 +22,7 @@ dependencies = [
     "pymysql>=1.1.2",
     "pytest>=9.0.3",
     "python-dotenv>=1.2.2",
+    "rapidfuzz>=3.14.5",
     "requests>=2.33.1",
     "sqlalchemy>=2.0.49",
     "streamlit>=1.56.0",

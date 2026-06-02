@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.graph import build_chatbot_graph
+from src.chatbot.inventory_matcher import search_trailers
+from src.chatbot.inventory_matcher import should_attempt_chat_lookup
 from src.chatbot.make_resolver import resolve_make_from_text
 from src.chatbot.tools.email_tools import (
     send_interested_listing_email,
@@ -1087,6 +1089,74 @@ def _persist(session: dict[str, Any]) -> None:
     )
 
 
+def _inventory_lookup_response(
+    session: dict[str, Any],
+    request: ChatRequest,
+    user_message: str,
+) -> ChatResponse | None:
+    if not should_attempt_chat_lookup(
+        user_message,
+        last_listings=session.get("last_listings") or [],
+    ):
+        return None
+    try:
+        result = search_trailers(
+            user_message,
+            last_listings=session.get("last_listings") or [],
+            for_chat=True,
+        )
+    except Exception:
+        logger.exception("inventory_lookup_failed")
+        return None
+
+    assistant_text = str(result.get("reply") or "").strip()
+    if not assistant_text:
+        return None
+
+    listings = result.get("top_matches") or []
+    assistant_msg = {
+        "role": "assistant",
+        "content": assistant_text,
+        "tool_events": [
+            {
+                "tool": "inventory_matcher",
+                "entity_type": result.get("entity_type"),
+                "confidence": result.get("confidence"),
+                "result_count": len(listings),
+            }
+        ],
+        "listings": listings,
+    }
+    session["messages"].append(assistant_msg)
+    session["last_listings"] = listings
+    shown = list(session.get("already_shown_listing_urls") or [])
+    shown.extend([str(item.get("url")) for item in listings if item.get("url")])
+    session["already_shown_listing_urls"] = sorted(set(shown))
+    if listings:
+        session["has_shown_search_results"] = True
+    session["sales_phase"] = "main"
+    _persist(session)
+    _log_chat_turn(request.session_id, request.message, assistant_text)
+    return ChatResponse(
+        assistant_text=assistant_text,
+        sales_phase="main",
+        onboarding_api_messages=request.onboarding_api_messages,
+        customer_full_name=session.get("customer_full_name"),
+        customer_email=session.get("customer_email") or "",
+        customer_phone=session.get("customer_phone"),
+        contact_status=session.get("contact_status"),
+        main_prior_messages=session.get("messages") or [],
+        listings=[],
+        thinking_context={
+            "inventory_lookup": {
+                "entity_type": result.get("entity_type"),
+                "confidence": result.get("confidence"),
+                "extraction": result.get("extraction") or {},
+            }
+        },
+    )
+
+
 def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: list[str]) -> dict[str, Any]:
     graph_state = {
         "session_id": session["session_id"],
@@ -1176,6 +1246,10 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             main_prior_messages=session.get("messages") or [],
             listings=[],
         )
+
+    inventory_response = _inventory_lookup_response(session, request, request.message)
+    if inventory_response:
+        return inventory_response
 
     if (
         not session.get("initial_contact_request_asked")

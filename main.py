@@ -6,6 +6,11 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from src.chatbot.inventory_matcher import (
+    TrailerSearchRequest,
+    TrailerSearchResponse,
+    search_trailers,
+)
 from src.chatbot.service import handle_chat, reset_session
 from src.log_setup import configure_trailerplace_logging
 from src.models import ChatRequest, ChatResponse, ResetSessionRequest
@@ -24,6 +29,19 @@ def health() -> dict[str, str]:
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     return handle_chat(request)
+
+
+@app.post("/trailer-search", response_model=TrailerSearchResponse)
+def trailer_search(request: TrailerSearchRequest) -> TrailerSearchResponse:
+    result = search_trailers(request.message)
+    return TrailerSearchResponse(
+        reply=str(result.get("reply") or ""),
+        entity_type=str(result.get("entity_type") or "UNKNOWN_SEARCH"),
+        confidence=float(result.get("confidence") or 0.0),
+        best_match=result.get("best_match"),
+        top_matches=result.get("top_matches") or [],
+        extraction=result.get("extraction") or {},
+    )
 
 
 @app.post("/session/reset")
