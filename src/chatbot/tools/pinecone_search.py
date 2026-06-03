@@ -307,10 +307,64 @@ def _canonical_make(value: Any) -> str:
     return MAKE_ALIAS_MAP.get(key, str(value or "").strip())
 
 
+def _brand_order_for_category(
+    listings: list[dict[str, Any]],
+    *,
+    category: str | None,
+) -> tuple[list[str], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    cat = normalize_category(category) if category else None
+    preferred = CATEGORY_MAKE_PREFERENCES.get(cat) or []
+    preferred_norm: list[str] = []
+    seen_preferred: set[str] = set()
+    for item in preferred:
+        canonical = _canonical_make(item)
+        if canonical and canonical not in seen_preferred:
+            preferred_norm.append(canonical)
+            seen_preferred.add(canonical)
+
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    brand_order: list[str] = []
+    remainder: list[dict[str, Any]] = []
+
+    for item in listings:
+        brand = _canonical_make(item.get("make"))
+        if not brand:
+            remainder.append(item)
+            continue
+        if brand not in buckets:
+            buckets[brand] = []
+            brand_order.append(brand)
+        buckets[brand].append(item)
+
+    ordered_brands: list[str] = []
+    seen_brands: set[str] = set()
+
+    for brand in preferred_norm:
+        if brand in buckets and brand not in seen_brands:
+            ordered_brands.append(brand)
+            seen_brands.add(brand)
+
+    for brand in brand_order:
+        if brand not in seen_brands:
+            ordered_brands.append(brand)
+            seen_brands.add(brand)
+
+    return ordered_brands, buckets, remainder
+
+
+def _brand_quota_template(brand_count: int, max_recommendations: int) -> list[int]:
+    if brand_count <= 1:
+        return [max_recommendations]
+    if brand_count == 2:
+        return [3, 3]
+    return [3, 2, 1]
+
+
 def _apply_category_make_preference(
     listings: list[dict[str, Any]],
     *,
     category: str | None,
+    max_recommendations: int = 6,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not listings or not category:
         return listings, {"applied": False, "reason": "missing_listings_or_category"}
@@ -320,29 +374,105 @@ def _apply_category_make_preference(
     if not preferred:
         return listings, {"applied": False, "reason": "no_category_preference", "category": cat}
 
-    preferred_norm = [_canonical_make(x) for x in preferred]
-    pref_index = {mk: i for i, mk in enumerate(preferred_norm)}
-    buckets: list[list[dict[str, Any]]] = [[] for _ in preferred_norm]
-    remainder: list[dict[str, Any]] = []
+    ordered_brands, buckets, remainder = _brand_order_for_category(listings, category=category)
+    brand_count = len(ordered_brands)
+    quota_template = _brand_quota_template(brand_count, max_recommendations)
+    quota_brand_count = 1 if brand_count <= 1 else 2 if brand_count == 2 else 3
+    quota_brands = ordered_brands[:quota_brand_count]
 
-    for item in listings:
-        item_make = _canonical_make(item.get("make"))
-        idx = pref_index.get(item_make)
-        if idx is None:
-            remainder.append(item)
-        else:
-            buckets[idx].append(item)
+    ranked: list[dict[str, Any]] = []
+    selected_counts: dict[str, int] = {}
+    selected_urls: set[str] = set()
 
-    ranked = [it for bucket in buckets for it in bucket] + remainder
+    def _take_from_brand(brand: str, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        taken: list[dict[str, Any]] = []
+        for item in buckets.get(brand, []):
+            if len(taken) >= limit:
+                break
+            url = str(item.get("url") or "").strip()
+            if url and url in selected_urls:
+                continue
+            taken.append(item)
+            if url:
+                selected_urls.add(url)
+        return taken
 
-    preferred_count = sum(len(bucket) for bucket in buckets)
+    # First pass: enforce the 3/2/1 or 3/3 style quota for the highest-priority brands.
+    for idx, brand in enumerate(quota_brands):
+        taken = _take_from_brand(brand, quota_template[idx])
+        ranked.extend(taken)
+        selected_counts[brand] = len(taken)
+
+    def _backfill_from_brand(brand: str) -> None:
+        remaining = []
+        already_selected = selected_counts.get(brand, 0)
+        for item in buckets.get(brand, [])[already_selected:]:
+            url = str(item.get("url") or "").strip()
+            if url and url in selected_urls:
+                continue
+            remaining.append(item)
+        if not remaining:
+            return
+        ranked.extend(remaining)
+        selected_counts[brand] = selected_counts.get(brand, 0) + len(remaining)
+        for item in remaining:
+            url = str(item.get("url") or "").strip()
+            if url:
+                selected_urls.add(url)
+
+    # Backfill from lower-priority brands first, then from any leftovers of the quota brands.
+    for brand in ordered_brands[quota_brand_count:]:
+        _backfill_from_brand(brand)
+
+    if len(ranked) < max_recommendations:
+        for brand in quota_brands:
+            if len(ranked) >= max_recommendations:
+                break
+            already_selected = selected_counts.get(brand, 0)
+            extras = []
+            for item in buckets.get(brand, [])[already_selected:]:
+                url = str(item.get("url") or "").strip()
+                if url and url in selected_urls:
+                    continue
+                extras.append(item)
+                if len(ranked) + len(extras) >= max_recommendations:
+                    break
+            if not extras:
+                continue
+            ranked.extend(extras)
+            selected_counts[brand] = selected_counts.get(brand, 0) + len(extras)
+            for item in extras:
+                url = str(item.get("url") or "").strip()
+                if url:
+                    selected_urls.add(url)
+
+    if len(ranked) < max_recommendations and remainder:
+        for item in remainder:
+            if len(ranked) >= max_recommendations:
+                break
+            url = str(item.get("url") or "").strip()
+            if url and url in selected_urls:
+                continue
+            ranked.append(item)
+            if url:
+                selected_urls.add(url)
+
+    ranked = ranked[:max_recommendations]
+    selected_by_brand = {
+        brand: count
+        for brand, count in selected_counts.items()
+        if count > 0
+    }
     before_top = [str(x.get("make") or "") for x in listings[:8]]
     after_top = [str(x.get("make") or "") for x in ranked[:8]]
     logger.info(
-        "make_rerank_summary | category=%r | preferred=%s | preferred_found=%s | total=%s | before_top=%s | after_top=%s",
+        "make_rerank_summary | category=%r | brand_order=%s | quota_template=%s | selected_by_brand=%s | total=%s | before_top=%s | after_top=%s",
         cat,
-        preferred_norm,
-        preferred_count,
+        ordered_brands,
+        quota_template,
+        selected_by_brand,
         len(listings),
         before_top,
         after_top,
@@ -351,19 +481,21 @@ def _apply_category_make_preference(
         for i, item in enumerate(ranked, 1):
             mk = _canonical_make(item.get("make"))
             logger.info(
-                "make_rerank_item | rank=%s | title=%r | make=%r | canonical_make=%r | preferred_index=%s",
+                "make_rerank_item | rank=%s | title=%r | make=%r | canonical_make=%r | brand_rank=%s",
                 i,
                 item.get("title"),
                 item.get("make"),
                 mk,
-                pref_index.get(mk),
+                ordered_brands.index(mk) + 1 if mk in ordered_brands else None,
             )
 
     return ranked, {
         "applied": True,
         "category": cat,
-        "preferred_order": preferred_norm,
-        "preferred_found": preferred_count,
+        "brand_order": ordered_brands,
+        "quota_template": quota_template,
+        "selected_by_brand": selected_by_brand,
+        "brand_count": brand_count,
     }
 
 
@@ -608,6 +740,7 @@ def search_pinecone_listings(
     listings, make_debug = _apply_category_make_preference(
         listings,
         category=category,
+        max_recommendations=max_recommendations,
     )
     logger.info("make_rerank_debug=%s", json.dumps(make_debug, default=str))
 

@@ -1,7 +1,7 @@
 from src.chatbot import formatting
 
 
-def test_listing_results_use_plain_visible_numbers_and_interest_prompt(monkeypatch):
+def test_listing_results_use_plain_visible_numbers_without_fixed_interest_prompt(monkeypatch):
     monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: False)
     listings = [
         {
@@ -31,4 +31,4 @@ def test_listing_results_use_plain_visible_numbers_and_interest_prompt(monkeypat
     assert "Trailer #2: [Trailer B](https://example.test/b)" in text
     assert "- Category: Utility" in text
     assert "- Category: Equipment" in text
-    assert text.endswith("Are you interested in any of the trailers above?")
+    assert not text.endswith("Are you interested in any of the trailers above?")

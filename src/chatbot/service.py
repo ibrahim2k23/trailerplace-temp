@@ -131,7 +131,6 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "confusion_escalated": False,
         "confusion_signal_count": 0,
         "initial_contact_request_asked": False,
-        "contact_request_asked_after_recommendation": False,
         "pending_contact_action": None,
         "pending_initial_user_message": None,
     }
@@ -1184,9 +1183,6 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "has_shown_search_results": bool(session.get("has_shown_search_results")),
         "active_category_cycle_id": int(session.get("active_category_cycle_id") or 1),
         "initial_contact_request_asked": bool(session.get("initial_contact_request_asked")),
-        "contact_request_asked_after_recommendation": bool(
-            session.get("contact_request_asked_after_recommendation")
-        ),
         "pending_contact_action": deepcopy(session.get("pending_contact_action")),
         "pending_initial_user_message": session.get("pending_initial_user_message"),
     }
@@ -1421,7 +1417,6 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "asked_questions",
         "already_shown_listing_urls",
         "last_listings",
-        "contact_request_asked_after_recommendation",
         "pending_contact_action",
     ):
         if key in result:

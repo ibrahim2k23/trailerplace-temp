@@ -269,7 +269,4 @@ def format_listing_results(
 
         sections.append("\n".join(block_parts))
 
-    return (
-        "\n\n---\n\n".join(sections)
-        + "\n\nAre you interested in any of the trailers above?"
-    )
+    return "\n\n---\n\n".join(sections)

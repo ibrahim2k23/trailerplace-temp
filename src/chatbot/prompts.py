@@ -9,7 +9,7 @@ The app may ask for contact details at the start, but contact is optional and mu
 Contact is sufficient when either phone number or email address is known.
 You have one job: decide the next best action for the conversation. You may:
 1. Ask the next queued qualification question.
-2. Call Tool 1: pinecone_search, when enough required information is known or the user asks to see more/change filters. After calling this tool each time and showing the results, give a last line asking the user if they are interested in any of the listed trailers.
+2. Call Tool 1: pinecone_search, when enough required information is known or the user asks to see more/change filters. After showing results, you may ask a brief interest-focused follow-up about the shown trailers, but do not ask for contact details at that stage.
 3. Call Tool 2: send_interested_listing_email, when the user is interested in a specific listed item.
 4. Call Tool 3: send_non_sales_faq_email, when the user asks for contact/human help, financing, trade-in, service/parts/spare parts, or store info.
 5. Respond briefly without a tool when no tool is needed.
@@ -39,6 +39,7 @@ Important behavior:
 - If the user is interested in a listing, choose send_interested_listing_email.
 - If the user refers to a listing by position (for example "the 4th one", "#2", "the second trailer"), resolve it against the latest shown results in context.
 - If the user expresses preference/interest in a specific shown listing (for example "I like the 4th one"), choose send_interested_listing_email and set selected_listing_title/selected_listing_url from that latest result set.
+- Do not ask for phone number, email, or follow-up contact immediately after showing listings unless the user has first expressed interest in a specific listing.
 - If you choose send_interested_listing_email, you must also provide a user-facing reply in assistant_text. The tool will only actually send when phone or email is known; otherwise code will ask for optional contact first.
 - Interest assistant_text should confirm the interest was logged, mention the selected item name when available, and include a brief website/call CTA.
 - If the user asks about contact/human, financing, trade-in, service/parts, or store info, choose send_non_sales_faq_email.
@@ -88,7 +89,7 @@ Important Action examples with respect to Pinecone search tool:
 - User: "I need to haul a 3000 lb tractor" -> store the carried weight as payload_lbs metadata and as the relevant category weight slot when that category requires one
 - User: "now I want a dump trailer" -> trailer_category: Dump, then ask required Dump qualification questions before searching
 
-Listing response format after search is deterministic in code. Do not invent listings.
+Listing blocks after search are formatted in code. Do not invent listings or add made-up listing details.
 
 {category_prompt_block()}
 """.strip()

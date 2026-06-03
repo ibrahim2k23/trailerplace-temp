@@ -72,10 +72,6 @@ _INTEREST_GENERIC_FALLBACK_NO_ITEM = (
 _INTEREST_SAFE_FALLBACK = (
     "Great, I sent your interest in that trailer to the team. They can follow up with you shortly."
 )
-_RECOMMENDATION_CONTACT_ASK = (
-    "If you'd like, you can share your phone number or email address so our team can follow up "
-    "with you about these trailer options."
-)
 
 
 class MindDecision(BaseModel):
@@ -131,6 +127,25 @@ def _filter_extractor_llm():
     )
 
 
+def _result_interest_followup_llm_enabled() -> bool:
+    return (os.getenv("RESULT_INTEREST_FOLLOWUP_LLM_ENABLED") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+@lru_cache(maxsize=1)
+def _result_interest_followup_llm():
+    model = (
+        os.getenv("RESULT_INTEREST_FOLLOWUP_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0.3)
+
+
 def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -139,6 +154,71 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 def _safe_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=True, default=str)
+
+
+def _result_interest_followup_text(
+    *,
+    user_message: str,
+    category: str | None,
+    slots: dict[str, Any],
+    listings: list[dict[str, Any]],
+) -> str:
+    if not listings or not _result_interest_followup_llm_enabled() or not os.getenv("OPENAI_API_KEY"):
+        return ""
+
+    facts = [
+        {
+            "position": idx,
+            "title": str(item.get("title") or "").strip(),
+            "category": item.get("category"),
+            "length": item.get("length"),
+            "width": item.get("width"),
+            "price": item.get("price_display") or item.get("price"),
+        }
+        for idx, item in enumerate(listings[:5], 1)
+    ]
+
+    try:
+        response = _result_interest_followup_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Write exactly one short customer-facing follow-up sentence after trailer search results. "
+                        "Ask whether any shown trailer stands out or interests the customer. "
+                        "Do not ask for phone number, email, contact details, store visit, callback, or team follow-up. "
+                        "Do not invent listing facts. Use only the supplied context. "
+                        "No markdown, no bullets, no quotes, max 22 words."
+                    )
+                ),
+                HumanMessage(
+                    content=_safe_json(
+                        {
+                            "user_message": user_message,
+                            "category": category,
+                            "slots": slots,
+                            "listings": facts,
+                        }
+                    )
+                ),
+            ]
+        )
+        text = re.sub(r"\s+", " ", str(response.content or "").strip())
+        if not text:
+            return ""
+        if re.search(
+            r"\b(?:phone|email|contact|call|reach|follow\s*up|team|sales|website|visit)\b",
+            text,
+            re.I,
+        ):
+            return ""
+        if text.startswith('"') and text.endswith('"') and len(text) > 1:
+            text = text[1:-1].strip()
+        if not text.endswith(("?", ".", "!")):
+            text += "?"
+        return text
+    except Exception:
+        logger.exception("result_interest_followup_llm_failed")
+        return ""
 
 
 def _has_contact(state: ChatbotState) -> bool:
@@ -2059,13 +2139,14 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         slots=state.get("slots_collected") or {},
         user_message=state.get("user_message") or "",
     )
-    ask_after_recommendation = bool(
-        listings
-        and not _has_contact(state)
-        and not state.get("contact_request_asked_after_recommendation")
+    followup = _result_interest_followup_text(
+        user_message=state.get("user_message") or "",
+        category=state.get("trailer_category"),
+        slots=state.get("slots_collected") or {},
+        listings=listings,
     )
-    if ask_after_recommendation:
-        assistant_text = f"{assistant_text}\n\n{_RECOMMENDATION_CONTACT_ASK}"
+    if followup:
+        assistant_text = f"{assistant_text}\n\n{followup}"
     shown = list(state.get("already_shown_listing_urls") or [])
     shown.extend([str(x.get("url")) for x in listings if x.get("url")])
     events = list(state.get("tool_events") or [])
@@ -2076,9 +2157,6 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         "last_listings": listings,
         "already_shown_listing_urls": sorted(set(shown)),
         "tool_events": events,
-        "contact_request_asked_after_recommendation": (
-            True if ask_after_recommendation else state.get("contact_request_asked_after_recommendation", False)
-        ),
     }
 
 

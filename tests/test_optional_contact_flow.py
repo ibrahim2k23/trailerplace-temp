@@ -696,7 +696,7 @@ def test_contact_plus_new_trailer_request_routes_to_graph(monkeypatch):
     assert response.customer_phone == "03304388550"
 
 
-def test_recommendation_contact_ask_happens_once_without_contact(monkeypatch):
+def test_recommendation_results_include_llm_interest_followup_without_contact_ask(monkeypatch):
     state = {
         "trailer_category": "Utility",
         "slots_collected": {},
@@ -706,7 +706,6 @@ def test_recommendation_contact_ask_happens_once_without_contact(monkeypatch):
         "tool_events": [],
         "customer_email": None,
         "customer_phone": None,
-        "contact_request_asked_after_recommendation": False,
     }
 
     def _search(**_kwargs):
@@ -714,11 +713,41 @@ def test_recommendation_contact_ask_happens_once_without_contact(monkeypatch):
 
     monkeypatch.setattr(graph, "search_pinecone_listings", _search)
     monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
-    first = graph._pinecone_search_node(state)
-    second = graph._pinecone_search_node(first)
+    monkeypatch.setattr(
+        graph,
+        "_result_interest_followup_text",
+        lambda **_kwargs: "Do any of these trailers stand out to you?",
+    )
 
-    assert "phone number or email address" in first["assistant_text"]
-    assert "phone number or email address" not in second["assistant_text"]
+    out = graph._pinecone_search_node(state)
+
+    assert "Do any of these trailers stand out to you?" in out["assistant_text"]
+    assert "phone number or email address" not in out["assistant_text"]
+
+
+def test_recommendation_results_skip_followup_when_llm_interest_prompt_unavailable(monkeypatch):
+    state = {
+        "trailer_category": "Utility",
+        "slots_collected": {},
+        "metadata_filters_collected": {},
+        "user_message": "show utility trailers",
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+
+    monkeypatch.setattr(
+        graph,
+        "search_pinecone_listings",
+        lambda **_kwargs: [{"title": "Trailer A", "url": "https://example.test/a", "length": "12 ft"}],
+    )
+    monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+
+    out = graph._pinecone_search_node(state)
+
+    assert "Trailer #1: [Trailer A](https://example.test/a)" in out["assistant_text"]
+    assert "phone number or email address" not in out["assistant_text"]
+    assert "stand out to you" not in out["assistant_text"]
 
 
 def test_metadata_only_followups_route_to_graph_with_search_context():

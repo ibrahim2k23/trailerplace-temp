@@ -38,6 +38,5 @@ class ChatbotState(TypedDict, total=False):
     has_shown_search_results: bool
     active_category_cycle_id: int
     initial_contact_request_asked: bool
-    contact_request_asked_after_recommendation: bool
     pending_contact_action: Optional[dict[str, Any]]
     pending_initial_user_message: Optional[str]
