@@ -500,6 +500,19 @@ def _explicit_make_requested(message: str) -> bool:
     return bool(resolve_make_from_text(message or "", use_llm_fallback=False).make)
 
 
+def _should_apply_inferred_make(
+    latest_message: str,
+    *,
+    category: str | None,
+    existing_make: str | None,
+) -> bool:
+    if _message_has_filter_evidence("make", latest_message):
+        return True
+    if existing_make:
+        return False
+    return not bool(category)
+
+
 def _sanitize_metadata_filter_update(
     key: str,
     value: Any,
@@ -1558,7 +1571,29 @@ def _apply_make_resolution(
     if not resolution.make:
         return category, [], None
 
+    existing_make = str(metadata_filters.get("make") or "").strip() or None
+    if not _should_apply_inferred_make(
+        latest_message,
+        category=category,
+        existing_make=existing_make,
+    ):
+        logger.info(
+            "make_resolution_suppressed | resolved_make=%r | existing_make=%r | category=%r | reason=%s",
+            resolution.make,
+            existing_make,
+            category,
+            "existing_make_retained" if existing_make else "not_explicit_with_category_context",
+        )
+        return category, [], None
+
     metadata_filters["make"] = resolution.make
+    logger.info(
+        "make_resolution_applied | make=%r | category=%r | explicit_make=%s | match_type=%r",
+        resolution.make,
+        category,
+        _message_has_filter_evidence("make", latest_message),
+        resolution.match_type,
+    )
     available_categories = list(categories_for_make(resolution.make))
     if category:
         return category, [], None

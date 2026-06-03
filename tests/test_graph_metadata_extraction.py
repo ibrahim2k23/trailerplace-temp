@@ -83,6 +83,16 @@ def _mock_extractor(monkeypatch, **values):
     )
 
 
+def _mock_make_resolution(monkeypatch, mapping: dict[tuple[str, bool], make_resolver.MakeResolution]):
+    def _resolve_make(text, *, use_llm_fallback=True):
+        key = (text, use_llm_fallback)
+        if key in mapping:
+            return mapping[key]
+        return make_resolver.resolve_make_from_text(text, use_llm_fallback=False)
+
+    monkeypatch.setattr(graph, "resolve_make_from_text", _resolve_make)
+
+
 def test_livestock_length_in_message_satisfies_required_slot(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     out = graph._apply_mind_node(_state("I want a 12 feet livestock trailer", category="Livestock"))
@@ -104,6 +114,47 @@ def test_livestock_width_is_metadata_filter_not_category_slot(monkeypatch):
     assert out["metadata_filters_collected"]["width_ft"] == "6 feet"
     assert "width_ft" not in out["slots_collected"]
     assert "trailer_width_ft" not in out["slots_collected"]
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_generic_livestock_6x12_does_not_apply_inferred_make(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_make_resolution(
+        monkeypatch,
+        {
+            (
+                "I am looking for a 6x12 livestock trailer",
+                True,
+            ): make_resolver.MakeResolution("Calico Trailers", "high", "llm", "Inferred from ranked makes."),
+        },
+    )
+
+    out = graph._apply_mind_node(_state("I am looking for a 6x12 livestock trailer", category=None))
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+    assert "make" not in out["metadata_filters_collected"]
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_generic_livestock_12ft_does_not_apply_inferred_make(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_make_resolution(
+        monkeypatch,
+        {
+            (
+                "I am looking for a 12 ft livestock trailer",
+                True,
+            ): make_resolver.MakeResolution("Calico Trailers", "high", "llm", "Inferred from ranked makes."),
+        },
+    )
+
+    out = graph._apply_mind_node(_state("I am looking for a 12 ft livestock trailer", category=None))
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
+    assert "make" not in out["metadata_filters_collected"]
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
@@ -142,6 +193,54 @@ def test_make_resolution_uses_llm_for_rd_trailer(monkeypatch):
     assert out["awaiting_slot"] == "make_category_choice"
     assert "Which category" in out["assistant_text"]
     assert llm_enabled_calls == ["I am looking for an RD trailer"]
+
+
+def test_same_category_generic_query_keeps_existing_make(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_make_resolution(
+        monkeypatch,
+        {
+            (
+                "I am looking for a 6x12 livestock trailer",
+                True,
+            ): make_resolver.MakeResolution("Calico Trailers", "high", "llm", "Inferred from ranked makes."),
+        },
+    )
+    state = _state("I am looking for a 6x12 livestock trailer", category="Livestock")
+    state["trailer_category"] = "Livestock"
+    state["metadata_filters_collected"] = {"make": "Iron Bull Trailers"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+
+
+def test_category_change_clears_existing_make_before_generic_livestock_search(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_make_resolution(
+        monkeypatch,
+        {
+            (
+                "I am looking for a 12 ft livestock trailer",
+                True,
+            ): make_resolver.MakeResolution("Calico Trailers", "high", "llm", "Inferred from ranked makes."),
+        },
+    )
+    state = _state("I am looking for a 12 ft livestock trailer", category="Livestock")
+    state["trailer_category"] = "Utility"
+    state["slots_collected"] = {"haul_length_ft": "14"}
+    state["metadata_filters_collected"] = {"make": "Iron Bull Trailers", "length_ft": "14"}
+    state["has_shown_search_results"] = True
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["slots_collected"] == {"trailer_length_ft": "12 ft"}
+    assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
+    assert "make" not in out["metadata_filters_collected"]
 
 
 def test_make_category_no_preference_keeps_existing_length_and_asks_payload_only(monkeypatch):
