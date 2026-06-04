@@ -78,6 +78,39 @@ def test_exact_inventory_lookup_answers_before_initial_contact_prompt(monkeypatc
     assert service._get_session(session_id)["initial_contact_request_asked"] is False
 
 
+def test_year_make_price_lookup_answers_before_contact_or_graph(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001021"
+    service.reset_session(session_id)
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009021")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009021")
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "should_attempt_chat_lookup", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: {
+            "reply": "We do not currently show 2026 Aluma in the inventory data, but this is the closest alternative.",
+            "entity_type": "YEAR_MAKE_SEARCH",
+            "confidence": 0.0,
+            "top_matches": [{"title": "2025 Aluma Utility", "stock_number": "12345"}],
+            "extraction": {"year": 2026, "possible_make": "Aluma", "user_wants_price": True},
+            "no_exact_reason": "no_exact_inventory_match_for_requested_identifiers",
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_should_route_to_graph",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct lookup should not route to graph")),
+    )
+
+    response = service.handle_chat(_req(session_id, "2026 Aluma price?"))
+
+    assert response.assistant_text.startswith("We do not currently show 2026 Aluma")
+    assert "Before we get started" not in response.assistant_text
+    assert service._get_session(session_id)["initial_contact_request_asked"] is False
+
+
 def test_pure_make_lookup_still_uses_initial_contact_flow(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001020"
     service.reset_session(session_id)
@@ -709,10 +742,15 @@ def test_recommendation_results_include_llm_interest_followup_without_contact_as
     }
 
     def _search(**_kwargs):
-        return [{"title": "Trailer A", "url": "https://example.test/a", "length": "12 ft"}]
+        return graph.PineconeListingSearchResult(
+            listings=[{"title": "Trailer A", "url": "https://example.test/a", "length": "12 ft"}],
+            query_text="show utility trailers",
+            metadata_filter=None,
+        )
 
-    monkeypatch.setattr(graph, "search_pinecone_listings", _search)
+    monkeypatch.setattr(graph, "search_pinecone_listing_result", _search)
     monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_pinecone_match_framing_text", lambda **_kwargs: ("", {}))
     monkeypatch.setattr(
         graph,
         "_result_interest_followup_text",
@@ -737,10 +775,15 @@ def test_recommendation_results_skip_followup_when_llm_interest_prompt_unavailab
 
     monkeypatch.setattr(
         graph,
-        "search_pinecone_listings",
-        lambda **_kwargs: [{"title": "Trailer A", "url": "https://example.test/a", "length": "12 ft"}],
+        "search_pinecone_listing_result",
+        lambda **_kwargs: graph.PineconeListingSearchResult(
+            listings=[{"title": "Trailer A", "url": "https://example.test/a", "length": "12 ft"}],
+            query_text="show utility trailers",
+            metadata_filter=None,
+        ),
     )
     monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_pinecone_match_framing_text", lambda **_kwargs: ("", {}))
     monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
 
     out = graph._pinecone_search_node(state)
@@ -748,6 +791,134 @@ def test_recommendation_results_skip_followup_when_llm_interest_prompt_unavailab
     assert "Trailer #1: [Trailer A](https://example.test/a)" in out["assistant_text"]
     assert "phone number or email address" not in out["assistant_text"]
     assert "stand out to you" not in out["assistant_text"]
+
+
+def test_pinecone_results_prepend_llm_match_framing_and_hide_evidence(monkeypatch):
+    state = {
+        "trailer_category": "Livestock",
+        "slots_collected": {},
+        "metadata_filters_collected": {},
+        "user_message": "show me livestock trailers with sliding gates",
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        graph,
+        "search_pinecone_listing_result",
+        lambda **_kwargs: graph.PineconeListingSearchResult(
+            listings=[
+                {
+                    "title": "Sliding Gate Trailer",
+                    "url": "https://example.test/sliding",
+                    "length": "16 ft",
+                    "match_evidence_text": "Details: includes sliding gate and livestock divider.",
+                }
+            ],
+            query_text="show me livestock trailers with sliding gates | Category: Livestock",
+            metadata_filter={"category": {"$eq": "Livestock"}},
+            rerank_debug={"applied": True},
+            make_debug={"applied": True},
+        ),
+    )
+
+    def _framing(**kwargs):
+        captured["evidence"] = kwargs["search_result"].listings[0]["match_evidence_text"]
+        return (
+            "I found 1 option that fully matches your request, with strong alternatives ready if you want to compare.",
+            {"overall_match_level": "full", "full_match_count": 1, "source": "llm"},
+        )
+
+    monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_pinecone_match_framing_text", _framing)
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+
+    out = graph._pinecone_search_node(state)
+
+    assert out["assistant_text"].startswith("I found 1 option that fully matches your request")
+    assert "Trailer #1: [Sliding Gate Trailer](https://example.test/sliding)" in out["assistant_text"]
+    assert captured["evidence"] == "Details: includes sliding gate and livestock divider."
+    assert "match_evidence_text" not in out["last_listings"][0]
+
+
+def test_pinecone_results_use_llm_no_exact_framing(monkeypatch):
+    state = {
+        "trailer_category": "Livestock",
+        "slots_collected": {},
+        "metadata_filters_collected": {},
+        "user_message": "show me livestock trailers with sliding gates",
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+    monkeypatch.setattr(
+        graph,
+        "search_pinecone_listing_result",
+        lambda **_kwargs: graph.PineconeListingSearchResult(
+            listings=[
+                {
+                    "title": "Close Alternative Trailer",
+                    "url": "https://example.test/alt",
+                    "length": "16 ft",
+                    "match_evidence_text": "Details: livestock trailer with rear gate.",
+                }
+            ],
+            query_text="show me livestock trailers with sliding gates | Category: Livestock",
+            metadata_filter={"category": {"$eq": "Livestock"}},
+        ),
+    )
+    monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_framing_text",
+        lambda **_kwargs: (
+            "The exact sliding-gate combination is not clearly shown, so I selected the closest available livestock options.",
+            {"overall_match_level": "no_exact", "full_match_count": 0, "source": "llm"},
+        ),
+    )
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+
+    out = graph._pinecone_search_node(state)
+
+    assert out["assistant_text"].startswith("The exact sliding-gate combination is not clearly shown")
+    assert "Trailer #1: [Close Alternative Trailer](https://example.test/alt)" in out["assistant_text"]
+    assert out["tool_events"][-1]["match_analysis"]["overall_match_level"] == "no_exact"
+
+
+def test_pinecone_match_framing_disabled_uses_neutral_fallback(monkeypatch):
+    state = {
+        "trailer_category": "Utility",
+        "slots_collected": {},
+        "metadata_filters_collected": {},
+        "user_message": "show me utility trailers with mesh sides",
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+    monkeypatch.setattr(
+        graph,
+        "search_pinecone_listing_result",
+        lambda **_kwargs: graph.PineconeListingSearchResult(
+            listings=[
+                {
+                    "title": "Utility Trailer",
+                    "url": "https://example.test/utility",
+                    "length": "12 ft",
+                    "match_evidence_text": "Details: utility trailer.",
+                }
+            ],
+            query_text="show me utility trailers with mesh sides | Category: Utility",
+            metadata_filter={"category": {"$eq": "Utility"}},
+        ),
+    )
+    monkeypatch.setenv("PINECONE_MATCH_FRAMING_LLM_ENABLED", "0")
+    monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+
+    out = graph._pinecone_search_node(state)
+
+    assert out["assistant_text"].startswith("Here are the strongest available options")
+    assert "fully match" not in out["assistant_text"].lower()
+    assert "Trailer #1: [Utility Trailer](https://example.test/utility)" in out["assistant_text"]
 
 
 def test_metadata_only_followups_route_to_graph_with_search_context():

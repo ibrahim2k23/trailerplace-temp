@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -61,6 +62,16 @@ CATEGORY_MAKE_PREFERENCES: dict[str, list[str]] = {
     "Tilt": ["Diamond C", "Iron Bull Trailers", "Aluma"],
     "Utility": ["Diamond C", "Iron Bull Trailers", "East Texas Trailers", "P&C"],
 }
+
+
+@dataclass
+class PineconeListingSearchResult:
+    listings: list[dict[str, Any]]
+    query_text: str
+    metadata_filter: dict[str, Any] | None
+    rerank_debug: dict[str, Any] = field(default_factory=dict)
+    make_debug: dict[str, Any] = field(default_factory=dict)
+    match_analysis: dict[str, Any] = field(default_factory=dict)
 
 MAKE_ALIAS_MAP: dict[str, str] = {
     "cargo craft": "Cargo Craft",
@@ -262,6 +273,7 @@ def _clean_match(match: Any) -> dict[str, Any]:
         "floor": metadata.get("floor"),
         "url": metadata.get("url") or "",
         "relevance_score": score,
+        "match_evidence_text": metadata.get("match_evidence_text") or "",
     }
 
 
@@ -676,7 +688,7 @@ def _rerank_listings_by_fit(
     }
 
 
-def search_pinecone_listings(
+def search_pinecone_listing_result(
     *,
     category: str | None,
     slots: dict[str, Any],
@@ -685,15 +697,22 @@ def search_pinecone_listings(
     already_shown_urls: list[str] | None = None,
     top_k: int | None = None,
     max_recommendations: int | None = None,
-) -> list[dict[str, Any]]:
+) -> PineconeListingSearchResult:
     metadata_filters = metadata_filters or {}
     query = _query_text(category, slots, metadata_filters, user_message)
-    vector = _embed(query)
     top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
     max_recommendations = max_recommendations or int(os.getenv("SEARCH_MAX_RECOMMENDATIONS", "5"))
     metadata_filter = _metadata_filter(category, slots, metadata_filters) or None
     query_preview = query[:2000] + ("...(truncated)" if len(query) > 2000 else "")
     shown_urls = {str(u).strip() for u in (already_shown_urls or []) if str(u or "").strip()}
+
+    logger.info(
+        "pinecone_embedding_query | category=%r | metadata_filter=%s | query_text=%r",
+        category,
+        json.dumps(metadata_filter, default=str) if metadata_filter else "{}",
+        query,
+    )
+    vector = _embed(query)
 
     logger.info(
         "pinecone_search | category=%r | top_k=%s | max_recommendations=%s | "
@@ -722,6 +741,7 @@ def search_pinecone_listings(
             continue
         listings.append(item)
 
+    rerank_debug: dict[str, Any] = {"applied": False, "reason": "disabled"}
     if RERANK_ENABLED:
         required_length_ft = _required_length_ft_from_filters(slots, metadata_filters)
         required_payload_lbs = _required_payload_lbs_from_filters(slots, metadata_filters)
@@ -744,4 +764,36 @@ def search_pinecone_listings(
     )
     logger.info("make_rerank_debug=%s", json.dumps(make_debug, default=str))
 
-    return listings[:max_recommendations]
+    return PineconeListingSearchResult(
+        listings=listings[:max_recommendations],
+        query_text=query,
+        metadata_filter=metadata_filter,
+        rerank_debug=rerank_debug,
+        make_debug=make_debug,
+        match_analysis={},
+    )
+
+
+def search_pinecone_listings(
+    *,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any] | None = None,
+    user_message: str,
+    already_shown_urls: list[str] | None = None,
+    top_k: int | None = None,
+    max_recommendations: int | None = None,
+) -> list[dict[str, Any]]:
+    result = search_pinecone_listing_result(
+        category=category,
+        slots=slots,
+        metadata_filters=metadata_filters,
+        user_message=user_message,
+        already_shown_urls=already_shown_urls,
+        top_k=top_k,
+        max_recommendations=max_recommendations,
+    )
+    return [
+        {key: value for key, value in item.items() if key != "match_evidence_text"}
+        for item in result.listings
+    ]

@@ -43,6 +43,7 @@ INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "trailerplace-listings")
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIM = 1536
 BATCH_SIZE = 50
+MATCH_EVIDENCE_TEXT_MAX_CHARS = 3000
 
 DATA_FILE = _ROOT / "listings_final_v5.xlsx"
 
@@ -268,6 +269,7 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "color": color,
         "url": url,
         "price_display": price_display,
+        "match_evidence_text": embedding_text[:MATCH_EVIDENCE_TEXT_MAX_CHARS],
     }
     sub_norm = normalize_subcategory(raw_subcategory)
     if sub_norm and sub_norm.lower() != category.lower():

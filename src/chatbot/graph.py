@@ -35,7 +35,10 @@ from src.chatbot.tools.email_tools import (
     send_interested_listing_email,
     send_non_sales_faq_email,
 )
-from src.chatbot.tools.pinecone_search import search_pinecone_listings
+from src.chatbot.tools.pinecone_search import (
+    PineconeListingSearchResult,
+    search_pinecone_listing_result,
+)
 
 load_dotenv()
 
@@ -105,6 +108,15 @@ class FilterExtractionDecision(BaseModel):
     slot_updates: dict[str, Any] = Field(default_factory=dict)
 
 
+class PineconeMatchFramingDecision(BaseModel):
+    intro_text: str = ""
+    overall_match_level: Literal["full", "mixed", "partial_only", "no_exact", "unknown"] = "unknown"
+    full_match_count: int = 0
+    partial_match_count: int = 0
+    listing_match_labels: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 @lru_cache(maxsize=1)
 def _mind_llm():
     model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
@@ -146,6 +158,28 @@ def _result_interest_followup_llm():
     return ChatOpenAI(model=model, temperature=0.3)
 
 
+def _pinecone_match_framing_llm_enabled() -> bool:
+    return (os.getenv("PINECONE_MATCH_FRAMING_LLM_ENABLED") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+@lru_cache(maxsize=1)
+def _pinecone_match_framing_llm():
+    model = (
+        os.getenv("PINECONE_MATCH_FRAMING_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0.25).with_structured_output(
+        PineconeMatchFramingDecision,
+        method="function_calling",
+    )
+
+
 def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -154,6 +188,127 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 def _safe_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=True, default=str)
+
+
+_PINECONE_INTERNAL_LISTING_KEYS = {"match_evidence_text"}
+_PINECONE_MATCH_FRAMING_FALLBACK = (
+    "Here are the strongest available options I found based on your search."
+)
+
+
+def _public_listing(listing: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(listing or {}).items()
+        if key not in _PINECONE_INTERNAL_LISTING_KEYS
+    }
+
+
+def _pinecone_match_framing_text(
+    *,
+    user_message: str,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    search_result: PineconeListingSearchResult,
+) -> tuple[str, dict[str, Any]]:
+    listings = search_result.listings or []
+    if not listings:
+        return "", {}
+    if not _pinecone_match_framing_llm_enabled() or not os.getenv("OPENAI_API_KEY"):
+        return _PINECONE_MATCH_FRAMING_FALLBACK, {
+            "overall_match_level": "unknown",
+            "full_match_count": 0,
+            "partial_match_count": 0,
+            "source": "neutral_fallback",
+        }
+
+    facts = [
+        {
+            "position": idx,
+            "title": str(item.get("title") or "").strip(),
+            "category": item.get("category"),
+            "subcategory": item.get("subcategory"),
+            "make": item.get("make"),
+            "model": item.get("model"),
+            "price": item.get("price_display") or item.get("price"),
+            "length": item.get("length"),
+            "width": item.get("width"),
+            "hitch_type": item.get("hitch_type"),
+            "color": item.get("color"),
+            "gvwr": item.get("gvwr"),
+            "payload_capacity": item.get("payload_capacity"),
+            "relevance_score": item.get("relevance_score"),
+            "match_evidence_text": str(item.get("match_evidence_text") or "")[:1800],
+        }
+        for idx, item in enumerate(listings[:6], 1)
+    ]
+
+    try:
+        decision = _pinecone_match_framing_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You write the short intro before trailer recommendation results. "
+                        "Decide whether the returned listings fully match, partially match, or are close alternatives "
+                        "for the user's requested trailer features, including features that may only appear in hidden "
+                        "listing evidence such as dealer notes. "
+                        "Use a warm, polished sales-advisor tone. "
+                        "Use only supplied facts and hidden evidence. Do not invent specs, prices, availability, "
+                        "discounts, stock status, links, or feature matches. "
+                        "If evidence is missing or unclear, frame the result as a close alternative rather than a full match. "
+                        "intro_text must be one or two customer-facing sentences, no markdown, no bullets, no quotes, max 55 words. "
+                        "Do not ask for phone number, email, contact details, callback, or sales follow-up."
+                    )
+                ),
+                HumanMessage(
+                    content=_safe_json(
+                        {
+                            "user_message": user_message,
+                            "category": category,
+                            "slots": slots,
+                            "metadata_filters": metadata_filters,
+                            "pinecone_embedding_query_text": search_result.query_text,
+                            "pinecone_metadata_filter": search_result.metadata_filter,
+                            "rerank_debug": search_result.rerank_debug,
+                            "make_debug": search_result.make_debug,
+                            "listings": facts,
+                        }
+                    )
+                ),
+            ]
+        )
+        data = _model_dump(decision)
+        text = re.sub(r"\s+", " ", str(data.get("intro_text") or "").strip())
+        if text.startswith('"') and text.endswith('"') and len(text) > 1:
+            text = text[1:-1].strip()
+        if not text:
+            return _PINECONE_MATCH_FRAMING_FALLBACK, {
+                **data,
+                "source": "neutral_fallback_empty_llm_text",
+            }
+        if re.search(
+            r"\b(?:phone|email|contact|call|reach|callback|follow\s*up|sales\s+team)\b",
+            text,
+            re.I,
+        ):
+            return _PINECONE_MATCH_FRAMING_FALLBACK, {
+                **data,
+                "source": "neutral_fallback_blocked_contact_text",
+            }
+        if len(text) > 420:
+            text = text[:420].rsplit(" ", 1)[0].strip()
+        if not text.endswith((".", "!", "?")):
+            text += "."
+        return text, {**data, "intro_text": text, "source": "llm"}
+    except Exception:
+        logger.exception("pinecone_match_framing_llm_failed")
+        return _PINECONE_MATCH_FRAMING_FALLBACK, {
+            "overall_match_level": "unknown",
+            "full_match_count": 0,
+            "partial_match_count": 0,
+            "source": "neutral_fallback_exception",
+        }
 
 
 def _result_interest_followup_text(
@@ -2161,19 +2316,37 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         json.dumps(state.get("metadata_filters_collected") or {}, default=str),
         len(state.get("already_shown_listing_urls") or []),
     )
-    listings = search_pinecone_listings(
+    search_result = search_pinecone_listing_result(
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
         metadata_filters=state.get("metadata_filters_collected") or {},
         user_message=state.get("user_message") or "",
         already_shown_urls=state.get("already_shown_listing_urls") or [],
     )
+    if isinstance(search_result, list):
+        search_result = PineconeListingSearchResult(
+            listings=search_result,
+            query_text=state.get("user_message") or "",
+            metadata_filter=None,
+        )
+    listings_with_evidence = search_result.listings
+    intro_text, match_analysis = _pinecone_match_framing_text(
+        user_message=state.get("user_message") or "",
+        category=state.get("trailer_category"),
+        slots=state.get("slots_collected") or {},
+        metadata_filters=state.get("metadata_filters_collected") or {},
+        search_result=search_result,
+    )
+    search_result.match_analysis = match_analysis
+    listings = [_public_listing(item) for item in listings_with_evidence]
     assistant_text = format_listing_results(
         listings,
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
         user_message=state.get("user_message") or "",
     )
+    if intro_text:
+        assistant_text = f"{intro_text}\n\n{assistant_text}"
     followup = _result_interest_followup_text(
         user_message=state.get("user_message") or "",
         category=state.get("trailer_category"),
@@ -2185,7 +2358,10 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
     shown = list(state.get("already_shown_listing_urls") or [])
     shown.extend([str(x.get("url")) for x in listings if x.get("url")])
     events = list(state.get("tool_events") or [])
-    events.append({"tool": "pinecone_search", "result_count": len(listings)})
+    event = {"tool": "pinecone_search", "result_count": len(listings)}
+    if match_analysis:
+        event["match_analysis"] = match_analysis
+    events.append(event)
     return {
         **state,
         "assistant_text": assistant_text,

@@ -1,3 +1,5 @@
+import logging
+
 from src.chatbot.tools import pinecone_search as ps
 
 
@@ -126,3 +128,49 @@ def test_full_filter_contract_keeps_only_allowed_hard_filters():
             {"length_ft_num": {"$gte": 14.0}},
         ]
     }
+
+
+def test_pinecone_search_logs_exact_embedding_query_text(monkeypatch, caplog):
+    embedded = []
+
+    class _Index:
+        def query(self, **_kwargs):
+            return {
+                "matches": [
+                    {
+                        "score": 0.91,
+                        "metadata": {
+                            "title": "Sliding Gate Trailer",
+                            "category": "Livestock",
+                            "url": "https://example.test/sliding",
+                        },
+                    }
+                ]
+            }
+
+    def _embed(text):
+        embedded.append(text)
+        return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr(ps, "_embed", _embed)
+    monkeypatch.setattr(ps, "_pinecone_index", lambda: _Index())
+    monkeypatch.setattr(ps, "RERANK_ENABLED", False)
+
+    expected_query = "need sliding gates | Category: Livestock | filter_length_ft: 16"
+    with caplog.at_level(logging.INFO, logger=ps.logger.name):
+        result = ps.search_pinecone_listing_result(
+            category="Livestock",
+            slots={},
+            metadata_filters={"length_ft": "16"},
+            user_message="need sliding gates",
+            already_shown_urls=[],
+            top_k=1,
+            max_recommendations=1,
+        )
+
+    assert embedded == [expected_query]
+    assert result.query_text == expected_query
+    assert any(
+        "pinecone_embedding_query" in record.message and expected_query in record.message
+        for record in caplog.records
+    )

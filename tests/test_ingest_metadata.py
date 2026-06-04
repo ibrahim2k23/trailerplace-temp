@@ -41,6 +41,8 @@ def test_build_record_adds_numeric_payload_width_and_length_metadata():
     assert metadata["width_ft_num"] == 6.0
     assert metadata["payload_lbs_num"] == 5200.0
     assert metadata["gvwr_lbs_num"] == 7000.0
+    assert metadata["match_evidence_text"].startswith("Test Livestock Trailer")
+    assert len(metadata["match_evidence_text"]) <= 3000
 
 
 def test_vector_id_uses_url_hash_to_avoid_stock_number_collisions():
