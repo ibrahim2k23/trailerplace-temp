@@ -23,6 +23,22 @@ _BULLET_FIELDS: list[tuple[str, tuple[str, ...]]] = [
 
 logger = logging.getLogger(__name__)
 
+_SALES_SAFE_FALLBACK = (
+    "This is one of the stronger available options to compare, with the confirmed specs shown above."
+)
+_NEGATIVE_MATCH_LANGUAGE_RE = re.compile(
+    r"\b(?:partial match|close alternative based on|exceeds?|does not meet|doesn't meet|"
+    r"not meet|mismatch|too wide|too tall|too short|too long|shorter than|longer than|"
+    r"requirement(?:s)? of|required value)\b",
+    re.I,
+)
+_FULL_MATCH_LANGUAGE_RE = re.compile(
+    r"\b(?:fully|exact(?:ly)?|perfect(?:ly)?)\s+match(?:es|ed)?\b"
+    r"|\bmeet(?:s)?\s+(?:your\s+)?(?:specifications|requirements|needs)\b"
+    r"|\bperfect\s+for\s+(?:your\s+)?(?:specifications|requirements|needs|livestock needs|hauling needs)\b",
+    re.I,
+)
+
 
 def _why_it_fits_llm_enabled() -> bool:
     return (os.getenv("WHY_IT_FITS_LLM_ENABLED") or "1").strip().lower() not in {
@@ -108,6 +124,43 @@ def _ordered_bullets(
     return mandatory_lines + [c[2] for c in candidates[:remaining_capacity]]
 
 
+def _safe_sales_blurb(
+    line: str,
+    *,
+    listing: dict[str, Any],
+    fallback_line: str = _SALES_SAFE_FALLBACK,
+) -> str:
+    clean = re.sub(r"\s+", " ", str(line or "").strip())
+    if clean.startswith('"') and clean.endswith('"') and len(clean) > 1:
+        clean = clean[1:-1].strip()
+    if not clean:
+        return fallback_line
+    if _NEGATIVE_MATCH_LANGUAGE_RE.search(clean):
+        return fallback_line
+
+    validation = listing.get("match_validation") if isinstance(listing.get("match_validation"), dict) else {}
+    match_level = str((validation or {}).get("match_level") or "").strip().lower()
+    requested = [
+        str(x).strip().lower()
+        for x in ((validation or {}).get("requested_non_metadata_features") or [])
+        if str(x).strip()
+    ]
+    confirmed = [
+        str(x).strip().lower()
+        for x in ((validation or {}).get("confirmed_requirements") or [])
+        if str(x).strip()
+    ]
+    low_clean = clean.lower()
+    if match_level != "full" and _FULL_MATCH_LANGUAGE_RE.search(clean):
+        return fallback_line
+    for feature in requested:
+        if feature and feature in low_clean and not any(feature in c or c in feature for c in confirmed):
+            return fallback_line
+    if not clean.endswith((".", "!", "?")):
+        clean += "."
+    return clean
+
+
 def _why_it_fits_body(
     listing: dict[str, Any],
     *,
@@ -116,6 +169,20 @@ def _why_it_fits_body(
     user_message: str,
 ) -> str:
     """Return one natural, customer-facing fit note."""
+    validation = listing.get("match_validation") if isinstance(listing.get("match_validation"), dict) else {}
+    sales_blurb = _safe_sales_blurb(
+        str((validation or {}).get("sales_blurb") or ""),
+        listing=listing,
+        fallback_line="",
+    )
+    if sales_blurb:
+        return sales_blurb
+    match_level = str((validation or {}).get("match_level") or "").strip().lower()
+    missing = [
+        str(x).strip()
+        for x in ((validation or {}).get("missing_or_unconfirmed_requirements") or [])
+        if str(x).strip()
+    ]
     focus = "your needs"
     for key in (
         "haul_item",
@@ -143,6 +210,14 @@ def _why_it_fits_body(
 
     top_features = ", ".join(feature_bits[:3])
 
+    if match_level in {"alternative", "unknown"} and missing:
+        if top_features:
+            return f"This option is worth comparing for its confirmed strengths, including {top_features}."
+        return _SALES_SAFE_FALLBACK
+    if match_level == "partial":
+        if top_features:
+            return f"This option brings useful strengths to the table, including {top_features}."
+        return _SALES_SAFE_FALLBACK
     if category and top_features:
         return f"A strong {category.lower()} match for {focus}, with {top_features}."
     if category:
@@ -150,7 +225,7 @@ def _why_it_fits_body(
     if top_features:
         return f"A strong match for {focus}, with {top_features}."
     if (user_message or "").strip():
-        return "A solid fit based on your request and the specs available on this listing."
+        return "A solid option based on your request and the specs available on this listing."
     return "A strong option based on your current search filters."
 
 
@@ -189,6 +264,7 @@ def _why_it_fits_llm_line(
         "gvwr": listing.get("gvwr"),
         "payload_capacity": listing.get("payload_capacity"),
         "color": listing.get("color"),
+        "match_validation": listing.get("match_validation") if isinstance(listing.get("match_validation"), dict) else {},
     }
 
     try:
@@ -196,11 +272,19 @@ def _why_it_fits_llm_line(
             [
                 SystemMessage(
                     content=(
-                        "Write exactly one short customer-facing sentence for Why-it-fits. "
-                        "Use specific specs from context when available. "
-                        "Tone: helpful sales advisor, natural, not robotic. "
-                        "Avoid repeating this is in the X category. "
-                        "No markdown, no quotes, no emojis, max 26 words."
+                        """Write exactly one short customer-facing sentence for Why-it-fits.
+Use only supplied listing context, confirmed_requirements, and match_validation. Do not invent specs, feature matches, prices, availability, discounts, condition, stock status, links, or reasons.
+Tone: positive trailer sales advisor, natural, commercially smart, and not robotic. Sell the trailer honestly by highlighting confirmed strengths only.
+If match_validation.match_level is full, you may confidently position the trailer as a strong fit using confirmed specs and features.
+If match_validation.match_level is partial or alternative, do not claim or imply that the trailer fully matches the user's request. Instead, highlight confirmed strengths, practical value, trailer type, build quality, brand, condition, use case, or confirmed features that make it worth comparing.
+Do not mention requested non-metadata features unless they appear in confirmed_requirements.
+Do not mention length, width, payload capacity, or GVWR unless that specific value is explicitly confirmed as matching the user's requested value or requested range.
+If length, width, payload capacity, or GVWR is different from the user's request, outside the requested range, missing, unclear, approximate, or not explicitly confirmed as matching, do not mention that field at all.
+Never use negative or mismatch language such as "partial match", "close alternative", "based on", "exceeds", "does not meet", "mismatch", "missing", "unclear", "too wide", "too tall", "shorter than", "longer than", "outside", "different from", or "requirement".
+Do not say it meets the user's needs, request, specifications, or criteria unless match_validation.match_level is full.
+Avoid repeating "this is in the X category" or restating generic category labels unless it adds meaningful customer value.
+No markdown, no bullets, no quotes, no emojis, max 26 words.
+"""
                     )
                 ),
                 HumanMessage(content=str(context)),
@@ -212,9 +296,7 @@ def _why_it_fits_llm_line(
             return fallback_line
         if line.startswith('"') and line.endswith('"') and len(line) > 1:
             line = line[1:-1].strip()
-        if not line.endswith((".", "!", "?")):
-            line += "."
-        return line
+        return _safe_sales_blurb(line, listing=listing, fallback_line=fallback_line)
     except Exception:
         logger.exception("Why-it-fits LLM generation failed; falling back to deterministic line")
         return fallback_line

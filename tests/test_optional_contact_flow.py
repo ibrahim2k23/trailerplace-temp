@@ -793,6 +793,54 @@ def test_recommendation_results_skip_followup_when_llm_interest_prompt_unavailab
     assert "stand out to you" not in out["assistant_text"]
 
 
+def test_pinecone_search_uses_active_request_after_short_qualification(monkeypatch):
+    state = {
+        "trailer_category": "Livestock",
+        "slots_collected": {"trailer_length_ft": "12"},
+        "metadata_filters_collected": {"length_ft": "12"},
+        "user_message": "12",
+        "active_search_request_text": (
+            "I am looking for a livestock trailer with offroad wheels and swinging gates"
+            " | Current requirements: length 12"
+        ),
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+    captured = {}
+
+    def _search(**kwargs):
+        captured["search_user_message"] = kwargs["user_message"]
+        return graph.PineconeListingSearchResult(
+            listings=[{"title": "Trailer A", "url": "https://example.test/a", "length": "12 ft"}],
+            query_text=kwargs["user_message"],
+            metadata_filter={"category": {"$eq": "Livestock"}},
+        )
+
+    def _framing(**kwargs):
+        captured["framing_user_message"] = kwargs["user_message"]
+        captured["latest_user_message"] = kwargs["latest_user_message"]
+        return "", {}
+
+    def _format(_listings, **kwargs):
+        captured["format_user_message"] = kwargs["user_message"]
+        return "formatted cards"
+
+    monkeypatch.setattr(graph, "search_pinecone_listing_result", _search)
+    monkeypatch.setattr(graph, "_pinecone_match_framing_text", _framing)
+    monkeypatch.setattr(graph, "format_listing_results", _format)
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+
+    out = graph._pinecone_search_node(state)
+
+    assert out["assistant_text"] == "formatted cards"
+    for key in ("search_user_message", "framing_user_message", "format_user_message"):
+        assert "offroad wheels" in captured[key]
+        assert "swinging gates" in captured[key]
+        assert "length 12" in captured[key]
+        assert captured[key] != "12"
+    assert captured["latest_user_message"] == "12"
+
+
 def test_pinecone_results_prepend_llm_match_framing_and_hide_evidence(monkeypatch):
     state = {
         "trailer_category": "Livestock",
@@ -921,6 +969,481 @@ def test_pinecone_match_framing_disabled_uses_neutral_fallback(monkeypatch):
     assert "Trailer #1: [Utility Trailer](https://example.test/utility)" in out["assistant_text"]
 
 
+class _PineconeValidationLLM:
+    def __init__(self, decision: graph.PineconeMatchFramingDecision, captured: dict | None = None):
+        self.decision = decision
+        self.captured = captured
+
+    def invoke(self, messages):
+        if self.captured is not None:
+            self.captured["system"] = messages[0].content
+            self.captured["human"] = messages[1].content
+        return self.decision
+
+
+class _PineconeIntroLLM:
+    def __init__(self, intro_text: str, captured: dict | None = None):
+        self.decision = graph.PineconeSalesIntroDecision(intro_text=intro_text)
+        self.captured = captured
+
+    def invoke(self, messages):
+        if self.captured is not None:
+            self.captured["intro_system"] = messages[0].content
+            self.captured["intro_human"] = messages[1].content
+        return self.decision
+
+
+def test_pinecone_validation_reorders_full_match_before_alternatives(monkeypatch):
+    state = {
+        "trailer_category": "Livestock",
+        "slots_collected": {"trailer_length_ft": "12"},
+        "metadata_filters_collected": {"length_ft": "12"},
+        "user_message": "I need a 12 ft livestock trailer with a swing slide gate",
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+    monkeypatch.setattr(
+        graph,
+        "search_pinecone_listing_result",
+        lambda **_kwargs: graph.PineconeListingSearchResult(
+            listings=[
+                {
+                    "title": "Close Livestock Trailer",
+                    "url": "https://example.test/alt",
+                    "category": "Livestock",
+                    "length": "16 ft",
+                    "match_evidence_text": "Livestock trailer with rear gate.",
+                },
+                {
+                    "title": "12 Ft Swing Slide Livestock Trailer",
+                    "url": "https://example.test/full",
+                    "category": "Livestock",
+                    "length": "12 ft",
+                    "match_evidence_text": "12 ft livestock trailer with swing slide gate.",
+                },
+            ],
+            query_text="I need a 12 ft livestock trailer with a swing slide gate | Category: Livestock",
+            metadata_filter={"category": {"$eq": "Livestock"}},
+            rerank_debug={"applied": True, "required_length_ft": 12.0},
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="I found 1 option that fully matches your swing slide gate request, followed by another strong livestock option to compare.",
+                overall_match_level="mixed",
+                requested_non_metadata_features=["swing slide gate"],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="alternative",
+                        confirmed_requirements=["livestock"],
+                        missing_or_unconfirmed_requirements=["12 ft", "swing slide gate"],
+                        sales_blurb="This livestock trailer is a strong option to compare, with practical cattle-hauling utility and confirmed specs above.",
+                    ),
+                    graph.PineconeListingMatchDecision(
+                        position=2,
+                        match_level="full",
+                        confirmed_requirements=["12 ft", "livestock", "swing slide gate"],
+                        sales_blurb="This one lines up especially well, with the swing slide gate clearly shown in the listing details.",
+                    ),
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM(
+            "I found 1 option that fully matches your swing slide gate request, followed by another strong livestock option to compare."
+        ),
+    )
+
+    out = graph._pinecone_search_node(state)
+
+    assert out["assistant_text"].startswith("I found 1 option that fully matches")
+    assert out["assistant_text"].index("Trailer #1: [12 Ft Swing Slide Livestock Trailer]") < out["assistant_text"].index(
+        "Trailer #2: [Close Livestock Trailer]"
+    )
+    assert out["tool_events"][-1]["match_analysis"]["full_match_count"] == 1
+    assert out["tool_events"][-1]["match_analysis"]["alternative_count"] == 1
+    assert out["last_listings"][0]["url"] == "https://example.test/full"
+    assert "match_evidence_text" not in out["last_listings"][0]
+
+
+def test_pinecone_validation_prompt_requires_strict_feature_concept_matching(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="The exact sliding-gate setup is not clearly shown, so I selected the strongest livestock option to compare.",
+                overall_match_level="no_exact",
+                requested_non_metadata_features=["sliding gates"],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="alternative",
+                        confirmed_requirements=["livestock", "butterfly gates"],
+                        missing_or_unconfirmed_requirements=["sliding gates"],
+                    )
+                ],
+            ),
+            captured,
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM(
+            "The exact sliding-gate setup is not clearly shown, so I selected the strongest livestock option to compare."
+        ),
+    )
+    result = graph.PineconeListingSearchResult(
+        listings=[
+            {
+                "title": "Livestock Trailer W/ Butterfly Gates",
+                "url": "https://example.test/butterfly",
+                "category": "Livestock",
+                "match_evidence_text": "Livestock trailer with butterfly gates.",
+            }
+        ],
+        query_text="livestock trailer with sliding gates",
+        metadata_filter={"category": {"$eq": "Livestock"}},
+    )
+
+    graph._pinecone_match_framing_text(
+        user_message="livestock trailer with sliding gates",
+        category="Livestock",
+        slots={},
+        metadata_filters={},
+        search_result=result,
+    )
+
+    system_prompt = captured["system"].lower()
+    assert "match requested non-metadata features by exact feature concept" in system_prompt
+    assert "length, width, payload capacity, and gvwr alone do not make a full match" in system_prompt
+    assert "butterfly gate is not the same requested feature as sliding gate" in system_prompt
+    assert "missing_or_unconfirmed_requirements must include requested features" in system_prompt
+
+
+def test_pinecone_validation_no_exact_does_not_claim_requested_feature(monkeypatch):
+    state = {
+        "trailer_category": "Livestock",
+        "slots_collected": {"trailer_length_ft": "12"},
+        "metadata_filters_collected": {"length_ft": "12"},
+        "user_message": "I need a 12 ft livestock trailer with a swing slide gate",
+        "already_shown_listing_urls": [],
+        "tool_events": [],
+    }
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("WHY_IT_FITS_LLM_ENABLED", "0")
+    monkeypatch.setattr(graph, "_result_interest_followup_text", lambda **_kwargs: "")
+    monkeypatch.setattr(
+        graph,
+        "search_pinecone_listing_result",
+        lambda **_kwargs: graph.PineconeListingSearchResult(
+            listings=[
+                {
+                    "title": "12 Ft Livestock Trailer",
+                    "url": "https://example.test/alt",
+                    "category": "Livestock",
+                    "length": "12 ft",
+                    "match_evidence_text": "12 ft livestock trailer with rear gate.",
+                }
+            ],
+            query_text="I need a 12 ft livestock trailer with a swing slide gate | Category: Livestock",
+            metadata_filter={"category": {"$eq": "Livestock"}},
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="The exact swing slide gate combination is not clearly shown right now, so I selected the strongest livestock option worth comparing.",
+                overall_match_level="no_exact",
+                requested_non_metadata_features=["swing slide gate"],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="alternative",
+                        confirmed_requirements=["12 ft", "livestock"],
+                        missing_or_unconfirmed_requirements=["swing slide gate"],
+                        sales_blurb="This livestock trailer is a strong option to compare, with practical hauling utility and confirmed specs above.",
+                    )
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM(
+            "The exact swing slide gate combination is not clearly shown right now, so I selected the strongest livestock option worth comparing."
+        ),
+    )
+
+    out = graph._pinecone_search_node(state)
+
+    assert out["assistant_text"].startswith("The exact swing slide gate combination is not clearly shown")
+    card_text = out["assistant_text"].split("Trailer #1:", 1)[1]
+    assert "features a convenient swing slide gate" not in card_text.lower()
+    assert "strong option to compare" in card_text
+    assert "partial match" not in card_text.lower()
+    assert "close alternative" not in card_text.lower()
+    assert out["tool_events"][-1]["match_analysis"]["overall_match_level"] == "no_exact"
+
+
+def test_pinecone_validation_blocks_full_match_intro_when_no_full_matches(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="All of these fully match your swing slide gate request.",
+                requested_non_metadata_features=["swing slide gate"],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="alternative",
+                        confirmed_requirements=["livestock"],
+                        missing_or_unconfirmed_requirements=["swing slide gate"],
+                    )
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM("All of these fully match your swing slide gate request."),
+    )
+    result = graph.PineconeListingSearchResult(
+        listings=[
+            {
+                "title": "Livestock Trailer",
+                "url": "https://example.test/alt",
+                "category": "Livestock",
+                "match_evidence_text": "Livestock trailer with rear gate.",
+            }
+        ],
+        query_text="livestock trailer with swing slide gate",
+        metadata_filter={"category": {"$eq": "Livestock"}},
+    )
+
+    intro, analysis = graph._pinecone_match_framing_text(
+        user_message="livestock trailer with swing slide gate",
+        category="Livestock",
+        slots={},
+        metadata_filters={},
+        search_result=result,
+    )
+
+    assert intro == "Here are the strongest available options I found based on your search."
+    assert analysis["source"] == "neutral_fallback_invalid_match_claim"
+    assert analysis["full_match_count"] == 0
+
+
+def test_pinecone_validation_blocks_strong_match_intro_when_no_full_matches(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="I found a few strong matches for your requested combination and included additional relevant trailers worth comparing.",
+                requested_non_metadata_features=["offroad wheels", "sliding gates"],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="alternative",
+                        confirmed_requirements=["12 ft", "livestock"],
+                        missing_or_unconfirmed_requirements=["offroad wheels", "sliding gates"],
+                    )
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM(
+            "I found a few strong matches for your requested combination and included additional relevant trailers worth comparing."
+        ),
+    )
+    result = graph.PineconeListingSearchResult(
+        listings=[
+            {
+                "title": "12 Ft Livestock Trailer",
+                "url": "https://example.test/alt",
+                "category": "Livestock",
+                "length": "12 ft",
+                "match_evidence_text": "12 ft livestock trailer with rear gate.",
+            }
+        ],
+        query_text="12 ft livestock trailer with offroad wheels and sliding gates",
+        metadata_filter={"category": {"$eq": "Livestock"}},
+    )
+
+    intro, analysis = graph._pinecone_match_framing_text(
+        user_message="12 ft livestock trailer with offroad wheels and sliding gates",
+        category="Livestock",
+        slots={"trailer_length_ft": "12"},
+        metadata_filters={"length_ft": "12"},
+        search_result=result,
+    )
+
+    assert intro == "Here are the strongest available options I found based on your search."
+    assert analysis["source"] == "neutral_fallback_invalid_match_claim"
+    assert analysis["full_match_count"] == 0
+
+
+def test_pinecone_validation_demotes_full_when_requested_features_not_confirmed(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="An exact match is not currently shown, but I selected the strongest available livestock option to compare.",
+                requested_non_metadata_features=["offroad wheels", "sliding gates"],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="full",
+                        confirmed_requirements=["12 ft", "livestock"],
+                        missing_or_unconfirmed_requirements=[],
+                    )
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM(
+            "An exact match is not currently shown, but I selected the strongest available livestock option to compare."
+        ),
+    )
+    result = graph.PineconeListingSearchResult(
+        listings=[
+            {
+                "title": "12 Ft Livestock Trailer",
+                "url": "https://example.test/alt",
+                "category": "Livestock",
+                "length": "12 ft",
+                "match_evidence_text": "12 ft livestock trailer with rear gate.",
+            }
+        ],
+        query_text="12 ft livestock trailer with offroad wheels and sliding gates",
+        metadata_filter={"category": {"$eq": "Livestock"}},
+    )
+
+    _intro, analysis = graph._pinecone_match_framing_text(
+        user_message="12 ft livestock trailer with offroad wheels and sliding gates",
+        category="Livestock",
+        slots={"trailer_length_ft": "12"},
+        metadata_filters={"length_ft": "12"},
+        search_result=result,
+    )
+
+    listing_match = analysis["per_listing_match"][0]
+    assert analysis["full_match_count"] == 0
+    assert analysis["overall_match_level"] == "partial_only"
+    assert listing_match["match_level"] == "partial"
+    assert "offroad wheels" in listing_match["missing_or_unconfirmed_requirements"]
+    assert "sliding gates" in listing_match["missing_or_unconfirmed_requirements"]
+
+
+def test_pinecone_validation_blocks_negative_structured_mismatch_intro(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="These are useful options, but each exceeds your 12 ft requirement.",
+                requested_non_metadata_features=[],
+                per_listing_match=[
+                    graph.PineconeListingMatchDecision(
+                        position=1,
+                        match_level="alternative",
+                        confirmed_requirements=["livestock"],
+                        missing_or_unconfirmed_requirements=["12 ft"],
+                    )
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_sales_intro_llm",
+        lambda: _PineconeIntroLLM("These are useful options, but each exceeds your 12 ft requirement."),
+    )
+    result = graph.PineconeListingSearchResult(
+        listings=[
+            {
+                "title": "Livestock Trailer",
+                "url": "https://example.test/alt",
+                "category": "Livestock",
+                "length": "16 ft",
+                "match_evidence_text": "Livestock trailer with rear gate.",
+            }
+        ],
+        query_text="12 ft livestock trailer",
+        metadata_filter={"category": {"$eq": "Livestock"}},
+    )
+
+    intro, analysis = graph._pinecone_match_framing_text(
+        user_message="12 ft livestock trailer",
+        category="Livestock",
+        slots={"trailer_length_ft": "12"},
+        metadata_filters={"length_ft": "12"},
+        search_result=result,
+    )
+
+    assert intro == "Here are the strongest available options I found based on your search."
+    assert analysis["source"] == "neutral_fallback_invalid_match_claim"
+
+
+def test_result_interest_followup_rejects_meet_needs_for_alternatives(monkeypatch):
+    class _BadFollowupLLM:
+        def invoke(self, _messages):
+            return type(
+                "_Response",
+                (),
+                {"content": "Does any of these trailers meet your needs?"},
+            )()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(graph, "_result_interest_followup_llm", lambda: _BadFollowupLLM())
+
+    text = graph._result_interest_followup_text(
+        user_message="I need a 12 ft livestock trailer with a swing slide gate",
+        category="Livestock",
+        slots={"trailer_length_ft": "12"},
+        listings=[
+            {
+                "title": "Livestock Trailer",
+                "url": "https://example.test/alt",
+                "length": "16 ft",
+                "match_validation": {"match_level": "alternative"},
+            }
+        ],
+    )
+
+    assert text == ""
+
+
 def test_metadata_only_followups_route_to_graph_with_search_context():
     base_session = service._new_session("metadata-route")
     base_session["metadata_filters_collected"] = {"length_ft": "12"}
@@ -946,6 +1469,45 @@ def test_business_overview_questions_stay_in_smalltalk_path():
         "what trailers do you carry?",
     ):
         assert service._should_route_to_graph(session, message) is False
+
+
+def test_catalogue_overview_interrupts_active_recommendation_qna(monkeypatch):
+    session = service._new_session("overview-during-qna")
+    session["trailer_category"] = None
+    session["awaiting_slot"] = "generic_category_choice"
+    session["pending_questions"] = [{"slot": "trailer_length_ft", "question": "What trailer length would you prefer?"}]
+    session["messages"] = [
+        {"role": "user", "content": "I want to know what trailers do you guys offer?"},
+        {"role": "assistant", "content": "What type of trailer are you looking for?"},
+        {"role": "user", "content": "what are the options?"},
+    ]
+
+    class _OverviewClassifier:
+        def invoke(self, messages):
+            assert "active qualification question" in messages[0].content
+            return service.CatalogueOverviewDecision(
+                is_catalogue_overview=True,
+                reason="User asks for broad trailer options, not a specific recommendation.",
+            )
+
+    monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
+
+    assert service._should_route_to_graph(session, "what are the options?") is False
+
+
+def test_specific_recommendation_request_still_routes_with_catalogue_classifier(monkeypatch):
+    session = service._new_session("specific-search-route")
+
+    class _OverviewClassifier:
+        def invoke(self, _messages):
+            return service.CatalogueOverviewDecision(
+                is_catalogue_overview=False,
+                reason="User gives a specific trailer shopping request.",
+            )
+
+    monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
+
+    assert service._should_route_to_graph(session, "show me 12 ft livestock trailers") is True
 
 
 def test_business_overview_smalltalk_prompt_guides_llm(monkeypatch):

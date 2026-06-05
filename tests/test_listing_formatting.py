@@ -32,3 +32,138 @@ def test_listing_results_use_plain_visible_numbers_without_fixed_interest_prompt
     assert "- Category: Utility" in text
     assert "- Category: Equipment" in text
     assert not text.endswith("Are you interested in any of the trailers above?")
+
+
+def test_why_it_fits_llm_cannot_claim_unconfirmed_requested_feature(monkeypatch):
+    class _BadWhyLLM:
+        def invoke(self, _messages):
+            return type(
+                "_Response",
+                (),
+                {"content": "This trailer features a convenient swing slide gate for livestock loading."},
+            )()
+
+    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: True)
+    monkeypatch.setattr(formatting, "_why_it_fits_llm", lambda: _BadWhyLLM())
+    listings = [
+        {
+            "title": "12 Ft Livestock Trailer",
+            "url": "https://example.test/alt",
+            "category": "Livestock",
+            "length": "12 ft",
+            "match_validation": {
+                "match_level": "alternative",
+                "confirmed_requirements": ["12 ft", "livestock"],
+                "missing_or_unconfirmed_requirements": ["swing slide gate"],
+                "requested_non_metadata_features": ["swing slide gate"],
+            },
+        }
+    ]
+
+    text = formatting.format_listing_results(
+        listings,
+        category="Livestock",
+        slots={},
+        user_message="I need a 12 ft livestock trailer with a swing slide gate",
+    )
+
+    assert "features a convenient swing slide gate" not in text.lower()
+    assert "worth comparing for its confirmed strengths" in text
+    assert "partial match" not in text.lower()
+    assert "close alternative" not in text.lower()
+
+
+def test_why_it_fits_prefers_safe_sales_blurb_from_match_validation(monkeypatch):
+    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: False)
+    listings = [
+        {
+            "title": "Livestock Trailer",
+            "url": "https://example.test/alt",
+            "category": "Livestock",
+            "length": "16 ft",
+            "match_validation": {
+                "match_level": "alternative",
+                "missing_or_unconfirmed_requirements": ["swing slide gate"],
+                "sales_blurb": "This livestock trailer is a strong option to compare, with practical cattle-hauling utility and confirmed specs above.",
+            },
+        }
+    ]
+
+    text = formatting.format_listing_results(
+        listings,
+        category="Livestock",
+        slots={},
+        user_message="I need a 12 ft livestock trailer with a swing slide gate",
+    )
+
+    assert "strong option to compare" in text
+    assert "stronger available options to compare" not in text
+
+
+def test_why_it_fits_rejects_negative_structured_mismatch_language(monkeypatch):
+    class _BadWhyLLM:
+        def invoke(self, _messages):
+            return type(
+                "_Response",
+                (),
+                {"content": "This trailer is useful, but it exceeds your 12 ft requirement."},
+            )()
+
+    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: True)
+    monkeypatch.setattr(formatting, "_why_it_fits_llm", lambda: _BadWhyLLM())
+    listings = [
+        {
+            "title": "16 Ft Livestock Trailer",
+            "url": "https://example.test/alt",
+            "category": "Livestock",
+            "length": "16 ft",
+            "match_validation": {
+                "match_level": "alternative",
+                "missing_or_unconfirmed_requirements": ["12 ft"],
+            },
+        }
+    ]
+
+    text = formatting.format_listing_results(
+        listings,
+        category="Livestock",
+        slots={},
+        user_message="I need a 12 ft livestock trailer",
+    )
+
+    assert "exceeds your 12 ft requirement" not in text.lower()
+    assert "worth comparing for its confirmed strengths" in text
+
+
+def test_why_it_fits_rejects_perfect_for_needs_on_non_full_listing(monkeypatch):
+    class _BadWhyLLM:
+        def invoke(self, _messages):
+            return type(
+                "_Response",
+                (),
+                {"content": "This livestock trailer is perfect for your livestock needs."},
+            )()
+
+    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: True)
+    monkeypatch.setattr(formatting, "_why_it_fits_llm", lambda: _BadWhyLLM())
+    listings = [
+        {
+            "title": "Livestock Trailer",
+            "url": "https://example.test/alt",
+            "category": "Livestock",
+            "match_validation": {
+                "match_level": "alternative",
+                "missing_or_unconfirmed_requirements": ["sliding gates"],
+            },
+        }
+    ]
+
+    text = formatting.format_listing_results(
+        listings,
+        category="Livestock",
+        slots={},
+        user_message="I need a livestock trailer with sliding gates",
+    )
+
+    assert "perfect for your livestock needs" not in text.lower()
+    assert "stronger available options to compare" in text

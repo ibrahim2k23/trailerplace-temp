@@ -108,12 +108,29 @@ class FilterExtractionDecision(BaseModel):
     slot_updates: dict[str, Any] = Field(default_factory=dict)
 
 
+class PineconeListingMatchDecision(BaseModel):
+    position: int = 0
+    match_level: Literal["full", "partial", "alternative", "unknown"] = "unknown"
+    confirmed_requirements: list[str] = Field(default_factory=list)
+    missing_or_unconfirmed_requirements: list[str] = Field(default_factory=list)
+    customer_label: str = ""
+    short_reason: str = ""
+    sales_blurb: str = ""
+
+
 class PineconeMatchFramingDecision(BaseModel):
     intro_text: str = ""
     overall_match_level: Literal["full", "mixed", "partial_only", "no_exact", "unknown"] = "unknown"
     full_match_count: int = 0
     partial_match_count: int = 0
-    listing_match_labels: list[str] = Field(default_factory=list)
+    alternative_count: int = 0
+    requested_non_metadata_features: list[str] = Field(default_factory=list)
+    per_listing_match: list[PineconeListingMatchDecision] = Field(default_factory=list)
+    reason: str = ""
+
+
+class PineconeSalesIntroDecision(BaseModel):
+    intro_text: str = ""
     reason: str = ""
 
 
@@ -168,14 +185,29 @@ def _pinecone_match_framing_llm_enabled() -> bool:
 
 
 @lru_cache(maxsize=1)
-def _pinecone_match_framing_llm():
+def _pinecone_match_audit_llm():
     model = (
-        os.getenv("PINECONE_MATCH_FRAMING_MODEL")
+        os.getenv("PINECONE_MATCH_AUDIT_MODEL")
+        or os.getenv("PINECONE_MATCH_FRAMING_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        PineconeMatchFramingDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _pinecone_sales_intro_llm():
+    model = (
+        os.getenv("PINECONE_SALES_INTRO_MODEL")
+        or os.getenv("PINECONE_MATCH_FRAMING_MODEL")
         or os.getenv("OPENAI_MODEL")
         or "gpt-4o-mini"
     ).strip()
     return ChatOpenAI(model=model, temperature=0.25).with_structured_output(
-        PineconeMatchFramingDecision,
+        PineconeSalesIntroDecision,
         method="function_calling",
     )
 
@@ -194,6 +226,7 @@ _PINECONE_INTERNAL_LISTING_KEYS = {"match_evidence_text"}
 _PINECONE_MATCH_FRAMING_FALLBACK = (
     "Here are the strongest available options I found based on your search."
 )
+_PINECONE_MATCH_LEVEL_ORDER = {"full": 0, "partial": 1, "alternative": 2, "unknown": 3}
 
 
 def _public_listing(listing: dict[str, Any]) -> dict[str, Any]:
@@ -204,29 +237,439 @@ def _public_listing(listing: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _pinecone_match_framing_text(
+def _safe_match_level(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in _PINECONE_MATCH_LEVEL_ORDER:
+        return normalized
+    if normalized == "no_exact":
+        return "alternative"
+    return "unknown"
+
+
+def _normalize_per_listing_matches(data: dict[str, Any], listing_count: int) -> list[dict[str, Any]]:
+    raw_matches = data.get("per_listing_match") or []
+    normalized: list[dict[str, Any]] = []
+    seen_positions: set[int] = set()
+    if isinstance(raw_matches, list):
+        for raw in raw_matches:
+            item = raw if isinstance(raw, dict) else _model_dump(raw) if isinstance(raw, BaseModel) else {}
+            try:
+                position = int(item.get("position") or 0)
+            except Exception:
+                position = 0
+            if position < 1 or position > listing_count or position in seen_positions:
+                continue
+            level = _safe_match_level(item.get("match_level"))
+            seen_positions.add(position)
+            normalized.append(
+                {
+                    "position": position,
+                    "match_level": level,
+                    "confirmed_requirements": [
+                        str(x).strip()
+                        for x in (item.get("confirmed_requirements") or [])
+                        if str(x).strip()
+                    ],
+                    "missing_or_unconfirmed_requirements": [
+                        str(x).strip()
+                        for x in (item.get("missing_or_unconfirmed_requirements") or [])
+                        if str(x).strip()
+                    ],
+                    "customer_label": str(item.get("customer_label") or "").strip(),
+                    "short_reason": str(item.get("short_reason") or "").strip(),
+                    "sales_blurb": str(item.get("sales_blurb") or "").strip(),
+                }
+            )
+    return normalized
+
+
+def _normalized_requirement_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _requirement_confirms_feature(confirmed_requirement: Any, requested_feature: Any) -> bool:
+    confirmed = _normalized_requirement_text(confirmed_requirement)
+    requested = _normalized_requirement_text(requested_feature)
+    if not confirmed or not requested:
+        return False
+    return requested in confirmed or confirmed in requested
+
+
+def _enforce_requested_feature_consistency(
+    per_listing_match: list[dict[str, Any]],
+    requested_features: list[Any],
+) -> list[dict[str, Any]]:
+    clean_requested = [
+        str(feature).strip()
+        for feature in requested_features
+        if str(feature or "").strip()
+    ]
+    if not clean_requested:
+        return per_listing_match
+
+    enforced: list[dict[str, Any]] = []
+    for item in per_listing_match:
+        updated = dict(item)
+        if _safe_match_level(updated.get("match_level")) != "full":
+            enforced.append(updated)
+            continue
+
+        confirmed = updated.get("confirmed_requirements") or []
+        missing_features = [
+            feature
+            for feature in clean_requested
+            if not any(_requirement_confirms_feature(req, feature) for req in confirmed)
+        ]
+        if missing_features:
+            existing_missing = [
+                str(x).strip()
+                for x in (updated.get("missing_or_unconfirmed_requirements") or [])
+                if str(x).strip()
+            ]
+            for feature in missing_features:
+                if not any(_requirement_confirms_feature(existing, feature) for existing in existing_missing):
+                    existing_missing.append(feature)
+            updated["missing_or_unconfirmed_requirements"] = existing_missing
+            updated["match_level"] = "partial" if confirmed else "alternative"
+            if not updated.get("customer_label"):
+                updated["customer_label"] = "Strong available option"
+        enforced.append(updated)
+    return enforced
+
+
+def _fallback_match_analysis(*, source: str, listing_count: int = 0) -> dict[str, Any]:
+    return {
+        "overall_match_level": "unknown",
+        "full_match_count": 0,
+        "partial_match_count": 0,
+        "alternative_count": 0,
+        "requested_non_metadata_features": [],
+        "per_listing_match": [],
+        "source": source,
+        "validated_listing_count": listing_count,
+    }
+
+
+def _log_pinecone_match_audit(
     *,
-    user_message: str,
-    category: str | None,
+    match_analysis: dict[str, Any],
+    facts: list[dict[str, Any]],
+    query_text: str,
+) -> None:
+    logger.info(
+        "pinecone_match_audit_summary | source=%r | overall_match_level=%r | full_match_count=%s | "
+        "partial_match_count=%s | alternative_count=%s | requested_non_metadata_features=%s | query_text=%r",
+        match_analysis.get("source") or "audit",
+        match_analysis.get("overall_match_level"),
+        match_analysis.get("full_match_count"),
+        match_analysis.get("partial_match_count"),
+        match_analysis.get("alternative_count"),
+        _safe_json(match_analysis.get("requested_non_metadata_features") or []),
+        query_text,
+    )
+    by_position = {
+        int(item.get("position") or 0): item
+        for item in (match_analysis.get("per_listing_match") or [])
+        if str(item.get("position") or "").isdigit()
+    }
+    for fact in facts:
+        position = int(fact.get("position") or 0)
+        item = by_position.get(position) or {}
+        logger.info(
+            "pinecone_match_audit_listing | position=%s | match_level=%r | title=%r | url=%r | "
+            "confirmed_requirements=%s | missing_or_unconfirmed_requirements=%s | customer_label=%r | short_reason=%r",
+            position,
+            item.get("match_level") or "unknown",
+            fact.get("title"),
+            fact.get("url"),
+            _safe_json(item.get("confirmed_requirements") or []),
+            _safe_json(item.get("missing_or_unconfirmed_requirements") or []),
+            item.get("customer_label") or "",
+            item.get("short_reason") or "",
+        )
+
+
+def _log_pinecone_intro_fallback(
+    *,
+    source: str,
+    reason: str,
+    intro_candidate: str = "",
+    match_analysis: dict[str, Any] | None = None,
+) -> None:
+    data = match_analysis or {}
+    logger.info(
+        "pinecone_match_intro_fallback | source=%r | reason=%r | overall_match_level=%r | "
+        "full_match_count=%s | partial_match_count=%s | alternative_count=%s | intro_candidate=%r",
+        source,
+        reason,
+        data.get("overall_match_level"),
+        data.get("full_match_count"),
+        data.get("partial_match_count"),
+        data.get("alternative_count"),
+        intro_candidate,
+    )
+
+
+def _match_count_summary(per_listing_match: list[dict[str, Any]]) -> tuple[int, int, int]:
+    full = sum(1 for item in per_listing_match if item.get("match_level") == "full")
+    partial = sum(1 for item in per_listing_match if item.get("match_level") == "partial")
+    alternative = sum(1 for item in per_listing_match if item.get("match_level") == "alternative")
+    return full, partial, alternative
+
+
+def _invalid_pinecone_intro(
+    *,
+    text: str,
+    data: dict[str, Any],
+    listing_count: int,
+) -> bool:
+    lower = text.lower()
+    full_count = int(data.get("full_match_count") or 0)
+    per_listing_match = data.get("per_listing_match") or []
+    all_full = listing_count > 0 and full_count >= listing_count
+    if full_count <= 0 and re.search(r"\b(?:fully|exact(?:ly)?|perfect(?:ly)?)\s+match", lower):
+        return True
+    if full_count <= 0 and re.search(
+        r"\b(?:strong|clear|close|closest|best|top|solid)\s+match(?:es)?\b"
+        r"|\bclosely\s+match(?:es)?\b"
+        r"|\bbest-fitting\b",
+        lower,
+    ):
+        return True
+    if not all_full and re.search(r"\b(?:all|every|each)\b.{0,40}\b(?:fully|exact(?:ly)?)\s+match", lower):
+        return True
+    if not all_full and re.search(r"\bmeet(?:s)?\s+(?:your\s+)?(?:specifications|requirements|needs)\b", lower):
+        return True
+    if re.search(
+        r"\b(?:exceeds?|does not meet|doesn't meet|not meet|mismatch|too wide|too tall|too short|"
+        r"too long|shorter than|longer than|requirement(?:s)? of|required value)\b",
+        lower,
+    ):
+        return True
+    requested_features = [
+        str(x).strip().lower()
+        for x in (data.get("requested_non_metadata_features") or [])
+        if str(x).strip()
+    ]
+    if requested_features:
+        confirmed_features = {
+            str(req).strip().lower()
+            for item in per_listing_match
+            if item.get("match_level") == "full"
+            for req in (item.get("confirmed_requirements") or [])
+        }
+        for feature in requested_features:
+            feature_claim = re.search(
+                rf"\b(?:features?|includes?|has|have|with)\b.{{0,50}}{re.escape(feature)}"
+                rf"|{re.escape(feature)}.{{0,35}}\b(?:option|match|available|included)\b",
+                lower,
+                re.I,
+            )
+            if feature_claim and not any(feature in confirmed or confirmed in feature for confirmed in confirmed_features):
+                return True
+    return False
+
+
+def _apply_pinecone_match_validation(
+    listings: list[dict[str, Any]],
+    match_analysis: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not listings or not match_analysis:
+        return listings
+    by_position = {
+        int(item.get("position")): item
+        for item in (match_analysis.get("per_listing_match") or [])
+        if str(item.get("position") or "").isdigit()
+    }
+    enriched: list[tuple[int, int, dict[str, Any]]] = []
+    for original_idx, listing in enumerate(listings, 1):
+        next_listing = dict(listing)
+        validation = by_position.get(original_idx)
+        if validation:
+            validation = {**validation, "requested_non_metadata_features": match_analysis.get("requested_non_metadata_features") or []}
+            next_listing["match_validation"] = validation
+            order = _PINECONE_MATCH_LEVEL_ORDER.get(_safe_match_level(validation.get("match_level")), 3)
+        else:
+            order = 3
+        enriched.append((order, original_idx, next_listing))
+    enriched.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in enriched]
+
+
+_ACTIVE_REQUEST_SUFFIX_MARKER = " | Current requirements: "
+
+
+def _active_request_base(text: str) -> str:
+    base = str(text or "").strip()
+    if _ACTIVE_REQUEST_SUFFIX_MARKER in base:
+        base = base.split(_ACTIVE_REQUEST_SUFFIX_MARKER, 1)[0].strip()
+    return re.sub(r"\s+", " ", base)
+
+
+def _active_requirement_parts(
+    *,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any],
-    search_result: PineconeListingSearchResult,
-) -> tuple[str, dict[str, Any]]:
-    listings = search_result.listings or []
-    if not listings:
-        return "", {}
-    if not _pinecone_match_framing_llm_enabled() or not os.getenv("OPENAI_API_KEY"):
-        return _PINECONE_MATCH_FRAMING_FALLBACK, {
-            "overall_match_level": "unknown",
-            "full_match_count": 0,
-            "partial_match_count": 0,
-            "source": "neutral_fallback",
-        }
+) -> list[str]:
+    parts: list[str] = []
+    seen: set[str] = set()
 
-    facts = [
+    def add(label: str, value: Any) -> None:
+        clean = re.sub(r"\s+", " ", str(value or "").strip())
+        if not clean:
+            return
+        key = label.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        parts.append(f"{label} {clean}")
+
+    add("make", metadata_filters.get("make"))
+    add("subcategory", metadata_filters.get("subcategory"))
+    add("length", metadata_filters.get("length_ft") or slots.get("trailer_length_ft"))
+    add("width", metadata_filters.get("width_ft") or slots.get("trailer_width_ft"))
+    add("height", metadata_filters.get("height_ft"))
+    add("payload", metadata_filters.get("payload_lbs"))
+    add("hitch", metadata_filters.get("hitch_type"))
+    add("color", metadata_filters.get("color"))
+    add("max price", metadata_filters.get("max_price"))
+    return parts
+
+
+_ACTIVE_REQUEST_FILLER_WORDS = {
+    "a",
+    "about",
+    "an",
+    "and",
+    "am",
+    "be",
+    "for",
+    "i",
+    "it",
+    "looking",
+    "me",
+    "need",
+    "please",
+    "should",
+    "that",
+    "the",
+    "trailer",
+    "trailers",
+    "want",
+    "with",
+}
+
+
+def _looks_like_contact_or_admin_text(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return True
+    if re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", clean, re.I):
+        return True
+    if re.search(r"\d{7,}", clean) and not re.search(
+        r"\b(?:trailer|trailers|ft|feet|foot|wide|width|length|hitch|gate|gates|wheels|tires|ramp|door|doors)\b",
+        clean,
+        re.I,
+    ):
+        return True
+    if re.search(r"\b(?:name|phone|email|number|contact)\b", clean, re.I) and re.search(r"\d{7,}", clean):
+        return True
+    if re.fullmatch(r"[\d\s()+.-]{7,}", clean):
+        return True
+    if re.fullmatch(r"\b(?:yes|no|nah|nope|ok|okay|thanks|thank you)\b", clean, re.I):
+        return True
+    return False
+
+
+def _freeform_request_addition_from_text(message: str) -> str:
+    text = re.sub(r"\s+", " ", str(message or "").strip())
+    if not text or not re.search(r"[a-z]", text, re.I):
+        return ""
+    if _looks_like_contact_or_admin_text(text):
+        return ""
+    if re.search(r"\b(?:instead|actually|make\s+it)\b", text, re.I):
+        return ""
+
+    cleaned = text.lower()
+    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|in|inch|inches|lbs?|pounds?|k)\b", " ", cleaned)
+    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\b", " ", cleaned)
+    cleaned = re.sub(r"\$\s*\d[\d,]*(?:\.\d+)?", " ", cleaned)
+    cleaned = re.sub(r"\b(?:length|wide|width|tall|height|payload|capacity|gvwr|max|maximum|price|budget)\b", " ", cleaned)
+    cleaned = re.sub(r"\b(?:gooseneck|bumper\s+pull|black|white|gray|grey|silver|red|blue|green|yellow|orange|tan)\b", " ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
+    tokens = [
+        token
+        for token in cleaned.split()
+        if token not in _ACTIVE_REQUEST_FILLER_WORDS and len(token) > 1
+    ]
+    if not tokens:
+        return ""
+    return " ".join(tokens)
+
+
+def _freeform_request_additions_from_state(
+    *,
+    state: ChatbotState,
+    latest_message: str,
+    base: str,
+) -> list[str]:
+    seen: set[str] = {_normalized_requirement_text(base)}
+    additions: list[str] = []
+    candidates = [
+        str(item.get("content") or "")
+        for item in (state.get("messages") or [])
+        if str(item.get("role") or "").lower() == "user"
+    ]
+    if latest_message:
+        candidates.append(str(latest_message))
+
+    for message in candidates:
+        addition = _freeform_request_addition_from_text(message)
+        key = _normalized_requirement_text(addition)
+        if not key:
+            continue
+        if key in seen or key in _normalized_requirement_text(base):
+            continue
+        if any(key in _normalized_requirement_text(existing) or _normalized_requirement_text(existing) in key for existing in additions):
+            continue
+        seen.add(key)
+        additions.append(addition)
+    return additions
+
+
+def _updated_active_search_request_text(
+    *,
+    state: ChatbotState,
+    latest_message: str,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    reset_active_request: bool = False,
+) -> str:
+    previous = _active_request_base(state.get("active_search_request_text") or "")
+    latest = _active_request_base(latest_message)
+    base = latest if reset_active_request or not previous else previous
+    if not base:
+        return ""
+    if previous and not reset_active_request:
+        additions = _freeform_request_additions_from_state(
+            state=state,
+            latest_message=latest_message,
+            base=base,
+        )
+        for additional in additions:
+            base = f"{base}; {additional}"
+    parts = _active_requirement_parts(slots=slots, metadata_filters=metadata_filters)
+    if parts:
+        return f"{base}{_ACTIVE_REQUEST_SUFFIX_MARKER}{'; '.join(parts)}"
+    return base
+
+
+def _pinecone_listing_facts(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
         {
             "position": idx,
             "title": str(item.get("title") or "").strip(),
+            "url": item.get("url"),
             "category": item.get("category"),
             "subcategory": item.get("subcategory"),
             "make": item.get("make"),
@@ -244,71 +687,292 @@ def _pinecone_match_framing_text(
         for idx, item in enumerate(listings[:6], 1)
     ]
 
-    try:
-        decision = _pinecone_match_framing_llm().invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "You write the short intro before trailer recommendation results. "
-                        "Decide whether the returned listings fully match, partially match, or are close alternatives "
-                        "for the user's requested trailer features, including features that may only appear in hidden "
-                        "listing evidence such as dealer notes. "
-                        "Use a warm, polished sales-advisor tone. "
-                        "Use only supplied facts and hidden evidence. Do not invent specs, prices, availability, "
-                        "discounts, stock status, links, or feature matches. "
-                        "If evidence is missing or unclear, frame the result as a close alternative rather than a full match. "
-                        "intro_text must be one or two customer-facing sentences, no markdown, no bullets, no quotes, max 55 words. "
-                        "Do not ask for phone number, email, contact details, callback, or sales follow-up."
-                    )
-                ),
-                HumanMessage(
-                    content=_safe_json(
-                        {
-                            "user_message": user_message,
-                            "category": category,
-                            "slots": slots,
-                            "metadata_filters": metadata_filters,
-                            "pinecone_embedding_query_text": search_result.query_text,
-                            "pinecone_metadata_filter": search_result.metadata_filter,
-                            "rerank_debug": search_result.rerank_debug,
-                            "make_debug": search_result.make_debug,
-                            "listings": facts,
-                        }
-                    )
-                ),
-            ]
+
+def _pinecone_match_audit(
+    *,
+    user_message: str,
+    latest_user_message: str | None,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    search_result: PineconeListingSearchResult,
+    facts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    listings = search_result.listings or []
+    decision = _pinecone_match_audit_llm().invoke(
+        [
+            SystemMessage(
+                content="""You are an internal trailer match auditor. Return structured audit data only; do not write customer-facing intro copy.
+
+Classify each supplied Pinecone result as full, partial, or alternative against the user's complete active request.
+
+Core rule:
+For overall fit, focus on category/use case, make/model/hitch/color when requested, and requested non-metadata features such as sliding gates, butterfly gates, swing gates, offroad wheels, mesh sides, tack rooms, ramps, doors, or similar trailer equipment.
+
+Length, width, payload capacity, and GVWR alone do not make a full match. Do not use length, width, payload capacity, or GVWR to make a listing full, partial, or alternative. Those fields are handled elsewhere by deterministic metadata filters and reranking. You may include them in confirmed_requirements only as factual context, but they must not rescue a missing feature fit.
+
+Strict feature validation:
+Match requested non-metadata features by exact feature concept, not by broad category words.
+
+Use language understanding for natural wording variants, but be strict about feature concepts. Slide gate, sliding gate, slider gate, and swing-slide gate may be the same feature if evidence confirms that concept. Butterfly gate is not the same requested feature as sliding gate. Ramp gate, rear gate, side gate, escape door, divider gate, and butterfly gate do not satisfy sliding gate unless evidence explicitly says it is also sliding/slide/swing-slide. Offroad wheels, off-road tires, and all-terrain tires may satisfy an offroad wheel request only when evidence supports that concept.
+
+Evidence rules:
+Use only supplied listing facts and match_evidence_text. Do not invent features, prices, specs, availability, or reasons. Missing, unclear, implied, common-for-category, or merely related evidence is unconfirmed.
+
+Return:
+* requested_non_metadata_features: user-requested features not represented by normal structured filters.
+* per_listing_match for every supplied listing position.
+* match_level: full only if all requested non-metadata features are explicitly confirmed and the listing fits the main trailer type/use case. Use partial when some important requested features are confirmed but others are missing/unconfirmed. Use alternative when the listing is relevant but the requested feature combination is not confirmed.
+* confirmed_requirements: only confirmed facts/features.
+* missing_or_unconfirmed_requirements: requested features absent, ambiguous, merely similar, unsupported, or replaced by a different feature type. missing_or_unconfirmed_requirements must include requested features that are not confirmed.
+* sales_blurb: one positive customer-facing sentence, max 28 words, highlighting confirmed strengths only. Do not say partial match, alternative, mismatch, missing, requirement, exceeds, does not meet, or fully/exactly/perfectly matches unless match_level is full.
+
+Set intro_text empty. Do not write the intro.
+"""
+            ),
+            HumanMessage(
+                content=_safe_json(
+                    {
+                        "user_message": user_message,
+                        "active_search_request_text": user_message,
+                        "latest_user_message": latest_user_message or user_message,
+                        "category": category,
+                        "slots": slots,
+                        "metadata_filters": metadata_filters,
+                        "pinecone_embedding_query_text": search_result.query_text,
+                        "pinecone_metadata_filter": search_result.metadata_filter,
+                        "rerank_debug": search_result.rerank_debug,
+                        "make_debug": search_result.make_debug,
+                        "listings": facts,
+                    }
+                )
+            ),
+        ]
+    )
+    data = _model_dump(decision)
+    per_listing_match = _normalize_per_listing_matches(data, len(listings))
+    per_listing_match = _enforce_requested_feature_consistency(
+        per_listing_match,
+        data.get("requested_non_metadata_features") or [],
+    )
+    full_count, partial_count, alternative_count = _match_count_summary(per_listing_match)
+    data["intro_text"] = ""
+    data["per_listing_match"] = per_listing_match
+    data["full_match_count"] = full_count
+    data["partial_match_count"] = partial_count
+    data["alternative_count"] = alternative_count
+    data["validated_listing_count"] = len(listings)
+    if full_count > 0 and full_count == len(listings):
+        data["overall_match_level"] = "full"
+    elif full_count > 0:
+        data["overall_match_level"] = "mixed"
+    elif partial_count > 0:
+        data["overall_match_level"] = "partial_only"
+    elif alternative_count > 0:
+        data["overall_match_level"] = "no_exact"
+    else:
+        data["overall_match_level"] = "unknown"
+    return data
+
+
+def _pinecone_sales_intro_text(
+    *,
+    user_message: str,
+    latest_user_message: str | None,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    search_result: PineconeListingSearchResult,
+    facts: list[dict[str, Any]],
+    match_analysis: dict[str, Any],
+) -> str:
+    decision = _pinecone_sales_intro_llm().invoke(
+        [
+            SystemMessage(
+                content="""You write only the short customer-facing intro before trailer recommendation results.
+
+Use the supplied audit counts and per-listing verdicts as truth. Do not re-decide match quality.
+
+Tone:
+Professional trailer salesperson: positive, helpful, commercially smart, and honest.
+
+Rules:
+Use no markdown, bullets, labels, or quotes. Max 55 words. Do not ask for contact details, phone number, email, callback, or sales follow-up.
+
+If full_match_count is 0, say the exact requested combination is not clearly shown/currently shown, then positively position the displayed trailers as strongest available options, practical choices, or useful comparison options. Do not call them strong matches, close matches, best matches, top matches, closest matches, best-fitting options, or exact matches.
+
+If full_match_count is greater than 0, say confirmed fits are shown first, followed by relevant options worth comparing.
+
+Do not mention length, width, payload capacity, or GVWR mismatches. Do not list specific mismatches. Do not say all results meet the user's needs, request, specifications, or criteria unless every displayed listing is full.
+"""
+            ),
+            HumanMessage(
+                content=_safe_json(
+                    {
+                        "user_message": user_message,
+                        "active_search_request_text": user_message,
+                        "latest_user_message": latest_user_message or user_message,
+                        "category": category,
+                        "slots": slots,
+                        "metadata_filters": metadata_filters,
+                        "pinecone_embedding_query_text": search_result.query_text,
+                        "audit": match_analysis,
+                        "listings": [
+                            {
+                                **{k: v for k, v in fact.items() if k != "match_evidence_text"},
+                                "match_validation": next(
+                                    (
+                                        item
+                                        for item in match_analysis.get("per_listing_match", [])
+                                        if int(item.get("position") or 0) == int(fact.get("position") or 0)
+                                    ),
+                                    {},
+                                ),
+                            }
+                            for fact in facts
+                        ],
+                    }
+                )
+            ),
+        ]
+    )
+    return str((_model_dump(decision) if isinstance(decision, BaseModel) else {}).get("intro_text") or "").strip()
+
+
+def _pinecone_match_framing_text(
+    *,
+    user_message: str,
+    latest_user_message: str | None = None,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    search_result: PineconeListingSearchResult,
+) -> tuple[str, dict[str, Any]]:
+    listings = search_result.listings or []
+    if not listings:
+        return "", {}
+    if not _pinecone_match_framing_llm_enabled() or not os.getenv("OPENAI_API_KEY"):
+        data = _fallback_match_analysis(
+            source="neutral_fallback",
+            listing_count=len(listings),
         )
-        data = _model_dump(decision)
-        text = re.sub(r"\s+", " ", str(data.get("intro_text") or "").strip())
-        if text.startswith('"') and text.endswith('"') and len(text) > 1:
-            text = text[1:-1].strip()
-        if not text:
-            return _PINECONE_MATCH_FRAMING_FALLBACK, {
-                **data,
-                "source": "neutral_fallback_empty_llm_text",
-            }
-        if re.search(
-            r"\b(?:phone|email|contact|call|reach|callback|follow\s*up|sales\s+team)\b",
-            text,
-            re.I,
-        ):
-            return _PINECONE_MATCH_FRAMING_FALLBACK, {
-                **data,
-                "source": "neutral_fallback_blocked_contact_text",
-            }
-        if len(text) > 420:
-            text = text[:420].rsplit(" ", 1)[0].strip()
-        if not text.endswith((".", "!", "?")):
-            text += "."
-        return text, {**data, "intro_text": text, "source": "llm"}
+        _log_pinecone_intro_fallback(
+            source="neutral_fallback",
+            reason="match_framing_llm_disabled_or_missing_openai_api_key",
+            match_analysis=data,
+        )
+        return _PINECONE_MATCH_FRAMING_FALLBACK, data
+
+    facts = _pinecone_listing_facts(listings)
+    try:
+        data = _pinecone_match_audit(
+            user_message=user_message,
+            latest_user_message=latest_user_message,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            search_result=search_result,
+            facts=facts,
+        )
+        _log_pinecone_match_audit(
+            match_analysis={**data, "source": "audit"},
+            facts=facts,
+            query_text=search_result.query_text,
+        )
     except Exception:
-        logger.exception("pinecone_match_framing_llm_failed")
+        logger.exception("pinecone_match_audit_llm_failed")
+        data = _fallback_match_analysis(
+            source="neutral_fallback_audit_exception",
+            listing_count=len(listings),
+        )
+        _log_pinecone_intro_fallback(
+            source="neutral_fallback_audit_exception",
+            reason="match_audit_llm_exception",
+            match_analysis=data,
+        )
+        return _PINECONE_MATCH_FRAMING_FALLBACK, data
+
+    try:
+        text = _pinecone_sales_intro_text(
+            user_message=user_message,
+            latest_user_message=latest_user_message,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            search_result=search_result,
+            facts=facts,
+            match_analysis=data,
+        )
+    except Exception:
+        logger.exception("pinecone_sales_intro_llm_failed")
+        _log_pinecone_intro_fallback(
+            source="neutral_fallback_intro_exception",
+            reason="sales_intro_llm_exception",
+            match_analysis=data,
+        )
         return _PINECONE_MATCH_FRAMING_FALLBACK, {
-            "overall_match_level": "unknown",
-            "full_match_count": 0,
-            "partial_match_count": 0,
-            "source": "neutral_fallback_exception",
+            **data,
+            "intro_text": _PINECONE_MATCH_FRAMING_FALLBACK,
+            "source": "neutral_fallback_intro_exception",
         }
+
+    text = re.sub(r"\s+", " ", str(text or "").strip())
+    if text.startswith('"') and text.endswith('"') and len(text) > 1:
+        text = text[1:-1].strip()
+    if not text:
+        _log_pinecone_intro_fallback(
+            source="neutral_fallback_empty_intro_text",
+            reason="sales_intro_empty_text",
+            match_analysis=data,
+        )
+        return _PINECONE_MATCH_FRAMING_FALLBACK, {
+            **data,
+            "intro_text": _PINECONE_MATCH_FRAMING_FALLBACK,
+            "source": "neutral_fallback_empty_intro_text",
+        }
+    if re.search(
+        r"\b(?:phone|email|contact|call|reach|callback|follow\s*up|sales\s+team)\b",
+        text,
+        re.I,
+    ):
+        _log_pinecone_intro_fallback(
+            source="neutral_fallback_blocked_contact_text",
+            reason="sales_intro_contact_or_followup_text_blocked",
+            intro_candidate=text,
+            match_analysis=data,
+        )
+        return _PINECONE_MATCH_FRAMING_FALLBACK, {
+            **data,
+            "intro_text": _PINECONE_MATCH_FRAMING_FALLBACK,
+            "source": "neutral_fallback_blocked_contact_text",
+        }
+    if _invalid_pinecone_intro(text=text, data=data, listing_count=len(listings)):
+        _log_pinecone_intro_fallback(
+            source="neutral_fallback_invalid_match_claim",
+            reason="sales_intro_invalid_or_unsupported_match_claim",
+            intro_candidate=text,
+            match_analysis=data,
+        )
+        return _PINECONE_MATCH_FRAMING_FALLBACK, {
+            **data,
+            "intro_text": _PINECONE_MATCH_FRAMING_FALLBACK,
+            "source": "neutral_fallback_invalid_match_claim",
+        }
+    if len(text) > 420:
+        text = text[:420].rsplit(" ", 1)[0].strip()
+    if not text.endswith((".", "!", "?")):
+        text += "."
+    logger.info(
+        "pinecone_match_intro_applied | source=%r | overall_match_level=%r | full_match_count=%s | "
+        "partial_match_count=%s | alternative_count=%s | intro_text=%r",
+        "llm",
+        data.get("overall_match_level"),
+        data.get("full_match_count"),
+        data.get("partial_match_count"),
+        data.get("alternative_count"),
+        text,
+    )
+    return text, {**data, "intro_text": text, "source": "llm"}
 
 
 def _result_interest_followup_text(
@@ -321,6 +985,15 @@ def _result_interest_followup_text(
     if not listings or not _result_interest_followup_llm_enabled() or not os.getenv("OPENAI_API_KEY"):
         return ""
 
+    all_full = bool(listings) and all(
+        (
+            item.get("match_validation")
+            if isinstance(item.get("match_validation"), dict)
+            else {}
+        ).get("match_level")
+        == "full"
+        for item in listings
+    )
     facts = [
         {
             "position": idx,
@@ -329,6 +1002,11 @@ def _result_interest_followup_text(
             "length": item.get("length"),
             "width": item.get("width"),
             "price": item.get("price_display") or item.get("price"),
+            "match_level": (
+                item.get("match_validation")
+                if isinstance(item.get("match_validation"), dict)
+                else {}
+            ).get("match_level"),
         }
         for idx, item in enumerate(listings[:5], 1)
     ]
@@ -339,9 +1017,10 @@ def _result_interest_followup_text(
                 SystemMessage(
                     content=(
                         "Write exactly one short customer-facing follow-up sentence after trailer search results. "
-                        "Ask whether any shown trailer stands out or interests the customer. "
+                        "Ask in a positive sales-advisor tone whether any shown trailer stands out or should be compared further. "
                         "Do not ask for phone number, email, contact details, store visit, callback, or team follow-up. "
                         "Do not invent listing facts. Use only the supplied context. "
+                        "Do not say the options meet the customer's needs/specifications unless all_listings_full_match is true. "
                         "No markdown, no bullets, no quotes, max 22 words."
                     )
                 ),
@@ -351,6 +1030,7 @@ def _result_interest_followup_text(
                             "user_message": user_message,
                             "category": category,
                             "slots": slots,
+                            "all_listings_full_match": all_full,
                             "listings": facts,
                         }
                     )
@@ -365,6 +1045,8 @@ def _result_interest_followup_text(
             text,
             re.I,
         ):
+            return ""
+        if not all_full and re.search(r"\bmeet(?:s)?\s+(?:your\s+)?(?:needs|specifications|requirements)\b", text, re.I):
             return ""
         if text.startswith('"') and text.endswith('"') and len(text) > 1:
             text = text[1:-1].strip()
@@ -1832,6 +2514,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         category = category_proposed
 
     category_changed = bool(category_before and category and category != category_before)
+    make_changed = False
     reset_result_state = False
     if category_changed:
         logger.info(
@@ -1891,6 +2574,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 "slots_collected": slots,
                 "slots_skipped": sorted(slots_skipped),
                 "metadata_filters_collected": metadata_filters,
+                "active_search_request_text": _updated_active_search_request_text(
+                    state=state,
+                    latest_message=latest_message,
+                    slots=slots,
+                    metadata_filters=metadata_filters,
+                    reset_active_request=category_changed or make_changed,
+                ),
                 "make_category_options": make_category_options,
                 "awaiting_slot": _MAKE_CATEGORY_CHOICE_SLOT,
                 "pending_questions": [],
@@ -1917,6 +2607,20 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         category=category,
         metadata_filters=metadata_filters,
     )
+    make_before = str(metadata_filters_before.get("make") or "").strip()
+    make_after = str(metadata_filters.get("make") or "").strip()
+    make_changed = bool(make_before and make_after and make_before.lower() != make_after.lower())
+    if make_changed:
+        logger.info(
+            "make_change_clears_filters | old_make=%r | new_make=%r",
+            make_before,
+            make_after,
+        )
+        slots = {}
+        slots_skipped = set()
+        metadata_filters = {"make": make_after}
+        awaiting_slot = None
+        reset_result_state = True
     if _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped:
         category_options = []
         make_question = None
@@ -1937,6 +2641,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
+            "active_search_request_text": _updated_active_search_request_text(
+                state=state,
+                latest_message=latest_message,
+                slots=slots,
+                metadata_filters=metadata_filters,
+                reset_active_request=category_changed or make_changed,
+            ),
             "make_category_options": category_options,
             "awaiting_slot": _MAKE_CATEGORY_CHOICE_SLOT,
             "pending_questions": [],
@@ -2066,6 +2777,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
+            "active_search_request_text": _updated_active_search_request_text(
+                state=state,
+                latest_message=latest_message,
+                slots=slots,
+                metadata_filters=metadata_filters,
+                reset_active_request=category_changed or make_changed,
+            ),
             "make_category_options": make_category_options,
             "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
             "pending_questions": [],
@@ -2087,6 +2805,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
+            "active_search_request_text": _updated_active_search_request_text(
+                state=state,
+                latest_message=latest_message,
+                slots=slots,
+                metadata_filters=metadata_filters,
+                reset_active_request=category_changed or make_changed,
+            ),
             "make_category_options": make_category_options,
             "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
             "pending_questions": [],
@@ -2257,6 +2982,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
 
     slots_after = dict(slots)
     metadata_filters_after = dict(metadata_filters)
+    active_search_request_text = _updated_active_search_request_text(
+        state=state,
+        latest_message=latest_message,
+        slots=slots,
+        metadata_filters=metadata_filters,
+        reset_active_request=category_changed or make_changed,
+    )
     slot_changes = {
         k: {"before": slots_before.get(k), "after": slots_after.get(k)}
         for k in set(slots_before.keys()) | set(slots_after.keys())
@@ -2284,6 +3016,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "slots_collected": slots,
         "slots_skipped": sorted(slots_skipped),
         "metadata_filters_collected": metadata_filters,
+        "active_search_request_text": active_search_request_text,
         "make_category_options": make_category_options,
         "awaiting_slot": awaiting_slot,
         "pending_questions": pending,
@@ -2309,6 +3042,11 @@ def _route_after_mind(state: ChatbotState) -> str:
 
 
 def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
+    latest_user_message = state.get("user_message") or ""
+    active_search_request_text = (
+        str(state.get("active_search_request_text") or "").strip()
+        or latest_user_message
+    )
     logger.info(
         "pinecone_search_execute | category=%r | slots=%s | metadata_filters=%s | shown_count=%s",
         state.get("trailer_category"),
@@ -2320,35 +3058,37 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
         metadata_filters=state.get("metadata_filters_collected") or {},
-        user_message=state.get("user_message") or "",
+        user_message=active_search_request_text,
         already_shown_urls=state.get("already_shown_listing_urls") or [],
     )
     if isinstance(search_result, list):
         search_result = PineconeListingSearchResult(
             listings=search_result,
-            query_text=state.get("user_message") or "",
+            query_text=active_search_request_text,
             metadata_filter=None,
         )
     listings_with_evidence = search_result.listings
     intro_text, match_analysis = _pinecone_match_framing_text(
-        user_message=state.get("user_message") or "",
+        user_message=active_search_request_text,
+        latest_user_message=latest_user_message,
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
         metadata_filters=state.get("metadata_filters_collected") or {},
         search_result=search_result,
     )
     search_result.match_analysis = match_analysis
+    listings_with_evidence = _apply_pinecone_match_validation(listings_with_evidence, match_analysis)
     listings = [_public_listing(item) for item in listings_with_evidence]
     assistant_text = format_listing_results(
         listings,
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
-        user_message=state.get("user_message") or "",
+        user_message=active_search_request_text,
     )
     if intro_text:
         assistant_text = f"{intro_text}\n\n{assistant_text}"
     followup = _result_interest_followup_text(
-        user_message=state.get("user_message") or "",
+        user_message=active_search_request_text,
         category=state.get("trailer_category"),
         slots=state.get("slots_collected") or {},
         listings=listings,

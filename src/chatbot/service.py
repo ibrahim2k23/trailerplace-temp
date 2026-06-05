@@ -98,6 +98,11 @@ class ContactPromptReplyDecision(BaseModel):
     reason: str = ""
 
 
+class CatalogueOverviewDecision(BaseModel):
+    is_catalogue_overview: bool = False
+    reason: str = ""
+
+
 def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -115,6 +120,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "lead_id": None,
         "contact_status": "missing_contact",
         "messages": [],
+        "active_search_request_text": "",
         "trailer_category": None,
         "slots_collected": {},
         "slots_skipped": [],
@@ -173,6 +179,14 @@ def _contact_prompt_reply_llm():
 def _contact_prompt_bridge_llm():
     model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
     return ChatOpenAI(model=model, temperature=0.3)
+
+
+def _catalogue_overview_llm():
+    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        CatalogueOverviewDecision,
+        method="function_calling",
+    )
 
 
 def _regex_contact(message: str) -> dict[str, Optional[str]]:
@@ -720,12 +734,75 @@ def _has_metadata_update_intent(message: str) -> bool:
     return bool(resolve_make_from_text(text, use_llm_fallback=False).make)
 
 
+def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> bool:
+    text = (user_message or "").strip()
+    if not text:
+        return False
+    try:
+        decision = _catalogue_overview_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Classify whether the latest user message is asking for a broad overview of what "
+                        "TrailerPlace carries/offers, instead of asking the planner to recommend or search "
+                        "specific inventory. Return structured fields only.\n\n"
+                        "Set is_catalogue_overview=true when the user asks what trailer types, options, "
+                        "lineup, inventory categories, products, or services TrailerPlace has/carries/sells, "
+                        "and the user has not provided enough specific shopping constraints to search inventory.\n\n"
+                        "Set is_catalogue_overview=true even if the chat currently has an active qualification "
+                        "question, when the latest message is asking about available types/options generally.\n\n"
+                        "Set is_catalogue_overview=false when the user wants recommendations, asks to show/search "
+                        "trailers, gives constraints like category/length/make/budget/payload/hitch/features, "
+                        "answers a qualification question with a preference, expresses purchase interest, asks "
+                        "about a specific listing, or asks for more/next options after listing results were shown.\n\n"
+                        "Examples of true: 'what trailers do you offer?', 'what are the options?', "
+                        "'which type of trailers do you have?', 'what do you guys carry?'.\n"
+                        "Examples of false: 'show me utility trailers', 'I need a 12 ft livestock trailer', "
+                        "'more options' after listings, 'I want an enclosed trailer', 'what is the price of stock 123'."
+                    )
+                ),
+                HumanMessage(
+                    content=json.dumps(
+                        {
+                            "latest_user_message": text,
+                            "awaiting_slot": session.get("awaiting_slot"),
+                            "pending_questions": session.get("pending_questions") or [],
+                            "trailer_category": session.get("trailer_category"),
+                            "slots_collected": session.get("slots_collected") or {},
+                            "metadata_filters_collected": session.get("metadata_filters_collected") or {},
+                            "has_shown_search_results": bool(session.get("has_shown_search_results")),
+                            "has_last_listings": bool(session.get("last_listings") or session.get("already_shown_listing_urls")),
+                            "recent_messages": (session.get("messages") or [])[-6:],
+                        },
+                        default=str,
+                    )
+                ),
+            ]
+        )
+        result = bool(decision.is_catalogue_overview)
+        logger.info(
+            "catalogue_overview_route_decision | is_catalogue_overview=%s | reason=%r | latest_message=%r | awaiting_slot=%r | has_last_listings=%s",
+            result,
+            decision.reason,
+            text,
+            session.get("awaiting_slot"),
+            bool(session.get("last_listings") or session.get("already_shown_listing_urls")),
+        )
+        return result
+    except Exception:
+        logger.exception("Catalogue overview classifier failed; keeping existing routing behavior")
+        return False
+
+
 def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     """
     LLM-first routing for the main phase.
     This prevents regex misses (for example "I like the 4th one") from falling into smalltalk.
     """
     if _is_contact_only_message(user_message):
+        return False
+
+    if _is_catalogue_overview_turn(session, user_message):
         return False
 
     if session.get("awaiting_slot") or session.get("pending_questions"):
@@ -1167,6 +1244,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "lead_id": session.get("lead_id"),
         "contact_status": session.get("contact_status"),
         "sales_phase": "main",
+        "active_search_request_text": session.get("active_search_request_text") or "",
         "trailer_category": session.get("trailer_category"),
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
         "slots_skipped": list(session.get("slots_skipped") or []),
@@ -1194,6 +1272,7 @@ def _reset_search_state_for_category_switch(session: dict[str, Any], old_categor
     session["slots_collected"] = {}
     session["slots_skipped"] = []
     session["metadata_filters_collected"] = {}
+    session["active_search_request_text"] = ""
     session["make_category_options"] = []
     session["awaiting_slot"] = None
     session["pending_questions"] = []
@@ -1411,6 +1490,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "slots_collected",
         "slots_skipped",
         "metadata_filters_collected",
+        "active_search_request_text",
         "make_category_options",
         "awaiting_slot",
         "pending_questions",

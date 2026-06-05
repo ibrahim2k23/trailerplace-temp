@@ -12,6 +12,7 @@ class QuestionItem(TypedDict, total=False):
 class ChatbotState(TypedDict, total=False):
     session_id: str
     user_message: str
+    active_search_request_text: str
     messages: list[dict[str, Any]]
     assistant_text: str
     customer_full_name: Optional[str]

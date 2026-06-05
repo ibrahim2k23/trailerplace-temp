@@ -5,6 +5,7 @@ def _state(message: str, *, category: str) -> dict:
     return {
         "session_id": "s1",
         "user_message": message,
+        "active_search_request_text": "",
         "messages": [{"role": "user", "content": message}],
         "mind_decision": {
             "action": "respond",
@@ -101,6 +102,105 @@ def test_livestock_length_in_message_satisfies_required_slot(monkeypatch):
     assert out["metadata_filters_collected"]["length_ft"] == "12 feet"
     assert out["mind_decision"]["action"] == "pinecone_search"
     assert out["pending_questions"] == []
+
+
+def test_active_search_request_preserves_original_features_after_length_reply(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("12", category="Livestock")
+    state["trailer_category"] = "Livestock"
+    state["active_search_request_text"] = (
+        "I am looking for a livestock trailer with offroad wheels and swinging gates"
+    )
+    state["awaiting_slot"] = "trailer_length_ft"
+    state["messages"] = [
+        {
+            "role": "user",
+            "content": "I am looking for a livestock trailer with offroad wheels and swinging gates",
+        },
+        {"role": "assistant", "content": "What length trailer are you looking for?"},
+        {"role": "user", "content": "12"},
+    ]
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    active = out["active_search_request_text"]
+    assert "offroad wheels" in active
+    assert "swinging gates" in active
+    assert "length 12" in active
+    assert not active.startswith("12 |")
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_active_search_request_merges_freeform_feature_from_followup(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("it should be a 12 ft trailer with offroad wheels", category="Livestock")
+    state["trailer_category"] = "Livestock"
+    state["active_search_request_text"] = "i am looking for a trailer livestock"
+    state["awaiting_slot"] = "trailer_length_ft"
+    state["messages"] = [
+        {"role": "user", "content": "Ibrahim here. 03304388550"},
+        {"role": "assistant", "content": "Thanks for sharing your contact details."},
+        {"role": "user", "content": "i am looking for a trailer livestock"},
+        {"role": "assistant", "content": "What length trailer are you looking for?"},
+        {"role": "user", "content": "it should be a 12 ft trailer with offroad wheels"},
+    ]
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    active = out["active_search_request_text"]
+    assert "offroad wheels" in active
+    assert "length 12" in active
+    assert "03304388550" not in active
+    assert active.startswith("i am looking for a trailer livestock")
+
+
+def test_active_search_request_edits_length_without_duplicate(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("make it 14 ft instead", category="Livestock")
+    state["trailer_category"] = "Livestock"
+    state["active_search_request_text"] = (
+        "I am looking for a livestock trailer with swinging gates"
+        " | Current requirements: length 12"
+    )
+    state["slots_collected"] = {"trailer_length_ft": "12"}
+    state["metadata_filters_collected"] = {"length_ft": "12"}
+    state["has_shown_search_results"] = True
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    active = out["active_search_request_text"]
+    assert "swinging gates" in active
+    assert "length 14 ft" in active
+    assert "length 12" not in active
+    assert out["metadata_filters_collected"]["length_ft"] == "14 ft"
+
+
+def test_active_search_request_category_reset_drops_old_freeform_features(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("show me dump trailers instead", category="Dump")
+    state["trailer_category"] = "Livestock"
+    state["active_search_request_text"] = (
+        "i am looking for a trailer livestock; offroad wheels | Current requirements: length 12"
+    )
+    state["metadata_filters_collected"] = {"length_ft": "12"}
+    state["messages"] = [
+        {"role": "user", "content": "i am looking for a trailer livestock"},
+        {"role": "assistant", "content": "What length trailer are you looking for?"},
+        {"role": "user", "content": "it should be a 12 ft trailer with offroad wheels"},
+        {"role": "user", "content": "show me dump trailers instead"},
+    ]
+    state["has_shown_search_results"] = True
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    active = out["active_search_request_text"]
+    assert active.startswith("show me dump trailers instead")
+    assert "offroad wheels" not in active
+    assert "livestock" not in active.lower()
 
 
 def test_livestock_width_is_metadata_filter_not_category_slot(monkeypatch):
@@ -216,6 +316,29 @@ def test_same_category_generic_query_keeps_existing_make(monkeypatch):
     assert out["metadata_filters_collected"]["make"] == "Iron Bull Trailers"
     assert out["metadata_filters_collected"]["length_ft"] == "12"
     assert out["metadata_filters_collected"]["width_ft"] == "6"
+
+
+def test_make_switch_clears_previous_qualifications_and_resets_active_request(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("show me Diamond C instead", category="Equipment")
+    state["trailer_category"] = "Equipment"
+    state["slots_collected"] = {"haul_length_ft": "12"}
+    state["metadata_filters_collected"] = {"make": "Aluma", "length_ft": "12"}
+    state["active_search_request_text"] = (
+        "I need an Aluma equipment trailer | Current requirements: make Aluma; length 12"
+    )
+    state["has_shown_search_results"] = True
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"] == {"make": "Diamond C"}
+    assert out["slots_collected"] == {}
+    assert out["already_shown_listing_urls"] == []
+    assert out["last_listings"] == []
+    assert out["active_search_request_text"].startswith("show me Diamond C instead")
+    assert "Aluma" not in out["active_search_request_text"]
+    assert "length 12" not in out["active_search_request_text"]
 
 
 def test_category_change_clears_existing_make_before_generic_livestock_search(monkeypatch):
