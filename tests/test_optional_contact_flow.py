@@ -52,30 +52,24 @@ def test_first_message_without_contact_creates_lead_and_asks_for_details(monkeyp
     assert lead_calls[0]["phone"] is None
 
 
-def test_exact_inventory_lookup_answers_before_initial_contact_prompt(monkeypatch):
+def test_stock_lookup_before_results_stays_in_contact_flow(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001019"
     service.reset_session(session_id)
+    search_calls = []
 
     monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009019")
     monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009019")
-    monkeypatch.setattr(service, "should_attempt_chat_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         service,
         "search_trailers",
-        lambda *_args, **_kwargs: {
-            "reply": "Yes, that trailer is available in inventory: Trailer A. Stock number: 13066.",
-            "entity_type": "STOCK_SEARCH",
-            "confidence": 1.0,
-            "top_matches": [{"title": "Trailer A", "stock_number": "13066"}],
-            "extraction": {"stock_number": "13066"},
-        },
+        lambda *_args, **_kwargs: search_calls.append(True) or {},
     )
 
     response = service.handle_chat(_req(session_id, "do you have stock 13066?"))
 
-    assert "available in inventory" in response.assistant_text
-    assert "Before we get started" not in response.assistant_text
-    assert service._get_session(session_id)["initial_contact_request_asked"] is False
+    assert "Before we get started" in response.assistant_text
+    assert search_calls == []
+    assert service._get_session(session_id)["initial_contact_request_asked"] is True
 
 
 def test_year_make_price_lookup_answers_before_contact_or_graph(monkeypatch):
@@ -85,7 +79,6 @@ def test_year_make_price_lookup_answers_before_contact_or_graph(monkeypatch):
     monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009021")
     monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009021")
     monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(service, "should_attempt_chat_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         service,
         "search_trailers",
@@ -660,6 +653,186 @@ def test_contact_only_after_results_acknowledges_without_graph(monkeypatch):
     assert response.customer_full_name == "Ibrahim"
     assert response.customer_phone == "03304388550"
     assert saved["last_listings"] == [{"title": "Trailer A", "url": "https://example.test/a"}]
+
+
+def test_inventory_lookup_is_blocked_during_active_qna(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001116"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["has_shown_search_results"] = True
+    session["awaiting_slot"] = "haul_weight_lbs"
+    session["trailer_category"] = "Dump"
+    session["slots_collected"] = {"haul_material": "gravel"}
+    search_calls = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009116")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009116")
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: search_calls.append(True) or {},
+    )
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: {
+            "assistant_text": "What's the rough haul weight per load?",
+            "mind_decision": {"action": "respond"},
+            "trailer_category": "Dump",
+            "slots_collected": {"haul_material": "gravel", "haul_weight_lbs": "5000 pounds"},
+            "slots_skipped": [],
+            "metadata_filters_collected": {"payload_lbs": "5000 pounds"},
+            "requested_non_metadata_features": [],
+            "active_search_request_text": "",
+            "make_category_options": [],
+            "awaiting_slot": None,
+            "pending_questions": [],
+            "asked_questions": [],
+            "already_shown_listing_urls": [],
+            "last_listings": [],
+            "tool_events": [],
+            "pending_contact_action": None,
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "5000 pounds"))
+
+    assert search_calls == []
+    assert response.assistant_text == "What's the rough haul weight per load?"
+
+
+def test_inventory_lookup_works_after_results_for_ordinal_reference(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001117"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["has_shown_search_results"] = True
+    session["last_listings"] = [
+        {"title": "Trailer A", "stock_number": "11111", "price": "$1"},
+        {"title": "Trailer B", "stock_number": "22222", "price": "$2"},
+    ]
+    session["already_shown_listing_urls"] = ["https://example.test/a", "https://example.test/b"]
+    search_calls = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009117")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009117")
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: search_calls.append(True) or {
+            "reply": "Yes, that trailer is listed at $1.",
+            "entity_type": "STOCK_SEARCH",
+            "confidence": 1.0,
+            "top_matches": [{"title": "Trailer A", "stock_number": "11111", "price": "$1"}],
+            "extraction": {},
+        },
+    )
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+
+    response = service.handle_chat(_req(session_id, "what is the price of the second one?"))
+
+    assert search_calls == [True]
+    assert response.assistant_text == "Yes, that trailer is listed at $1."
+
+
+def test_inventory_lookup_is_inactive_after_category_switch_qna_reset(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001118"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["has_shown_search_results"] = False
+    session["awaiting_slot"] = "haul_item"
+    session["trailer_category"] = "Utility"
+    search_calls = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009118")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009118")
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: search_calls.append(True) or {},
+    )
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: {
+            "assistant_text": "What will you be hauling on the utility trailer?",
+            "mind_decision": {"action": "respond"},
+            "trailer_category": "Utility",
+            "slots_collected": {},
+            "slots_skipped": [],
+            "metadata_filters_collected": {},
+            "requested_non_metadata_features": [],
+            "active_search_request_text": "",
+            "make_category_options": [],
+            "awaiting_slot": "haul_item",
+            "pending_questions": [{"slot": "haul_item", "question": "What will you be hauling on the utility trailer?", "required": True}],
+            "asked_questions": ["haul_item"],
+            "already_shown_listing_urls": [],
+            "last_listings": [],
+            "tool_events": [],
+            "pending_contact_action": None,
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "2026 Aluma price?"))
+
+    assert search_calls == []
+    assert response.assistant_text == "What will you be hauling on the utility trailer?"
+
+
+def test_year_make_lookup_is_blocked_once_new_search_flow_has_started(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001119"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["trailer_category"] = "Utility"
+    session["slots_collected"] = {"haul_item": "golf cart"}
+    session["metadata_filters_collected"] = {"length_ft": "12 ft"}
+    session["has_shown_search_results"] = False
+    search_calls = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009119")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009119")
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: search_calls.append(True) or {},
+    )
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: {
+            "assistant_text": "What kind of budget are you targeting?",
+            "mind_decision": {"action": "respond"},
+            "trailer_category": "Utility",
+            "slots_collected": {"haul_item": "golf cart"},
+            "slots_skipped": [],
+            "metadata_filters_collected": {"length_ft": "12 ft"},
+            "requested_non_metadata_features": [],
+            "active_search_request_text": "",
+            "make_category_options": [],
+            "awaiting_slot": "max_price",
+            "pending_questions": [{"slot": "max_price", "question": "What kind of budget are you targeting?", "required": True}],
+            "asked_questions": ["max_price"],
+            "already_shown_listing_urls": [],
+            "last_listings": [],
+            "tool_events": [],
+            "pending_contact_action": None,
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "2026 Aluma price?"))
+
+    assert search_calls == []
+    assert response.assistant_text == "What kind of budget are you targeting?"
 
 
 def test_contact_plus_listing_interest_routes_to_graph(monkeypatch):
@@ -1661,7 +1834,7 @@ def test_business_overview_questions_stay_in_smalltalk_path():
         assert service._should_route_to_graph(session, message) is False
 
 
-def test_catalogue_overview_interrupts_active_recommendation_qna(monkeypatch):
+def test_active_recommendation_qna_stays_in_graph_even_if_overview_classifier_fires(monkeypatch):
     session = service._new_session("overview-during-qna")
     session["trailer_category"] = None
     session["awaiting_slot"] = "generic_category_choice"
@@ -1682,7 +1855,32 @@ def test_catalogue_overview_interrupts_active_recommendation_qna(monkeypatch):
 
     monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
 
-    assert service._should_route_to_graph(session, "what are the options?") is False
+    assert service._should_route_to_graph(session, "what are the options?") is True
+
+
+def test_active_qna_answer_stays_in_graph_even_if_overview_classifier_fires(monkeypatch):
+    session = service._new_session("active-answer-during-qna")
+    session["trailer_category"] = "Dump"
+    session["awaiting_slot"] = "haul_material"
+    session["pending_questions"] = [
+        {"slot": "haul_weight_lbs", "question": "What's the rough haul weight per load?"}
+    ]
+    session["messages"] = [
+        {"role": "user", "content": "I need a dump trailer"},
+        {"role": "assistant", "content": "What material will you be hauling (dirt, gravel, debris, etc.)?"},
+        {"role": "user", "content": "construction debris"},
+    ]
+
+    class _OverviewClassifier:
+        def invoke(self, _messages):
+            return service.CatalogueOverviewDecision(
+                is_catalogue_overview=True,
+                reason="Incorrect broad overview classification.",
+            )
+
+    monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
+
+    assert service._should_route_to_graph(session, "construction debris") is True
 
 
 def test_specific_recommendation_request_still_routes_with_catalogue_classifier(monkeypatch):

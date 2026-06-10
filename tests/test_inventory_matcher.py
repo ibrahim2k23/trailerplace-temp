@@ -323,7 +323,7 @@ def test_year_is_not_metadata_filter_for_non_price_availability_lookup():
     assert result["metadata_filter"] == {}
 
 
-def test_stock_id_lookup_direct_handles_short_price_wording(monkeypatch):
+def test_stock_id_lookup_is_not_direct_handled_for_chat_lookup(monkeypatch):
     monkeypatch.setenv("INVENTORY_REPLY_LLM_ENABLED", "0")
     stock_df = im.prepare_inventory(
         pd.DataFrame(
@@ -343,11 +343,11 @@ def test_stock_id_lookup_direct_handles_short_price_wording(monkeypatch):
     )
     monkeypatch.setattr(im, "prepared_inventory", lambda: stock_df)
 
-    result = im.search_trailers("price for id 12345", for_chat=True)
+    extraction = im._fallback_extraction("price for id 12345", df=stock_df)
 
-    assert result["entity_type"] == "STOCK_SEARCH"
-    assert result["should_handle_in_chat"] is True
-    assert "$10,995" in result["reply"]
+    assert extraction.stock_number == "12345"
+    assert im._is_direct_inventory_lookup(extraction) is False
+    assert im.should_attempt_chat_lookup("price for id 12345") is False
 
 
 def test_make_model_price_lookup_direct_handles(monkeypatch):
@@ -379,6 +379,26 @@ def test_make_only_price_lookup_is_not_direct_handled():
     assert extraction.user_wants_price is True
     assert im._is_direct_inventory_lookup(extraction) is False
     assert im.should_attempt_chat_lookup("Aluma price?") is False
+
+
+def test_year_make_availability_lookup_still_attempts_chat_lookup():
+    assert im.should_attempt_chat_lookup("is the 2014 Star trailer available?") is True
+
+
+def test_make_model_price_lookup_still_attempts_chat_lookup(monkeypatch):
+    monkeypatch.setattr(
+        im,
+        "_fallback_extraction",
+        lambda _query, df=None: im.TrailerQueryExtraction(
+            possible_make="Aluma",
+            possible_model_code="8214",
+            possible_model_text="8214",
+            user_wants_price=True,
+            search_intent="model",
+        ),
+    )
+
+    assert im.should_attempt_chat_lookup("Aluma 8214 price?") is True
 
 
 def test_feature_price_query_frames_unavailable_configuration_with_alternatives(monkeypatch):

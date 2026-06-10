@@ -99,6 +99,7 @@ class MindDecision(BaseModel):
 class FilterExtractionDecision(BaseModel):
     length_ft: Optional[str] = None
     width_ft: Optional[str] = None
+    height_ft: Optional[str] = None
     payload_lbs: Optional[str] = None
     max_price: Optional[str] = None
     hitch_type: Optional[str] = None
@@ -110,6 +111,28 @@ class FilterExtractionDecision(BaseModel):
 
 class RequestedFeatureExtractionDecision(BaseModel):
     requested_non_metadata_features: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class FieldExtractionAdjudicationDecision(BaseModel):
+    metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
+    slots_collected_update: dict[str, Any] = Field(default_factory=dict)
+    requested_non_metadata_features: list[str] = Field(default_factory=list)
+    rejected_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    clarification_needed: Optional[str] = None
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+
+
+class QuestionTurnDecision(BaseModel):
+    answered_active_question: bool = False
+    no_preference_for_active_question: bool = False
+    active_slot_value: Optional[str] = None
+    metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
+    slots_collected_update: dict[str, Any] = Field(default_factory=dict)
+    requested_non_metadata_features: list[str] = Field(default_factory=list)
+    reply_to_user: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
 
 
@@ -170,6 +193,32 @@ def _requested_feature_extractor_llm():
     ).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         RequestedFeatureExtractionDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _field_extraction_adjudicator_llm():
+    model = (
+        os.getenv("FIELD_EXTRACTION_ADJUDICATOR_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        FieldExtractionAdjudicationDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _question_turn_adjudicator_llm():
+    model = (
+        os.getenv("QUESTION_TURN_ADJUDICATOR_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        QuestionTurnDecision,
         method="function_calling",
     )
 
@@ -1020,6 +1069,7 @@ def _pinecone_match_framing_text(
     slots: dict[str, Any],
     metadata_filters: dict[str, Any],
     search_result: PineconeListingSearchResult,
+    requested_non_metadata_features: list[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     listings = search_result.listings or []
     if not listings:
@@ -1037,17 +1087,18 @@ def _pinecone_match_framing_text(
         return _PINECONE_MATCH_FRAMING_FALLBACK, data
 
     facts = _pinecone_listing_facts(listings)
-    try:
-        requested_non_metadata_features = _extract_requested_non_metadata_features(
-            user_message=user_message,
-            latest_user_message=latest_user_message,
-            category=category,
-            slots=slots,
-            metadata_filters=metadata_filters,
-        )
-    except Exception:
-        logger.exception("requested_feature_extraction_failed")
-        requested_non_metadata_features = []
+    if requested_non_metadata_features is None:
+        try:
+            requested_non_metadata_features = _extract_requested_non_metadata_features(
+                user_message=user_message,
+                latest_user_message=latest_user_message,
+                category=category,
+                slots=slots,
+                metadata_filters=metadata_filters,
+            )
+        except Exception:
+            logger.exception("requested_feature_extraction_failed")
+            requested_non_metadata_features = []
     try:
         data = _pinecone_match_audit(
             user_message=user_message,
@@ -1261,6 +1312,7 @@ def _optional_contact_request(reason: str) -> str:
 _METADATA_FILTER_KEYS = {
     "length_ft",
     "width_ft",
+    "height_ft",
     "payload_lbs",
     "max_price",
     "hitch_type",
@@ -1273,7 +1325,7 @@ _CONFIDENT_CLASSIFICATIONS = {"medium", "high"}
 _CONFIDENT_PREFERENCE_NULL = {"medium", "high"}
 _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
 _DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
-_DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed"}
+_DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed", "dump"}
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
 _GENERIC_CATEGORY_CHOICE_SLOT = "generic_category_choice"
 _GENERIC_CATEGORY_QUESTION = "What type of trailer are you looking for?"
@@ -1283,6 +1335,23 @@ _MAKE_GENERIC_PAYLOAD_SLOT = "haul_weight_lbs"
 _MAKE_GENERIC_QUESTIONS = {
     _MAKE_GENERIC_LENGTH_SLOT: "What trailer length would you prefer?",
     _MAKE_GENERIC_PAYLOAD_SLOT: "What payload or weight capacity do you need?",
+}
+_PSEUDO_SLOT_DEFINITIONS: dict[str, dict[str, Any]] = {
+    _GENERIC_CATEGORY_CHOICE_SLOT: {
+        "question": _GENERIC_CATEGORY_QUESTION,
+        "answer_guidance": "Store the trailer category the customer chooses. Accept supported trailer-type names only.",
+        "mapped_metadata_fields": [],
+    },
+    _MAKE_CATEGORY_CHOICE_SLOT: {
+        "question": "",
+        "answer_guidance": "Store the category the customer chooses from the presented make-specific category options.",
+        "mapped_metadata_fields": [],
+    },
+    _DYNAMIC_WIDTH_SLOT: {
+        "question": _DYNAMIC_WIDTH_QUESTION,
+        "answer_guidance": "Store the required trailer or cargo width. Accept feet, inches, or clear width dimension shorthand only when width is being answered.",
+        "mapped_metadata_fields": ["width_ft"],
+    },
 }
 _SLOT_METADATA_FILTER_MAP = {
     "base_category": ("subcategory",),
@@ -1418,6 +1487,27 @@ def _explicit_width_requested(message: str, awaiting_slot: str | None = None) ->
     return bool(str(awaiting_slot or "") == _DYNAMIC_WIDTH_SLOT and re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|')\b", text))
 
 
+def _explicit_height_requested(message: str, awaiting_slot: str | None = None) -> bool:
+    text = str(message or "").lower()
+    if _has_dimension_shorthand(text):
+        return True
+    if re.search(
+        r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|'|in|inch|inches)\s*(?:(?:high|tall)\b|(?:\w+\s+){0,3}(?:side|sides|wall|walls)\b)",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:height|high|tall|side|sides|wall|walls)\b",
+        text,
+    ) and re.search(r"\d+(?:\.\d+)?", text):
+        return True
+    return bool(
+        _slot_is_length_like(awaiting_slot)
+        and re.search(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|'|in|inch|inches)\b", text)
+        and re.search(r"\b(?:height|high|tall|side|sides|wall|walls)\b", text)
+    )
+
+
 def _explicit_payload_requested(message: str, awaiting_slot: str | None = None) -> bool:
     text = str(message or "").lower()
     has_weight_unit = bool(re.search(r"\b\d[\d,]*(?:\.\d+)?\s*(?:k|m)?\s*(?:lbs?|pounds?|#)\b", text))
@@ -1465,6 +1555,8 @@ def _message_has_filter_evidence(key: str, latest_message: str, awaiting_slot: s
         return _explicit_length_requested(latest_message, awaiting_slot)
     if key == "width_ft":
         return _explicit_width_requested(latest_message, awaiting_slot)
+    if key == "height_ft":
+        return _explicit_height_requested(latest_message, awaiting_slot)
     if key == "payload_lbs":
         return _explicit_payload_requested(latest_message, awaiting_slot)
     if key == "max_price":
@@ -1535,6 +1627,625 @@ def _should_apply_inferred_make(
     return not bool(category)
 
 
+_CONFIDENT_FIELD_EXTRACTION = {"medium", "high"}
+_LLM_ADJUDICATED_METADATA_KEYS = _METADATA_FILTER_KEYS - {"make"}
+
+
+def _metadata_field_definitions() -> dict[str, str]:
+    return {
+        "length_ft": "Trailer, deck, cargo, or bin length. Accept equivalent length units such as inches when the user is clearly giving length.",
+        "width_ft": "Trailer, cargo, or load width. Do not use a width value as length.",
+        "height_ft": "Trailer side-wall, cargo-wall, or usable side height. Wording such as '3 inch sides', '3 inch walls', '3 ft sides', or '3 ft walls' etc should be treated as height.",
+        "payload_lbs": "Payload, load, haul, or carried weight/capacity. This is not GVWR unless the user specifically asks for GVWR elsewhere.",
+        "max_price": "Maximum price, budget, or amount the customer wants to stay under.",
+        "hitch_type": "Trailer hitch preference. Only gooseneck or bumper pull are supported.",
+        "color": "Requested trailer color.",
+        "subcategory": "Only for Aluminum category: the underlying trailer type/base category such as utility, equipment, enclosed, or similar.",
+    }
+
+
+def _slot_field_definitions(category: str | None) -> dict[str, dict[str, Any]]:
+    definitions = {
+        str(key): dict(value)
+        for key, value in _PSEUDO_SLOT_DEFINITIONS.items()
+    }
+    if not category:
+        return definitions
+    spec = get_trailer_fields_as_dict(category)
+    questions = spec.get("questions") or {}
+    answer_guidance = spec.get("answer_guidance") or {}
+    slots = (spec.get("required_slots") or []) + (spec.get("optional_slots") or [])
+    for slot in slots:
+        slot_key = str(slot)
+        definitions[slot_key] = {
+            "question": questions.get(slot_key) or "",
+            "answer_guidance": answer_guidance.get(slot_key) or "",
+            "mapped_metadata_fields": list(_SLOT_METADATA_FILTER_MAP.get(slot_key, ())),
+        }
+    return definitions
+
+
+def _slot_definition(
+    slot: str | None,
+    *,
+    category: str | None,
+    questions_override: dict[str, str] | None = None,
+    queued_question: str | None = None,
+    make_category_options: list[str] | None = None,
+) -> dict[str, Any]:
+    slot_key = str(slot or "")
+    definition = dict(_slot_field_definitions(category).get(slot_key) or {})
+    if queued_question:
+        definition["question"] = queued_question
+    elif questions_override and slot_key in questions_override:
+        definition["question"] = questions_override.get(slot_key) or definition.get("question") or ""
+    if slot_key == _MAKE_CATEGORY_CHOICE_SLOT and make_category_options:
+        definition["question"] = (
+            "Which category should I use: "
+            f"{', '.join(make_category_options)}?"
+        )
+    return {
+        "question": str(definition.get("question") or "").strip(),
+        "answer_guidance": str(definition.get("answer_guidance") or "").strip(),
+        "mapped_metadata_fields": list(definition.get("mapped_metadata_fields") or []),
+    }
+
+
+def _last_assistant_question(messages: list[dict[str, Any]]) -> str:
+    for item in reversed(messages or []):
+        if str(item.get("role") or "").lower() == "assistant":
+            return str(item.get("content") or "")
+    return ""
+
+
+def _queued_question_for_slot(pending_questions: list[QuestionItem], slot: str | None) -> str:
+    slot_key = str(slot or "")
+    for item in pending_questions or []:
+        if str(item.get("slot") or "") == slot_key:
+            return str(item.get("question") or "").strip()
+    return ""
+
+
+def _active_question_context(
+    *,
+    category: str | None,
+    awaiting_slot: str | None,
+    pending_questions: list[QuestionItem],
+    questions_override: dict[str, str] | None = None,
+    make_category_options: list[str] | None = None,
+    messages: list[dict[str, Any]] | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    active_slot = str(awaiting_slot or "").strip()
+    if not active_slot:
+        last_assistant = _last_assistant_question(messages or [])
+        for item in pending_questions or []:
+            candidate = str(item.get("slot") or "").strip()
+            candidate_question = str(item.get("question") or "").strip()
+            if candidate and candidate_question and candidate_question == last_assistant:
+                active_slot = candidate
+                break
+    if not active_slot:
+        return None, {}
+    queued_question = _queued_question_for_slot(pending_questions, active_slot)
+    definition = _slot_definition(
+        active_slot,
+        category=category,
+        questions_override=questions_override,
+        queued_question=queued_question or _last_assistant_question(messages or []),
+        make_category_options=make_category_options,
+    )
+    return active_slot, definition
+
+
+def _slot_value_to_metadata_updates(slot: str, value: Any, category: str | None) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    for metadata_key in _SLOT_METADATA_FILTER_MAP.get(str(slot), ()):
+        sanitized = _canonicalize_adjudicated_metadata(key=str(metadata_key), value=value, category=category)
+        if sanitized:
+            clean_key, clean_value = sanitized
+            updates[clean_key] = clean_value
+    return updates
+
+
+def _question_turn_fallback_reply(question_text: str, latest_message: str) -> str:
+    text = str(latest_message or "").strip()
+    if not text:
+        return ""
+    if "?" in text:
+        return "I can help with that, and I still need one detail to narrow this down."
+    if re.search(r"\b(?:later|not sure|dont know|don't know|idk|maybe|whatever)\b", text, re.I):
+        return "No problem."
+    return ""
+
+
+def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecision:
+    confidence = str(data.get("confidence") or "low").lower()
+    if confidence not in {"medium", "high"}:
+        confidence = "low"
+    return QuestionTurnDecision(
+        answered_active_question=bool(data.get("answered_active_question")),
+        no_preference_for_active_question=bool(data.get("no_preference_for_active_question")),
+        active_slot_value=str(data.get("active_slot_value") or "").strip() or None,
+        metadata_filters_update=dict(data.get("metadata_filters_update") or {}),
+        slots_collected_update=dict(data.get("slots_collected_update") or {}),
+        requested_non_metadata_features=[
+            str(item).strip()
+            for item in (data.get("requested_non_metadata_features") or [])
+            if str(item).strip()
+        ],
+        reply_to_user=str(data.get("reply_to_user") or "").strip(),
+        confidence=confidence,
+        reason=str(data.get("reason") or ""),
+    )
+
+
+def _fallback_question_turn_decision(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    active_slot: str,
+    active_question: str,
+    active_definition: dict[str, Any],
+    latest_message: str,
+    pending_questions: list[QuestionItem],
+    make_category_options: list[str],
+) -> QuestionTurnDecision:
+    del active_definition, active_question
+    text = str(latest_message or "").strip()
+    if not text:
+        return QuestionTurnDecision(reason="empty_latest_message", confidence="low")
+
+    if active_slot == _MAKE_CATEGORY_CHOICE_SLOT:
+        chosen_category = _category_from_choice(text, make_category_options)
+        if chosen_category:
+            return QuestionTurnDecision(
+                answered_active_question=True,
+                active_slot_value=chosen_category,
+                confidence="high",
+                reason="resolved_make_category_choice",
+            )
+        if _classify_make_category_no_preference(
+            user_message=text,
+            make_category_options=make_category_options,
+            metadata_filters=state.get("metadata_filters_collected") or {},
+            slots=state.get("slots_collected") or {},
+        ):
+            return QuestionTurnDecision(
+                no_preference_for_active_question=True,
+                confidence="high",
+                reason="make_category_choice_no_preference",
+            )
+        return QuestionTurnDecision(
+            reply_to_user=_question_turn_fallback_reply(active_question, text),
+            reason="unanswered_make_category_choice",
+            confidence="low",
+        )
+
+    if active_slot == _GENERIC_CATEGORY_CHOICE_SLOT:
+        chosen_category = resolve_category_from_text(text).category
+        if chosen_category:
+            return QuestionTurnDecision(
+                answered_active_question=True,
+                active_slot_value=chosen_category,
+                confidence="high",
+                reason="resolved_generic_category_choice",
+            )
+        if _classify_generic_category_no_preference(
+            user_message=text,
+            metadata_filters=state.get("metadata_filters_collected") or {},
+            slots=state.get("slots_collected") or {},
+        ):
+            return QuestionTurnDecision(
+                no_preference_for_active_question=True,
+                confidence="high",
+                reason="generic_category_choice_no_preference",
+            )
+        return QuestionTurnDecision(
+            reply_to_user=_question_turn_fallback_reply(active_question, text),
+            reason="unanswered_generic_category_choice",
+            confidence="low",
+        )
+
+    preference_decision = classify_no_preference(
+        category=category,
+        user_message=text,
+        awaiting_slot=active_slot,
+        pending_questions=pending_questions,
+        slots_collected=state.get("slots_collected") or {},
+        metadata_filters_collected=state.get("metadata_filters_collected") or {},
+        allowed_category_slots=sorted(_category_slots(category)),
+        active_question=active_question,
+    )
+    pref_data = _model_dump(preference_decision)
+    if pref_data.get("has_no_preference") and pref_data.get("confidence") in _CONFIDENT_PREFERENCE_NULL:
+        return QuestionTurnDecision(
+            no_preference_for_active_question=True,
+            confidence="high",
+            reason=str(pref_data.get("reason") or "active_question_no_preference"),
+        )
+
+    temp_slots = dict(state.get("slots_collected") or {})
+    temp_metadata = dict(state.get("metadata_filters_collected") or {})
+    extracted_slots, _extracted_metadata, extracted_features = _apply_explicit_filter_extraction(
+        state=state,
+        category=category,
+        slots=temp_slots,
+        metadata_filters=temp_metadata,
+        latest_message=text,
+        awaiting_slot=active_slot,
+        apply_slot_updates=True,
+    )
+    active_value = extracted_slots.get(active_slot)
+    if active_value in (None, ""):
+        active_value = _slot_updates_from_metadata(category, temp_metadata).get(active_slot)
+    if active_value not in (None, ""):
+        return QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value=str(active_value).strip(),
+            metadata_filters_update={
+                key: value
+                for key, value in temp_metadata.items()
+                if key not in (state.get("metadata_filters_collected") or {})
+                or (state.get("metadata_filters_collected") or {}).get(key) != value
+            },
+            slots_collected_update={
+                key: value
+                for key, value in temp_slots.items()
+                if key not in (state.get("slots_collected") or {})
+                or (state.get("slots_collected") or {}).get(key) != value
+            },
+            requested_non_metadata_features=extracted_features,
+            confidence="high",
+            reason="fallback_explicit_extraction_answered",
+        )
+
+    return QuestionTurnDecision(
+        reply_to_user=_question_turn_fallback_reply(active_question, text),
+        requested_non_metadata_features=extracted_features,
+        confidence="low",
+        reason="fallback_unanswered_active_question",
+    )
+
+
+def _adjudicate_active_question_turn(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    active_slot: str,
+    active_question: str,
+    active_definition: dict[str, Any],
+    latest_message: str,
+    pending_questions: list[QuestionItem],
+    make_category_options: list[str],
+) -> QuestionTurnDecision:
+    if not os.getenv("OPENAI_API_KEY"):
+        return _fallback_question_turn_decision(
+            state=state,
+            category=category,
+            active_slot=active_slot,
+            active_question=active_question,
+            active_definition=active_definition,
+            latest_message=latest_message,
+            pending_questions=pending_questions,
+            make_category_options=make_category_options,
+        )
+    context = {
+        "latest_user_message": latest_message,
+        "recent_messages": (state.get("messages") or [])[-8:],
+        "current_category": category,
+        "active_slot": active_slot,
+        "active_question": active_question,
+        "active_slot_definition": active_definition,
+        "pending_questions": pending_questions,
+        "slot_definitions": _slot_field_definitions(category),
+        "metadata_field_definitions": _metadata_field_definitions(),
+        "existing_slots_collected": state.get("slots_collected") or {},
+        "existing_metadata_filters_collected": state.get("metadata_filters_collected") or {},
+        "make_category_options": make_category_options,
+    }
+    try:
+        decision = _question_turn_adjudicator_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You evaluate the latest user turn while a trailer qualification question is active. "
+                        "Return structured data only.\n"
+                        "Determine whether the user answered the active question, explicitly said no preference, or did not answer it.\n"
+                        "Treat the active slot definition and question text as authoritative.\n"
+                        "If the active question was answered, set answered_active_question=true and provide active_slot_value.\n"
+                        "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
+                        "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
+                        "You may also extract other valid metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same latest user message.\n"
+                        "Do not invent updates. Do not use listing evidence. Do not rewrite the active question. "
+                        "Use medium or high confidence only when clearly supported."
+                    )
+                ),
+                HumanMessage(content=_safe_json(context)),
+            ]
+        )
+        return _sanitize_question_turn_decision(
+            _model_dump(decision) if isinstance(decision, BaseModel) else {}
+        )
+    except Exception:
+        logger.exception("Question turn adjudicator failed; using fallback")
+        return _fallback_question_turn_decision(
+            state=state,
+            category=category,
+            active_slot=active_slot,
+            active_question=active_question,
+            active_definition=active_definition,
+            latest_message=latest_message,
+            pending_questions=pending_questions,
+            make_category_options=make_category_options,
+        )
+
+
+def _normalize_length_or_width_value(value: Any) -> Any:
+    text = str(value or "").strip()
+    if not text:
+        return value
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:in|inch|inches)\b", text, re.I)
+    if not match:
+        return value
+    feet = float(match.group(1)) / 12
+    return f"{feet:g} ft"
+
+
+def _dimension_shorthand_updates(text: str) -> dict[str, Any]:
+    match = re.search(
+        r"(?<!\d)(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?\s*[xX]\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?"
+        r"(?:\s*[xX]\s*(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?)?(?!\d)",
+        text or "",
+        re.I,
+    )
+    if not match:
+        return {}
+    updates: dict[str, Any] = {
+        "width_ft": match.group(1),
+        "length_ft": match.group(2),
+    }
+    if match.group(3):
+        updates["height_ft"] = match.group(3)
+    return updates
+
+
+def _normalize_payload_value(value: Any) -> Any:
+    text = str(value or "").strip()
+    if not text:
+        return value
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*k\s*(?:lbs?|pounds?|#)?\b", text, re.I)
+    if not match:
+        return value
+    pounds = float(match.group(1)) * 1000
+    return f"{pounds:g} lbs"
+
+
+def _canonicalize_color(value: Any) -> Any:
+    text = str(value or "").strip()
+    return text.lower() if text else value
+
+
+def _canonicalize_adjudicated_metadata(
+    *,
+    key: str,
+    value: Any,
+    category: str | None,
+) -> tuple[str, Any] | None:
+    if value in (None, "") or key not in _METADATA_FILTER_KEYS:
+        return None
+    if key == "make":
+        return None
+    if key == "subcategory" and normalize_category(category) != "Aluminum":
+        logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=non_aluminum_category", value)
+        return None
+    if key == "subcategory":
+        subcategory = normalize_subcategory(str(value))
+        if not subcategory:
+            logger.info("metadata_filter_rejected | key=subcategory | value=%r | reason=invalid", value)
+            return None
+        return key, subcategory
+    if key == "hitch_type":
+        hitch = _normalize_allowed_hitch(value)
+        if not hitch:
+            logger.info("metadata_filter_rejected | key=hitch_type | value=%r | reason=invalid", value)
+            return None
+        return key, hitch
+    if key in {"length_ft", "width_ft", "height_ft"}:
+        return key, _normalize_length_or_width_value(value)
+    if key == "payload_lbs":
+        return key, _normalize_payload_value(value)
+    if key == "color":
+        return key, _canonicalize_color(value)
+    return key, value
+
+
+def _canonicalize_adjudicated_slots(
+    *,
+    raw: dict[str, Any],
+    allowed_category_slots: set[str],
+    metadata_updates: dict[str, Any],
+) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    for key, value in raw.items():
+        key = str(key)
+        if key not in allowed_category_slots or value in (None, ""):
+            continue
+        mapped_fields = _SLOT_METADATA_FILTER_MAP.get(key, ())
+        mapped_value = next(
+            (metadata_updates[field] for field in mapped_fields if metadata_updates.get(field) not in (None, "")),
+            None,
+        )
+        if mapped_value is not None:
+            updates[key] = mapped_value
+        elif any(field in {"length_ft", "width_ft"} for field in mapped_fields):
+            updates[key] = _normalize_length_or_width_value(value)
+        elif any(field == "payload_lbs" for field in mapped_fields):
+            updates[key] = _normalize_payload_value(value)
+        else:
+            updates[key] = value
+    return updates
+
+
+def _legacy_field_updates_from_filter_extraction(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    awaiting_slot: str | None,
+    apply_slot_updates: bool,
+) -> FieldExtractionAdjudicationDecision:
+    extraction = _extract_filter_decision(state, category)
+    metadata = _metadata_filters_from_extraction(
+        extraction,
+        state.get("user_message") or "",
+        awaiting_slot,
+    )
+    slots = (
+        _slot_updates_from_extraction(
+            extraction,
+            _category_slots(category),
+            state.get("user_message") or "",
+            awaiting_slot,
+        )
+        if apply_slot_updates and category
+        else {}
+    )
+    return FieldExtractionAdjudicationDecision(
+        metadata_filters_update=metadata,
+        slots_collected_update=slots,
+        requested_non_metadata_features=[],
+        confidence="medium" if metadata or slots else "low",
+        reason="legacy_filter_extraction_fallback",
+    )
+
+
+def _extract_field_updates(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    awaiting_slot: str | None,
+    apply_slot_updates: bool,
+    reset_active_request: bool = False,
+) -> FieldExtractionAdjudicationDecision:
+    latest = state.get("user_message") or ""
+    if not os.getenv("OPENAI_API_KEY"):
+        return _legacy_field_updates_from_filter_extraction(
+            state=state,
+            category=category,
+            awaiting_slot=awaiting_slot,
+            apply_slot_updates=apply_slot_updates,
+        )
+
+    allowed_category_slots = _category_slots(category)
+    recent = [
+        str(m.get("content") or "")
+        for m in reversed((state.get("messages") or [])[-8:])
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    context = {
+        "latest_user_message": latest,
+        "recent_user_messages": recent,
+        "current_category": category,
+        "category_changed_or_search_reset": reset_active_request,
+        "awaiting_slot": awaiting_slot,
+        "previous_assistant_question": _last_assistant_question(state.get("messages") or []),
+        "metadata_field_definitions": _metadata_field_definitions(),
+        "category_slot_definitions": _slot_field_definitions(category),
+        "existing_slots_collected": state.get("slots_collected") or {},
+        "existing_metadata_filters_collected": state.get("metadata_filters_collected") or {},
+        "allowed_metadata_fields": sorted(_LLM_ADJUDICATED_METADATA_KEYS),
+        "allowed_category_slots": sorted(allowed_category_slots if apply_slot_updates else set()),
+    }
+    try:
+        decision = _field_extraction_adjudicator_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Extract all explicit trailer search updates from the latest user message in one pass. "
+                        "Return structured data only.\n"
+                        "The metadata field definitions and category slot definitions are authoritative. "
+                        "Do not extract make/manufacturer; make is handled by a separate resolver. "
+                        "Do not extract subcategory unless current_category is Aluminum. "
+                        "Use recent messages and the previous assistant question only as context for interpreting the latest user message, not as new updates. "
+                        "Extract requested_non_metadata_features for user-requested equipment/configuration/features not represented by metadata filters or category slots. "
+                        "Do not infer requested_non_metadata_features from inventory/listing text. "
+                        "Accept equivalent units such as inches when they clearly answer a length or width field. "
+                        "Compact trailer size notation is positional: AxB means width A and length B; AxBxC means width A, length B, height C. "
+                        "If confidence is low, leave updates empty and optionally set clarification_needed."
+                    )
+                ),
+                HumanMessage(content=f"Return field extraction for this context:\n{_safe_json(context)}"),
+            ]
+        )
+    except Exception:
+        logger.exception("field_extraction_adjudicator_llm_failed")
+        if (os.getenv("FIELD_EXTRACTION_LEGACY_FALLBACK_ENABLED") or "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return _legacy_field_updates_from_filter_extraction(
+                state=state,
+                category=category,
+                awaiting_slot=awaiting_slot,
+                apply_slot_updates=apply_slot_updates,
+            )
+        return FieldExtractionAdjudicationDecision(
+            confidence="low",
+            reason="field_extraction_adjudicator_exception",
+        )
+
+    data = _model_dump(decision)
+    confidence = str(data.get("confidence") or "low").lower()
+    if confidence not in _CONFIDENT_FIELD_EXTRACTION:
+        return FieldExtractionAdjudicationDecision(
+            requested_non_metadata_features=[],
+            rejected_candidates=data.get("rejected_candidates") or [],
+            clarification_needed=data.get("clarification_needed"),
+            confidence="low",
+            reason=data.get("reason") or "low_confidence",
+        )
+
+    shorthand_updates = _dimension_shorthand_updates(latest)
+    metadata_updates: dict[str, Any] = {}
+    for key, value in (data.get("metadata_filters_update") or {}).items():
+        sanitized = _canonicalize_adjudicated_metadata(key=str(key), value=value, category=category)
+        if sanitized:
+            clean_key, clean_value = sanitized
+            metadata_updates[clean_key] = clean_value
+    for key in ("width_ft", "length_ft"):
+        if key in shorthand_updates:
+            sanitized = _canonicalize_adjudicated_metadata(
+                key=key,
+                value=shorthand_updates[key],
+                category=category,
+            )
+            if sanitized:
+                clean_key, clean_value = sanitized
+                metadata_updates[clean_key] = clean_value
+
+    slot_updates = (
+        _canonicalize_adjudicated_slots(
+            raw=data.get("slots_collected_update") or {},
+            allowed_category_slots=allowed_category_slots,
+            metadata_updates=metadata_updates,
+        )
+        if apply_slot_updates and category
+        else {}
+    )
+    features = _normalize_requested_feature_list(data.get("requested_non_metadata_features") or [])
+    return FieldExtractionAdjudicationDecision(
+        metadata_filters_update=metadata_updates,
+        slots_collected_update=slot_updates,
+        requested_non_metadata_features=features,
+        rejected_candidates=data.get("rejected_candidates") or [],
+        clarification_needed=data.get("clarification_needed"),
+        confidence=confidence if confidence in {"medium", "high"} else "low",
+        reason=data.get("reason") or "",
+    )
+
+
 def _sanitize_metadata_filter_update(
     key: str,
     value: Any,
@@ -1570,7 +2281,7 @@ def _sanitize_metadata_filter_update(
             logger.info("metadata_filter_rejected | key=make | value=%r | reason=unknown", value)
             return None
         return key, resolution.make
-    return key, value
+    return _canonicalize_adjudicated_metadata(key=key, value=value, category=None)
 
 
 def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision:
@@ -1591,6 +2302,8 @@ def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision
         # Trailer shorthand is width x length x optional height.
         updates["width_ft"] = shorthand_dimension.group(1)
         updates["length_ft"] = shorthand_dimension.group(2)
+        if shorthand_dimension.group(3):
+            updates["height_ft"] = shorthand_dimension.group(3)
 
     width = _first_match(
         (
@@ -1620,6 +2333,14 @@ def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision
         ),
         width_scrubbed,
     )
+    height = _first_match(
+        (
+            r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|in|inch|inches)\s*(?:high|tall)\b",
+            r"\b(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|in|inch|inches)\s*(?:(?:\w+\s+){0,3})?(?:side|sides|wall|walls)\b",
+            r"\b(?:height|high|tall|side|sides|wall|walls)\D{0,40}?(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|in|inch|inches)\b",
+        ),
+        text,
+    )
     payload = _first_match(
         (
             r"\b(\d+(?:\.\d+)?)\s*(k|m)?\s*(lbs?|pounds?|#)\b",
@@ -1639,6 +2360,8 @@ def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision
         updates["length_ft"] = length
     if width and "width_ft" not in updates:
         updates["width_ft"] = width
+    if height and "height_ft" not in updates:
+        updates["height_ft"] = height
     if payload:
         updates["payload_lbs"] = payload
     if price:
@@ -1733,11 +2456,20 @@ def _metadata_filters_from_decision(
     decision: dict[str, Any],
     latest_message: str = "",
     awaiting_slot: str | None = None,
+    category: str | None = None,
 ) -> dict[str, Any]:
     raw = decision.get("metadata_filters_update") or {}
     updates: dict[str, Any] = {}
     for key, value in raw.items():
-        sanitized = _sanitize_metadata_filter_update(str(key), value, latest_message, awaiting_slot)
+        key = str(key)
+        if key == "make":
+            resolution = resolve_make_from_text(str(value), use_llm_fallback=False)
+            if not resolution.make:
+                resolution = resolve_make_from_text(latest_message or "", use_llm_fallback=False)
+            if resolution.make:
+                updates["make"] = resolution.make
+            continue
+        sanitized = _canonicalize_adjudicated_metadata(key=key, value=value, category=category)
         if sanitized:
             clean_key, clean_value = sanitized
             updates[clean_key] = clean_value
@@ -1774,9 +2506,6 @@ def _slot_updates_from_decision(
         if value in (None, ""):
             continue
         if allowed_category_slots and key not in allowed_category_slots:
-            continue
-        if not _message_has_slot_evidence(str(key), value, latest_message, awaiting_slot):
-            logger.info("slot_update_rejected | slot=%s | value=%r | reason=not_explicit", key, value)
             continue
         updates[key] = value
     return updates
@@ -2248,6 +2977,8 @@ def _catalogue_redirect_allowed(
     latest_message: str,
     no_preference_decision: PreferenceNullDecision | None = None,
 ) -> bool:
+    if state.get("awaiting_slot") or state.get("pending_questions"):
+        return False
     if _has_inventory_constraints(state, category=category, latest_message=latest_message):
         return False
     if _has_obvious_catalogue_intent(latest_message):
@@ -2638,6 +3369,44 @@ def _apply_explicit_filter_extraction(
     latest_message: str,
     awaiting_slot: str | None,
     apply_slot_updates: bool,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    extraction = _extract_field_updates(
+        state={
+            **state,
+            "trailer_category": category,
+            "slots_collected": slots,
+            "metadata_filters_collected": metadata_filters,
+        },
+        category=category,
+        awaiting_slot=awaiting_slot,
+        apply_slot_updates=apply_slot_updates,
+        reset_active_request=bool(state.get("trailer_category") and category and state.get("trailer_category") != category),
+    )
+    extracted_metadata = dict(extraction.metadata_filters_update or {})
+    extracted_slots = dict(extraction.slots_collected_update or {})
+    logger.info(
+        "field_extraction_applied | category=%r | confidence=%r | extracted_metadata=%s | extracted_slots=%s | requested_non_metadata_features=%s",
+        category,
+        extraction.confidence,
+        json.dumps(extracted_metadata, default=str),
+        json.dumps(extracted_slots, default=str),
+        json.dumps(extraction.requested_non_metadata_features or [], default=str),
+    )
+    for key, value in extracted_metadata.items():
+        if key in _METADATA_FILTER_KEYS and value not in (None, ""):
+            metadata_filters[key] = value
+    return extracted_slots, extracted_metadata, list(extraction.requested_non_metadata_features or [])
+
+
+def _legacy_apply_explicit_filter_extraction(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    latest_message: str,
+    awaiting_slot: str | None,
+    apply_slot_updates: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     allowed_category_slots = _category_slots(category)
     extraction = _extract_filter_decision(
@@ -2680,6 +3449,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     slots_skipped = set(slots_skipped_before)
     metadata_filters_before = dict(state.get("metadata_filters_collected") or {})
     metadata_filters = dict(metadata_filters_before)
+    requested_non_metadata_features = list(state.get("requested_non_metadata_features") or [])
     invalid_required_slot: str | None = None
     awaiting_slot = state.get("awaiting_slot")
     category_before = state.get("trailer_category")
@@ -2710,6 +3480,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         slots = {}
         slots_skipped = set()
         metadata_filters = {}
+        requested_non_metadata_features = []
         awaiting_slot = None
         reset_result_state = True
 
@@ -2746,12 +3517,24 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             make_category_options = []
             slots_skipped.add(_MAKE_CATEGORY_CHOICE_SLOT)
         else:
+            _apply_explicit_filter_extraction(
+                state=state,
+                category=category,
+                slots=slots,
+                metadata_filters=metadata_filters,
+                latest_message=latest_message,
+                awaiting_slot=None,
+                apply_slot_updates=False,
+            )
             assistant_text = (
                 "Which category should I use: "
                 f"{', '.join(make_category_options)}?"
                 if make_category_options
                 else "Which category should I use?"
             )
+            reply_prefix = _question_turn_fallback_reply(assistant_text, latest_message)
+            if reply_prefix:
+                assistant_text = f"{reply_prefix}\n\n{assistant_text}"
             decision["action"] = "respond"
             return {
                 **state,
@@ -2759,6 +3542,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 "slots_collected": slots,
                 "slots_skipped": sorted(slots_skipped),
                 "metadata_filters_collected": metadata_filters,
+                "requested_non_metadata_features": requested_non_metadata_features,
                 "active_search_request_text": _updated_active_search_request_text(
                     state=state,
                     latest_message=latest_message,
@@ -2786,6 +3570,44 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         ):
             awaiting_slot = None
             slots_skipped.add(_GENERIC_CATEGORY_CHOICE_SLOT)
+        elif latest_message.strip():
+            _apply_explicit_filter_extraction(
+                state=state,
+                category=category,
+                slots=slots,
+                metadata_filters=metadata_filters,
+                latest_message=latest_message,
+                awaiting_slot=None,
+                apply_slot_updates=False,
+            )
+            make_resolution = resolve_make_from_text(latest_message, use_llm_fallback=False)
+            if make_resolution.make:
+                metadata_filters["make"] = make_resolution.make
+            assistant_text = _GENERIC_CATEGORY_QUESTION
+            reply_prefix = _question_turn_fallback_reply(assistant_text, latest_message)
+            if reply_prefix:
+                assistant_text = f"{reply_prefix}\n\n{assistant_text}"
+            decision["action"] = "respond"
+            return {
+                **state,
+                "trailer_category": category,
+                "slots_collected": slots,
+                "slots_skipped": sorted(slots_skipped),
+                "metadata_filters_collected": metadata_filters,
+                "requested_non_metadata_features": requested_non_metadata_features,
+                "active_search_request_text": _updated_active_search_request_text(
+                    state=state,
+                    latest_message="",
+                    slots=slots,
+                    metadata_filters=metadata_filters,
+                    reset_active_request=category_changed or make_changed,
+                ),
+                "make_category_options": make_category_options,
+                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+                "pending_questions": [],
+                "assistant_text": assistant_text,
+                "mind_decision": decision,
+            }
 
     category, category_options, make_question = _apply_make_resolution(
         latest_message=latest_message,
@@ -2804,6 +3626,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         slots = {}
         slots_skipped = set()
         metadata_filters = {"make": make_after}
+        requested_non_metadata_features = []
         awaiting_slot = None
         reset_result_state = True
     if _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped:
@@ -2826,6 +3649,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
+            "requested_non_metadata_features": requested_non_metadata_features,
             "active_search_request_text": _updated_active_search_request_text(
                 state=state,
                 latest_message=latest_message,
@@ -2841,99 +3665,222 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         }
 
     allowed_category_slots = _category_slots(category)
-    preference_decision = classify_no_preference(
+    pending_source_for_turn = [] if reset_result_state else (state.get("pending_questions") or [])
+    active_qna_slot, active_qna_definition = _active_question_context(
         category=category,
-        user_message=latest_message,
         awaiting_slot=awaiting_slot,
-        pending_questions=[] if reset_result_state else (state.get("pending_questions") or []),
-        slots_collected=slots,
-        metadata_filters_collected=metadata_filters,
-        allowed_category_slots=sorted(allowed_category_slots),
-        active_question=_last_assistant_text(state.get("messages") or []),
+        pending_questions=pending_source_for_turn,
+        make_category_options=make_category_options,
+        messages=state.get("messages") or [],
     )
-    if _catalogue_redirect_allowed(
-        state,
-        category=category,
-        latest_message=latest_message,
-        no_preference_decision=preference_decision,
-    ):
-        return _catalogue_redirect_state(
-            state,
-            decision=decision,
+    active_qna_question = str(active_qna_definition.get("question") or "").strip()
+    active_qna_unanswered = False
+    active_qna_reply = ""
+    if active_qna_slot and latest_message.strip():
+        question_turn = _adjudicate_active_question_turn(
+            state={
+                **state,
+                "trailer_category": category,
+                "slots_collected": slots,
+                "metadata_filters_collected": metadata_filters,
+            },
             category=category,
-            slots=slots,
-            slots_skipped=slots_skipped,
-            metadata_filters=metadata_filters,
+            active_slot=active_qna_slot,
+            active_question=active_qna_question,
+            active_definition=active_qna_definition,
+            latest_message=latest_message,
+            pending_questions=pending_source_for_turn,
+            make_category_options=make_category_options,
         )
-    awaiting_slot, slots_skipped, _removed_filters = _apply_preference_null_decision(
-        category=category,
-        awaiting_slot=awaiting_slot,
-        pending=[] if reset_result_state else (state.get("pending_questions") or []),
-        metadata_filters=metadata_filters,
-        slots_skipped=slots_skipped,
-        decision=preference_decision,
-    )
-    evidence_awaiting_slot = awaiting_slot
-
-    if awaiting_slot and awaiting_slot not in slots and awaiting_slot not in slots_skipped and latest_message.strip():
-        candidate_value = latest_message.strip()
-        is_valid, reason = _validate_slot_value(awaiting_slot, candidate_value)
-        if is_valid:
-            slots[awaiting_slot] = candidate_value
-            slots_skipped.discard(str(awaiting_slot))
-            awaiting_slot = None
+        logger.info(
+            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | confidence=%r | reason=%r",
+            active_qna_slot,
+            question_turn.answered_active_question,
+            question_turn.no_preference_for_active_question,
+            question_turn.confidence,
+            question_turn.reason,
+        )
+        if question_turn.no_preference_for_active_question:
+            slots_skipped.add(str(active_qna_slot))
+            awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
+            for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
+                metadata_filters.pop(str(key), None)
+        elif question_turn.answered_active_question and question_turn.active_slot_value not in (None, ""):
+            is_valid, reason = _validate_slot_value(active_qna_slot, question_turn.active_slot_value)
+            if is_valid:
+                slots[active_qna_slot] = question_turn.active_slot_value
+                slots_skipped.discard(str(active_qna_slot))
+                awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
+                for key, value in _slot_value_to_metadata_updates(
+                    active_qna_slot,
+                    question_turn.active_slot_value,
+                    category,
+                ).items():
+                    metadata_filters[key] = value
+            else:
+                invalid_required_slot = active_qna_slot
+                active_qna_unanswered = True
+                active_qna_reply = question_turn.reply_to_user
+                logger.info(
+                    "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                    active_qna_slot,
+                    question_turn.active_slot_value,
+                    reason,
+                )
         else:
-            invalid_required_slot = awaiting_slot
-            logger.info(
-                "slot_validation_failed | slot=%s | value=%r | reason=%s",
-                awaiting_slot,
-                candidate_value,
-                reason,
-            )
+            active_qna_unanswered = True
+            active_qna_reply = question_turn.reply_to_user
 
-    for key, value in _slot_updates_from_decision(
-        decision,
-        allowed_category_slots,
-        latest_message,
-        evidence_awaiting_slot,
-    ).items():
-        is_valid, reason = _validate_slot_value(key, value)
-        if not is_valid:
-            logger.info(
-                "slot_validation_failed | slot=%s | value=%r | reason=%s",
-                key,
-                value,
-                reason,
-            )
-            if not invalid_required_slot:
-                invalid_required_slot = key
-            continue
-        slots[key] = value
-        slots_skipped.discard(str(key))
-
-    for key, value in _metadata_filters_from_decision(decision, latest_message, evidence_awaiting_slot).items():
-        metadata_filters[key] = value
-    extracted_slots, _extracted_metadata = _apply_explicit_filter_extraction(
-        state=state,
-        category=category,
-        slots=slots,
-        metadata_filters=metadata_filters,
-        latest_message=latest_message,
-        awaiting_slot=evidence_awaiting_slot,
-        apply_slot_updates=True,
-    )
-    for key, value in extracted_slots.items():
-        is_valid, reason = _validate_slot_value(key, value)
-        if is_valid:
+        for key, value in _slot_updates_from_decision(
+            {"slots_collected_update": question_turn.slots_collected_update},
+            allowed_category_slots,
+            latest_message,
+            None,
+        ).items():
+            if str(key) == str(active_qna_slot):
+                continue
+            is_valid, reason = _validate_slot_value(key, value)
+            if not is_valid:
+                logger.info(
+                    "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                    key,
+                    value,
+                    reason,
+                )
+                if not invalid_required_slot:
+                    invalid_required_slot = key
+                continue
             slots[key] = value
             slots_skipped.discard(str(key))
+
+        for key, value in _metadata_filters_from_decision(
+            {"metadata_filters_update": question_turn.metadata_filters_update},
+            latest_message,
+            None,
+            category,
+        ).items():
+            if str(key) in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()) and active_qna_unanswered:
+                continue
+            metadata_filters[key] = value
+        supplemental_slots, _supplemental_metadata, supplemental_features = _apply_explicit_filter_extraction(
+            state=state,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=None,
+            apply_slot_updates=True,
+        )
+        for key, value in supplemental_slots.items():
+            if str(key) == str(active_qna_slot):
+                continue
+            is_valid, reason = _validate_slot_value(key, value)
+            if not is_valid:
+                logger.info(
+                    "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                    key,
+                    value,
+                    reason,
+                )
+                if not invalid_required_slot:
+                    invalid_required_slot = key
+                continue
+            slots[key] = value
+            slots_skipped.discard(str(key))
+        if question_turn.requested_non_metadata_features:
+            requested_non_metadata_features = list(question_turn.requested_non_metadata_features or [])
         else:
-            logger.info(
-                "slot_validation_failed | slot=%s | value=%r | reason=%s",
-                key,
-                value,
-                reason,
+            requested_non_metadata_features = list(supplemental_features or [])
+        preference_decision = PreferenceNullDecision(
+            has_no_preference=question_turn.no_preference_for_active_question,
+            target_slots=[active_qna_slot] if question_turn.no_preference_for_active_question else [],
+            confidence=question_turn.confidence,
+            reason=question_turn.reason,
+        )
+    else:
+        preference_decision = classify_no_preference(
+            category=category,
+            user_message=latest_message,
+            awaiting_slot=awaiting_slot,
+            pending_questions=pending_source_for_turn,
+            slots_collected=slots,
+            metadata_filters_collected=metadata_filters,
+            allowed_category_slots=sorted(allowed_category_slots),
+            active_question=_last_assistant_text(state.get("messages") or []),
+        )
+        if _catalogue_redirect_allowed(
+            state,
+            category=category,
+            latest_message=latest_message,
+            no_preference_decision=preference_decision,
+        ):
+            return _catalogue_redirect_state(
+                state,
+                decision=decision,
+                category=category,
+                slots=slots,
+                slots_skipped=slots_skipped,
+                metadata_filters=metadata_filters,
             )
+        awaiting_slot, slots_skipped, _removed_filters = _apply_preference_null_decision(
+            category=category,
+            awaiting_slot=awaiting_slot,
+            pending=pending_source_for_turn,
+            metadata_filters=metadata_filters,
+            slots_skipped=slots_skipped,
+            decision=preference_decision,
+        )
+        evidence_awaiting_slot = awaiting_slot
+
+        for key, value in _slot_updates_from_decision(
+            decision,
+            allowed_category_slots,
+            latest_message,
+            evidence_awaiting_slot,
+        ).items():
+            is_valid, reason = _validate_slot_value(key, value)
+            if not is_valid:
+                logger.info(
+                    "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                    key,
+                    value,
+                    reason,
+                )
+                if not invalid_required_slot:
+                    invalid_required_slot = key
+                continue
+            slots[key] = value
+            slots_skipped.discard(str(key))
+
+        for key, value in _metadata_filters_from_decision(
+            decision,
+            latest_message,
+            evidence_awaiting_slot,
+            category,
+        ).items():
+            metadata_filters[key] = value
+        extracted_slots, _extracted_metadata, extracted_features = _apply_explicit_filter_extraction(
+            state=state,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=evidence_awaiting_slot,
+            apply_slot_updates=True,
+        )
+        requested_non_metadata_features = extracted_features
+        for key, value in extracted_slots.items():
+            is_valid, reason = _validate_slot_value(key, value)
+            if is_valid:
+                slots[key] = value
+                slots_skipped.discard(str(key))
+            else:
+                logger.info(
+                    "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                    key,
+                    value,
+                    reason,
+                )
 
     for key, value in _slot_updates_from_metadata(category, metadata_filters).items():
         if key in slots or value in (None, ""):
@@ -2962,6 +3909,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
+            "requested_non_metadata_features": requested_non_metadata_features,
             "active_search_request_text": _updated_active_search_request_text(
                 state=state,
                 latest_message=latest_message,
@@ -2990,6 +3938,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
+            "requested_non_metadata_features": requested_non_metadata_features,
             "active_search_request_text": _updated_active_search_request_text(
                 state=state,
                 latest_message=latest_message,
@@ -3121,13 +4070,27 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 category,
             )
         action = "pinecone_search"
-    should_ask = action == "ask_next_question" or (
+    should_ask = not active_qna_unanswered and (
+        action == "ask_next_question" or (
         action in {"pinecone_search", "respond"} and bool(pending)
+        )
     )
 
     asked = [] if reset_result_state else list(state.get("asked_questions") or [])
     assistant_text = decision.get("assistant_text") or ""
-    if should_ask and pending:
+    if active_qna_unanswered and active_qna_slot:
+        action = "respond"
+        awaiting_slot = active_qna_slot
+        replay_question = active_qna_question or _queued_question_for_slot(pending, active_qna_slot)
+        if active_qna_reply and replay_question:
+            assistant_text = f"{active_qna_reply}\n\n{replay_question}"
+        elif replay_question:
+            assistant_text = replay_question
+        elif active_qna_reply:
+            assistant_text = active_qna_reply
+        elif not assistant_text.strip():
+            assistant_text = "Could you please confirm that requirement?"
+    elif should_ask and pending:
         next_question = pending.pop(0)
         assistant_text = next_question.get("question") or "Could you share a little more detail?"
         if next_question.get("slot"):
@@ -3169,7 +4132,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     metadata_filters_after = dict(metadata_filters)
     active_search_request_text = _updated_active_search_request_text(
         state=state,
-        latest_message=latest_message,
+        latest_message="" if active_qna_unanswered else latest_message,
         slots=slots,
         metadata_filters=metadata_filters,
         reset_active_request=category_changed or make_changed,
@@ -3201,6 +4164,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "slots_collected": slots,
         "slots_skipped": sorted(slots_skipped),
         "metadata_filters_collected": metadata_filters,
+        "requested_non_metadata_features": requested_non_metadata_features,
         "active_search_request_text": active_search_request_text,
         "make_category_options": make_category_options,
         "awaiting_slot": awaiting_slot,
@@ -3260,6 +4224,7 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
         slots=state.get("slots_collected") or {},
         metadata_filters=state.get("metadata_filters_collected") or {},
         search_result=search_result,
+        requested_non_metadata_features=state.get("requested_non_metadata_features"),
     )
     search_result.match_analysis = match_analysis
     listings_with_evidence = _apply_pinecone_match_validation(listings_with_evidence, match_analysis)

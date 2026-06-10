@@ -266,6 +266,7 @@ def _clean_match(match: Any) -> dict[str, Any]:
         "year": metadata.get("year"),
         "length": metadata.get("length"),
         "width": metadata.get("width"),
+        "height": metadata.get("height"),
         "axles": metadata.get("axles"),
         "gvwr": metadata.get("gvwr"),
         "payload_capacity": metadata.get("payload_capacity"),
@@ -302,6 +303,13 @@ def _required_width_ft_from_filters(slots: dict[str, Any], metadata_filters: dic
         or slots.get("item_or_trailer_width_ft")
         or slots.get("trailer_width_ft")
         or slots.get("width_ft")
+    )
+
+
+def _required_height_ft_from_filters(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> Optional[float]:
+    return _parse_length_ft(
+        metadata_filters.get("height_ft")
+        or slots.get("height_ft")
     )
 
 
@@ -517,12 +525,13 @@ def _rerank_listings_by_fit(
     required_length_ft: Optional[float],
     required_payload_lbs: Optional[float],
     required_width_ft: Optional[float],
+    required_height_ft: Optional[float],
     warn_ratio: float,
     extreme_ratio: float,
     length_weight: float,
     missing_dim_penalty: float,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    needs_present = any(x is not None for x in (required_length_ft, required_payload_lbs, required_width_ft))
+    needs_present = any(x is not None for x in (required_length_ft, required_payload_lbs, required_width_ft, required_height_ft))
     if not listings or not needs_present:
         return listings, {"applied": False, "reason": "missing_clear_requirements_or_no_listings"}
 
@@ -532,6 +541,7 @@ def _rerank_listings_by_fit(
         gvwr_lbs = _parse_number(listing.get("gvwr"))
         payload_lbs = _parse_number(listing.get("payload_capacity"))
         width_ft = _parse_length_ft(listing.get("width"))
+        height_ft = _parse_length_ft(listing.get("height"))
 
         # Weight requirement can be satisfied by payload or gvwr if payload missing.
         weight_from = "payload_capacity"
@@ -556,6 +566,11 @@ def _rerank_listings_by_fit(
         width_ratio = (
             (width_ft / required_width_ft)
             if required_width_ft is not None and width_ft is not None and required_width_ft > 0
+            else None
+        )
+        height_ratio = (
+            (height_ft / required_height_ft)
+            if required_height_ft is not None and height_ft is not None and required_height_ft > 0
             else None
         )
 
@@ -617,6 +632,21 @@ def _rerank_listings_by_fit(
                 if width_ratio > extreme_ratio:
                     penalty += (width_ratio - extreme_ratio) * 3.2
 
+        if required_height_ft is not None:
+            if height_ratio is None:
+                missing_count += 1
+                penalty += missing_dim_penalty
+            elif height_ratio < 1.0:
+                fail_count += 1
+                penalty += (1.0 - height_ratio) * 4.0
+            else:
+                over = height_ratio - 1.0
+                penalty += over * 1.0
+                if height_ratio > warn_ratio:
+                    penalty += (height_ratio - warn_ratio) * 1.5
+                if height_ratio > extreme_ratio:
+                    penalty += (height_ratio - extreme_ratio) * 2.6
+
         length_overage = (
             max(0.0, float(length_ratio) - 1.0)
             if required_length_ft is not None and length_ratio is not None
@@ -634,6 +664,7 @@ def _rerank_listings_by_fit(
                 "length_ratio": None if length_ratio is None else round(length_ratio, 6),
                 "weight_ratio": None if weight_ratio is None else round(weight_ratio, 6),
                 "width_ratio": None if width_ratio is None else round(width_ratio, 6),
+                "height_ratio": None if height_ratio is None else round(height_ratio, 6),
                 "length_overage": round(length_overage, 6),
                 "fit_score": round(base_score - penalty, 6),
             }
@@ -656,7 +687,7 @@ def _rerank_listings_by_fit(
         decision_rank = {id(e): i for i, e in enumerate(ranked_entries, 1)}
         for e in entries:
             logger.info(
-                "rerank_score | fetched_pos=%s | decision_rank=%s | title=%r | base_score=%.6f | penalty=%.6f | fit_score=%.6f | length_ratio=%s | weight_ratio=%s | width_ratio=%s | fail_count=%s | missing_count=%s",
+                "rerank_score | fetched_pos=%s | decision_rank=%s | title=%r | base_score=%.6f | penalty=%.6f | fit_score=%.6f | length_ratio=%s | weight_ratio=%s | width_ratio=%s | height_ratio=%s | fail_count=%s | missing_count=%s",
                 e["fetch_pos"],
                 decision_rank.get(id(e)),
                 e["listing"].get("title"),
@@ -666,15 +697,17 @@ def _rerank_listings_by_fit(
                 e["length_ratio"],
                 e["weight_ratio"],
                 e["width_ratio"],
+                e["height_ratio"],
                 e["fail_count"],
                 e["missing_count"],
             )
 
     logger.info(
-        "rerank_summary | applied=true | required_length_ft=%s | required_payload_lbs=%s | required_width_ft=%s | candidates=%s | kept_pool=%s",
+        "rerank_summary | applied=true | required_length_ft=%s | required_payload_lbs=%s | required_width_ft=%s | required_height_ft=%s | candidates=%s | kept_pool=%s",
         required_length_ft,
         required_payload_lbs,
         required_width_ft,
+        required_height_ft,
         len(entries),
         len(fallback_pool),
     )
@@ -684,6 +717,7 @@ def _rerank_listings_by_fit(
         "required_length_ft": required_length_ft,
         "required_payload_lbs": required_payload_lbs,
         "required_width_ft": required_width_ft,
+        "required_height_ft": required_height_ft,
         "candidate_count": len(entries),
     }
 
@@ -746,11 +780,13 @@ def search_pinecone_listing_result(
         required_length_ft = _required_length_ft_from_filters(slots, metadata_filters)
         required_payload_lbs = _required_payload_lbs_from_filters(slots, metadata_filters)
         required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
+        required_height_ft = _required_height_ft_from_filters(slots, metadata_filters)
         listings, rerank_debug = _rerank_listings_by_fit(
             listings,
             required_length_ft=required_length_ft,
             required_payload_lbs=required_payload_lbs,
             required_width_ft=required_width_ft,
+            required_height_ft=required_height_ft,
             warn_ratio=RERANK_WARN_RATIO,
             extreme_ratio=RERANK_EXTREME_RATIO,
             length_weight=RERANK_LENGTH_WEIGHT,

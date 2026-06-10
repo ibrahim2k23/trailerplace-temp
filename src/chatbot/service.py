@@ -125,6 +125,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "slots_collected": {},
         "slots_skipped": [],
         "metadata_filters_collected": {},
+        "requested_non_metadata_features": [],
         "make_category_options": [],
         "awaiting_slot": None,
         "pending_questions": [],
@@ -802,16 +803,17 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     if _is_contact_only_message(user_message):
         return False
 
-    if _is_catalogue_overview_turn(session, user_message):
-        return False
-
     if session.get("awaiting_slot") or session.get("pending_questions"):
         return True
 
+    if _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
+        return True
+
+    if _is_catalogue_overview_turn(session, user_message):
+        return False
+
     # Keep deterministic fast-paths for obvious intent.
     if _has_actionable_intent(user_message):
-        return True
-    if _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
         return True
 
     # If we have shown listings before, let the model decide whether this turn is
@@ -1170,6 +1172,13 @@ def _inventory_lookup_response(
     request: ChatRequest,
     user_message: str,
 ) -> ChatResponse | None:
+    has_shown_results = bool(session.get("has_shown_search_results"))
+    if not has_shown_results and _has_trailer_search_context(session):
+        return None
+    if session.get("awaiting_slot") or session.get("pending_questions"):
+        return None
+    if has_shown_results and _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
+        return None
     if not should_attempt_chat_lookup(
         user_message,
         last_listings=session.get("last_listings") or [],
@@ -1249,6 +1258,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
         "slots_skipped": list(session.get("slots_skipped") or []),
         "metadata_filters_collected": deepcopy(session.get("metadata_filters_collected") or {}),
+        "requested_non_metadata_features": list(session.get("requested_non_metadata_features") or []),
         "make_category_options": list(session.get("make_category_options") or []),
         "awaiting_slot": session.get("awaiting_slot"),
         "pending_questions": deepcopy(session.get("pending_questions") or []),
@@ -1272,6 +1282,7 @@ def _reset_search_state_for_category_switch(session: dict[str, Any], old_categor
     session["slots_collected"] = {}
     session["slots_skipped"] = []
     session["metadata_filters_collected"] = {}
+    session["requested_non_metadata_features"] = []
     session["active_search_request_text"] = ""
     session["make_category_options"] = []
     session["awaiting_slot"] = None
@@ -1490,6 +1501,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "slots_collected",
         "slots_skipped",
         "metadata_filters_collected",
+        "requested_non_metadata_features",
         "active_search_request_text",
         "make_category_options",
         "awaiting_slot",

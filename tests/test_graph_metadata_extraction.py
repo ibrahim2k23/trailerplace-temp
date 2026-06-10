@@ -32,6 +32,16 @@ def _use_fallback_extractor(monkeypatch):
     )
     monkeypatch.setattr(
         graph,
+        "_extract_field_updates",
+        lambda **kwargs: graph._legacy_field_updates_from_filter_extraction(
+            state=kwargs["state"],
+            category=kwargs["category"],
+            awaiting_slot=kwargs["awaiting_slot"],
+            apply_slot_updates=kwargs["apply_slot_updates"],
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
         "classify_haul_requirements",
         lambda **kwargs: graph.HaulClassificationDecision(),
     )
@@ -71,6 +81,72 @@ def _mock_extractor(monkeypatch, **values):
         graph,
         "_extract_filter_decision",
         lambda state, category: graph.FilterExtractionDecision(**values),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_extract_field_updates",
+        lambda **kwargs: graph._legacy_field_updates_from_filter_extraction(
+            state=kwargs["state"],
+            category=kwargs["category"],
+            awaiting_slot=kwargs["awaiting_slot"],
+            apply_slot_updates=kwargs["apply_slot_updates"],
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "classify_haul_requirements",
+        lambda **kwargs: graph.HaulClassificationDecision(),
+    )
+    monkeypatch.setattr(
+        graph,
+        "classify_no_preference",
+        lambda **kwargs: graph.PreferenceNullDecision(),
+    )
+
+
+def _mock_field_updates(monkeypatch, **values):
+    payload = {
+        "metadata_filters_update": {},
+        "slots_collected_update": {},
+        "requested_non_metadata_features": [],
+        "confidence": "high",
+    }
+    payload.update(values)
+    if payload.get("confidence") == "low":
+        payload["metadata_filters_update"] = {}
+        payload["slots_collected_update"] = {}
+        payload["requested_non_metadata_features"] = []
+
+    def _extract(**kwargs):
+        category = kwargs["category"]
+        metadata = {}
+        for key, value in payload["metadata_filters_update"].items():
+            sanitized = graph._canonicalize_adjudicated_metadata(
+                key=key,
+                value=value,
+                category=category,
+            )
+            if sanitized:
+                clean_key, clean_value = sanitized
+                metadata[clean_key] = clean_value
+        slots = graph._canonicalize_adjudicated_slots(
+            raw=payload["slots_collected_update"],
+            allowed_category_slots=graph._category_slots(category),
+            metadata_updates=metadata,
+        )
+        return graph.FieldExtractionAdjudicationDecision(
+            metadata_filters_update=metadata,
+            slots_collected_update=slots,
+            requested_non_metadata_features=payload["requested_non_metadata_features"],
+            confidence=payload["confidence"],
+            clarification_needed=payload.get("clarification_needed"),
+            reason=payload.get("reason", ""),
+        )
+
+    monkeypatch.setattr(
+        graph,
+        "_extract_field_updates",
+        _extract,
     )
     monkeypatch.setattr(
         graph,
@@ -606,15 +682,22 @@ def test_dimension_shorthand_uses_width_by_length(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
-def test_three_part_dimension_shorthand_uses_width_length_and_ignores_height(monkeypatch):
+def test_three_part_dimension_shorthand_uses_width_length_and_stores_height(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     out = graph._apply_mind_node(_state("I am looking for a 6x12x5 livestock trailer", category="Livestock"))
 
     assert out["slots_collected"]["trailer_length_ft"] == "12"
     assert out["metadata_filters_collected"]["length_ft"] == "12"
     assert out["metadata_filters_collected"]["width_ft"] == "6"
-    assert "height_ft" not in out["metadata_filters_collected"]
+    assert out["metadata_filters_collected"]["height_ft"] == "5"
     assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_side_wall_wording_maps_to_height(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    out = graph._apply_mind_node(_state("I need a dump trailer with 3 inch sides", category="Dump"))
+
+    assert out["metadata_filters_collected"]["height_ft"] == "0.25 ft"
 
 
 def test_equipment_required_length_and_weight_can_be_filled_from_filters(monkeypatch):
@@ -628,7 +711,9 @@ def test_equipment_required_length_and_weight_can_be_filled_from_filters(monkeyp
     assert out["slots_collected"]["haul_weight_lbs"] == "3000 lb"
     assert out["slots_collected"]["haul_length_ft"] == "12 feet"
     assert out["metadata_filters_collected"]["payload_lbs"] == "3000 lb"
-    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+    assert out["mind_decision"]["action"] == "respond"
 
 
 def test_width_update_does_not_overwrite_existing_length(monkeypatch):
@@ -685,6 +770,171 @@ def test_category_change_clears_old_filters_and_slots(monkeypatch):
     assert out["active_search_request_text"].startswith("Now I need a 14 ft livestock trailer")
     assert "sliding gates" not in out["active_search_request_text"].lower()
     assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_llm_field_updates_accept_24_ft_cattle_with_requested_feature(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"length_ft": "24 ft"},
+        slots_collected_update={"trailer_length_ft": "24 ft"},
+        requested_non_metadata_features=["sliding gates"],
+    )
+    state = _state("I am looking for a 24 ft cattle trailer with sliding gates", category="Livestock")
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["metadata_filters_collected"]["length_ft"] == "24 ft"
+    assert out["slots_collected"]["trailer_length_ft"] == "24 ft"
+    assert out["requested_non_metadata_features"] == ["sliding gates"]
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_llm_field_updates_accept_288_inches_as_livestock_length(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"length_ft": "288 inch"},
+        slots_collected_update={"trailer_length_ft": "288 inch"},
+    )
+    state = _state("I am looking for a 288 inch trailer to haul cattle", category="Livestock")
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["length_ft"] == "24 ft"
+    assert out["slots_collected"]["trailer_length_ft"] == "24 ft"
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_llm_field_updates_extract_multiple_constraints_in_one_turn(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={
+            "length_ft": "24 ft",
+            "color": "Black",
+            "hitch_type": "gooseneck",
+            "max_price": "30000",
+        },
+        slots_collected_update={"trailer_length_ft": "24 ft"},
+        requested_non_metadata_features=["sliding gates"],
+    )
+    state = _state("I need a 24 ft black gooseneck cattle trailer under 30000 with sliding gates", category="Livestock")
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["length_ft"] == "24 ft"
+    assert out["metadata_filters_collected"]["color"] == "black"
+    assert out["metadata_filters_collected"]["hitch_type"] == "Gooseneck"
+    assert out["metadata_filters_collected"]["max_price"] == "30000"
+    assert out["slots_collected"]["trailer_length_ft"] == "24 ft"
+    assert out["requested_non_metadata_features"] == ["sliding gates"]
+
+
+def test_make_still_uses_existing_resolver_when_field_updates_do_not_extract_make(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    state = _state("I need a Diamond C flatbed trailer", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Flatbed"
+    assert out["metadata_filters_collected"]["make"] == "Diamond C"
+
+
+def test_non_aluminum_subcategory_candidate_is_discarded(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"subcategory": "equipment", "length_ft": "24 ft"},
+        slots_collected_update={"trailer_length_ft": "24 ft"},
+    )
+    state = _state("I need a 24 ft cattle trailer", category="Livestock")
+
+    out = graph._apply_mind_node(state)
+
+    assert "subcategory" not in out["metadata_filters_collected"]
+    assert out["metadata_filters_collected"]["length_ft"] == "24 ft"
+
+
+def test_aluminum_subcategory_candidate_is_allowed(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"subcategory": "Utility", "payload_lbs": "3000 lbs"},
+        slots_collected_update={"base_category": "Utility", "payload_need": "3000 lbs"},
+    )
+    state = _state("I need an aluminum utility trailer for 3000 lbs", category="Aluminum")
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["subcategory"] == "Utility"
+    assert out["metadata_filters_collected"]["payload_lbs"] == "3000 lbs"
+
+
+def test_llm_field_updates_width_only_does_not_become_length(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"width_ft": "6 feet"},
+    )
+    state = _state("6 feet wide", category="Livestock")
+    state["slots_collected"] = {"trailer_length_ft": "24 ft"}
+    state["metadata_filters_collected"] = {"length_ft": "24 ft"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["length_ft"] == "24 ft"
+    assert out["metadata_filters_collected"]["width_ft"] == "6 feet"
+    assert out["slots_collected"]["trailer_length_ft"] == "24 ft"
+
+
+def test_llm_field_updates_awaited_weight_answer_sets_payload(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"payload_lbs": "5000 pounds"},
+        slots_collected_update={"haul_weight_lbs": "5000 pounds"},
+    )
+    state = _state("5000 pounds", category="Dump")
+    state["awaiting_slot"] = "haul_weight_lbs"
+    state["slots_collected"] = {"haul_material": "gravel"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"]["payload_lbs"] == "5000 pounds"
+    assert out["slots_collected"]["haul_weight_lbs"] == "5000 pounds"
+
+
+def test_category_change_clears_old_requested_non_metadata_features(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"length_ft": "24 ft"},
+        slots_collected_update={"trailer_length_ft": "24 ft"},
+        requested_non_metadata_features=[],
+    )
+    state = _state("Now I need a 24 ft livestock trailer", category="Livestock")
+    state["trailer_category"] = "Dump"
+    state["has_shown_search_results"] = True
+    state["requested_non_metadata_features"] = ["sliding gates"]
+    state["slots_collected"] = {"haul_material": "gravel", "haul_weight_lbs": "5000 lbs"}
+    state["metadata_filters_collected"] = {"payload_lbs": "5000 lbs"}
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["requested_non_metadata_features"] == []
+    assert out["metadata_filters_collected"] == {"length_ft": "24 ft"}
+
+
+def test_low_confidence_field_updates_do_not_store_new_values(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"length_ft": "24 ft"},
+        slots_collected_update={"trailer_length_ft": "24 ft"},
+        confidence="low",
+        clarification_needed="What length trailer are you looking for?",
+    )
+    state = _state("maybe something big", category="Livestock")
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"] == {}
+    assert out["slots_collected"] == {}
+    assert out["assistant_text"] == "What length trailer are you looking for?"
 
 
 def test_utility_lightweight_item_skips_weight_and_adds_payload_default(monkeypatch):
@@ -787,6 +1037,31 @@ def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatc
     assert out["assistant_text"] == "What type of trailer are you looking for?"
     assert out["awaiting_slot"] == "generic_category_choice"
     assert out["mind_decision"]["action"] == "respond"
+
+
+def test_llm_field_extraction_normalizes_compact_size_order(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _FakeExtractorLLM:
+        def invoke(self, _messages):
+            return graph.FieldExtractionAdjudicationDecision(
+                metadata_filters_update={"length_ft": "6", "width_ft": "12"},
+                slots_collected_update={},
+                requested_non_metadata_features=[],
+                confidence="high",
+            )
+
+    monkeypatch.setattr(graph, "_field_extraction_adjudicator_llm", lambda: _FakeExtractorLLM())
+
+    decision = graph._extract_field_updates(
+        state=_state("I am looking for a 6x12 livestock trailer", category="Livestock"),
+        category="Livestock",
+        awaiting_slot=None,
+        apply_slot_updates=True,
+    )
+
+    assert decision.metadata_filters_update["width_ft"] == "6"
+    assert decision.metadata_filters_update["length_ft"] == "12"
 
 
 def test_generic_category_no_preference_reuses_length_and_asks_payload(monkeypatch):
@@ -1049,8 +1324,8 @@ def test_heavy_equipment_adds_dynamic_width_question(monkeypatch):
 
     out = graph._apply_mind_node(state)
 
-    assert out["awaiting_slot"] == "item_or_trailer_width_ft"
-    assert out["assistant_text"] == "About how wide is the load, or what trailer width do you need?"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
     assert out["mind_decision"]["action"] == "respond"
 
 
@@ -1093,8 +1368,35 @@ def test_heavy_equipment_width_filter_fills_dynamic_width_slot(monkeypatch):
 
     assert out["slots_collected"]["item_or_trailer_width_ft"] == "6 ft"
     assert out["metadata_filters_collected"]["width_ft"] == "6 ft"
-    assert out["pending_questions"] == []
-    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+    assert out["mind_decision"]["action"] == "respond"
+
+
+def test_equipment_requires_hitch_question_before_search(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_haul_classifier(
+        monkeypatch,
+        matched_item="tractor",
+        reason="Standard equipment.",
+        confidence="high",
+    )
+    state = _state("I need an equipment trailer", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_weight_lbs": "3000 lbs",
+        "haul_length_ft": "12 ft",
+    }
+    state["metadata_filters_collected"] = {
+        "payload_lbs": "3000 lbs",
+        "length_ft": "12 ft",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+    assert out["mind_decision"]["action"] == "respond"
 
 
 def test_flatbed_does_not_add_dynamic_width_question_and_defaults_width(monkeypatch):
@@ -1191,6 +1493,30 @@ def test_utility_does_not_add_dynamic_width_question(monkeypatch):
 
     assert "item_or_trailer_width_ft" not in out["slots_collected"]
     assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_dump_does_not_add_dynamic_width_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_haul_classifier(
+        monkeypatch,
+        needs_width_question=True,
+        matched_item="skid steer",
+        reason="Heavy-duty equipment.",
+        confidence="high",
+    )
+    state = _state("I need a dump trailer for a skid steer", category="Dump")
+    state["slots_collected"] = {
+        "payload_capacity": "7000 lbs",
+        "bin_size": "12 ft",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert "item_or_trailer_width_ft" not in out["slots_collected"]
+    assert all(q.get("slot") != "item_or_trailer_width_ft" for q in out["pending_questions"])
+    assert out["awaiting_slot"] == "haul_material"
+    assert out["assistant_text"] == "What material will you be hauling (dirt, gravel, debris, etc.)?"
+    assert out["mind_decision"]["action"] == "respond"
 
 
 def test_livestock_does_not_add_dynamic_width_question(monkeypatch):
@@ -1314,10 +1640,40 @@ def test_mixed_active_answer_and_explicit_hitch_does_not_invent_weight(monkeypat
 
     out = graph._apply_mind_node(state)
 
-    assert out["slots_collected"]["haul_item"] == "a car. The trailer should be bumper pull"
+    assert out["slots_collected"]["haul_item"] == "a car"
     assert out["metadata_filters_collected"]["hitch_type"] == "Bumper Pull"
     assert "payload_lbs" not in out["metadata_filters_collected"]
     assert out["awaiting_slot"] == "haul_weight_lbs"
+
+
+def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=False,
+            no_preference_for_active_question=False,
+            reply_to_user="We do offer financing options.",
+            confidence="high",
+            reason="counter_question_not_answer",
+        ),
+    )
+    state = _state("do you offer financing?", category="Dump")
+    state["awaiting_slot"] = "haul_material"
+    state["messages"] = [
+        {"role": "assistant", "content": "What material will you be hauling (dirt, gravel, debris, etc.)?"},
+        {"role": "user", "content": "do you offer financing?"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["awaiting_slot"] == "haul_material"
+    assert out["assistant_text"] == (
+        "We do offer financing options.\n\n"
+        "What material will you be hauling (dirt, gravel, debris, etc.)?"
+    )
+    assert out["mind_decision"]["action"] == "respond"
 
 
 def test_valid_hitch_metadata_filters_are_normalized(monkeypatch):
@@ -1361,7 +1717,7 @@ def test_aluminum_base_category_maps_to_subcategory_filter(monkeypatch):
 
     out = graph._apply_mind_node(state)
 
-    assert out["slots_collected"]["base_category"] == "utility trailer"
+    assert out["slots_collected"]["base_category"] == "utility"
     assert out["metadata_filters_collected"]["subcategory"] == "Utility"
     assert out["awaiting_slot"] == "payload_need"
 
@@ -1461,7 +1817,9 @@ def test_no_preference_skips_stale_width_question(monkeypatch):
     assert "item_or_trailer_width_ft" in out["slots_skipped"]
     assert "width_ft" not in out["metadata_filters_collected"]
     assert out["pending_questions"] == []
-    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+    assert out["mind_decision"]["action"] == "respond"
 
 
 def test_no_fixed_size_answer_skips_active_width_question(monkeypatch):
@@ -1508,7 +1866,9 @@ def test_no_fixed_size_answer_skips_active_width_question(monkeypatch):
     assert "item_or_trailer_width_ft" in out["slots_skipped"]
     assert "width_ft" not in out["metadata_filters_collected"]
     assert out["pending_questions"] == []
-    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+    assert out["mind_decision"]["action"] == "respond"
 
 
 def test_no_preference_skips_equipment_weight(monkeypatch):
@@ -1534,4 +1894,6 @@ def test_no_preference_skips_equipment_weight(monkeypatch):
     assert "haul_weight_lbs" in out["slots_skipped"]
     assert "payload_lbs" not in out["metadata_filters_collected"]
     assert out["pending_questions"] == []
-    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+    assert out["mind_decision"]["action"] == "respond"

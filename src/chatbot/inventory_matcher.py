@@ -685,8 +685,7 @@ def _has_specific_lookup_identifiers(extraction: TrailerQueryExtraction) -> bool
     has_make = bool(extraction.possible_make)
     has_model = bool(extraction.possible_model_code or extraction.possible_model_text)
     return bool(
-        extraction.stock_number
-        or (has_make and extraction.year)
+        (has_make and extraction.year)
         or (has_make and has_model)
     )
 
@@ -1478,8 +1477,6 @@ def should_attempt_chat_lookup(
     if answer_from_last_listings(user_query, last_listings):
         return True
     extraction = _fallback_extraction(user_query)
-    if extraction.stock_number:
-        return True
     if _is_direct_inventory_lookup(extraction):
         return True
     return False

@@ -26,6 +26,7 @@ class ChatbotState(TypedDict, total=False):
     slots_collected: dict[str, Any]
     slots_skipped: list[str]
     metadata_filters_collected: dict[str, Any]
+    requested_non_metadata_features: list[str]
     make_category_options: list[str]
     awaiting_slot: Optional[str]
     pending_questions: list[QuestionItem]
