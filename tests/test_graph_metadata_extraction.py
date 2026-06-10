@@ -657,6 +657,7 @@ def test_category_change_clears_old_filters_and_slots(monkeypatch):
     state = _state("Now I need a 14 ft livestock trailer", category="Livestock")
     state["trailer_category"] = "Utility"
     state["has_shown_search_results"] = True
+    state["active_search_request_text"] = "utility trailer with sliding gates | Current requirements: length 12 ft"
     state["slots_collected"] = {
         "haul_item": "equipment",
         "haul_weight_lbs": "3000 lbs",
@@ -681,6 +682,8 @@ def test_category_change_clears_old_filters_and_slots(monkeypatch):
     assert out["asked_questions"] == []
     assert out["already_shown_listing_urls"] == []
     assert out["last_listings"] == []
+    assert out["active_search_request_text"].startswith("Now I need a 14 ft livestock trailer")
+    assert "sliding gates" not in out["active_search_request_text"].lower()
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 

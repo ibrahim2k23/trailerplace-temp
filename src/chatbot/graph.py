@@ -108,6 +108,11 @@ class FilterExtractionDecision(BaseModel):
     slot_updates: dict[str, Any] = Field(default_factory=dict)
 
 
+class RequestedFeatureExtractionDecision(BaseModel):
+    requested_non_metadata_features: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 class PineconeListingMatchDecision(BaseModel):
     position: int = 0
     match_level: Literal["full", "partial", "alternative", "unknown"] = "unknown"
@@ -152,6 +157,19 @@ def _filter_extractor_llm():
     ).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         FilterExtractionDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _requested_feature_extractor_llm():
+    model = (
+        os.getenv("REQUESTED_FEATURE_EXTRACTOR_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        RequestedFeatureExtractionDecision,
         method="function_calling",
     )
 
@@ -335,6 +353,118 @@ def _enforce_requested_feature_consistency(
                 updated["customer_label"] = "Strong available option"
         enforced.append(updated)
     return enforced
+
+
+def _normalize_requested_feature_list(features: list[Any]) -> list[str]:
+    clean: list[str] = []
+    seen: set[str] = set()
+    for feature in features or []:
+        value = re.sub(r"\s+", " ", str(feature or "").strip())
+        key = _normalized_requirement_text(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        clean.append(value)
+    return clean
+
+
+def _structured_listing_context_matches(
+    *,
+    fact: dict[str, Any],
+    category: str | None,
+    metadata_filters: dict[str, Any],
+) -> bool:
+    fact_category = normalize_category(fact.get("category"))
+    requested_category = normalize_category(category)
+    if requested_category and fact_category != requested_category:
+        return False
+
+    requested_make = _normalized_requirement_text(metadata_filters.get("make"))
+    if requested_make and requested_make != _normalized_requirement_text(fact.get("make")):
+        return False
+
+    requested_hitch = normalize_hitch(metadata_filters.get("hitch_type"))
+    fact_hitch = normalize_hitch(fact.get("hitch_type"))
+    if requested_hitch and requested_hitch != fact_hitch:
+        return False
+
+    requested_color = _normalized_requirement_text(metadata_filters.get("color"))
+    if requested_color and requested_color != _normalized_requirement_text(fact.get("color")):
+        return False
+
+    requested_subcategory = normalize_subcategory(metadata_filters.get("subcategory"))
+    fact_subcategory = normalize_subcategory(fact.get("subcategory"))
+    if requested_subcategory and requested_subcategory != fact_subcategory:
+        return False
+
+    return True
+
+
+def _sanitize_requested_feature_analysis(
+    *,
+    data: dict[str, Any],
+    facts: list[dict[str, Any]],
+    requested_features: list[Any],
+    category: str | None,
+    metadata_filters: dict[str, Any],
+) -> dict[str, Any]:
+    clean_requested = _normalize_requested_feature_list(requested_features)
+    allowed_keys = {_normalized_requirement_text(feature) for feature in clean_requested}
+    by_position = {
+        int(fact.get("position") or 0): fact
+        for fact in facts
+        if str(fact.get("position") or "").isdigit()
+    }
+    sanitized: list[dict[str, Any]] = []
+
+    for item in _normalize_per_listing_matches(data, len(facts)):
+        updated = dict(item)
+        original_missing = [
+            str(value).strip()
+            for value in (updated.get("missing_or_unconfirmed_requirements") or [])
+            if str(value).strip()
+        ]
+        filtered_missing = [
+            value
+            for value in original_missing
+            if _normalized_requirement_text(value) in allowed_keys
+        ]
+        updated["missing_or_unconfirmed_requirements"] = filtered_missing
+        if (
+            filtered_missing != original_missing
+            and not filtered_missing
+            and _structured_listing_context_matches(
+                fact=by_position.get(int(updated.get("position") or 0), {}),
+                category=category,
+                metadata_filters=metadata_filters,
+            )
+        ):
+            updated["match_level"] = "full"
+        sanitized.append(updated)
+
+    sanitized = _enforce_requested_feature_consistency(sanitized, clean_requested)
+    full_count, partial_count, alternative_count = _match_count_summary(sanitized)
+    overall_match_level = "unknown"
+    if full_count > 0 and full_count == len(facts):
+        overall_match_level = "full"
+    elif full_count > 0:
+        overall_match_level = "mixed"
+    elif partial_count > 0:
+        overall_match_level = "partial_only"
+    elif alternative_count > 0:
+        overall_match_level = "no_exact"
+
+    return {
+        **data,
+        "intro_text": "",
+        "requested_non_metadata_features": clean_requested,
+        "per_listing_match": sanitized,
+        "full_match_count": full_count,
+        "partial_match_count": partial_count,
+        "alternative_count": alternative_count,
+        "validated_listing_count": len(facts),
+        "overall_match_level": overall_match_level,
+    }
 
 
 def _fallback_match_analysis(*, source: str, listing_count: int = 0) -> dict[str, Any]:
@@ -688,6 +818,59 @@ def _pinecone_listing_facts(listings: list[dict[str, Any]]) -> list[dict[str, An
     ]
 
 
+def _extract_requested_non_metadata_features(
+    *,
+    user_message: str,
+    latest_user_message: str | None,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+) -> list[str]:
+    if not os.getenv("OPENAI_API_KEY"):
+        return []
+    try:
+        decision = _requested_feature_extractor_llm().invoke(
+            [
+                SystemMessage(
+                    content="""You identify only user-requested trailer features that are not already represented by structured search filters.
+
+Return structured data only.
+
+Use only the request context provided. Do not infer requested features from inventory listings, titles, specs, examples, or search results.
+
+Requested non-metadata features are user-asked equipment, configuration, or build details that are not captured by normal structured filters. Examples of structured filters to exclude are trailer type/category, make, subcategory, hitch type, color, trailer length, trailer width, height, payload, GVWR, and budget/price.
+
+Do not rewrite structured constraints as non-metadata features. Do not add likely, implied, or common-for-category features. If the user did not explicitly ask for a non-metadata feature, return an empty list.
+"""
+                ),
+                HumanMessage(
+                    content=_safe_json(
+                        {
+                            "active_search_request_text": user_message,
+                            "latest_user_message": latest_user_message or user_message,
+                            "category": category,
+                            "slots": slots,
+                            "metadata_filters": metadata_filters,
+                        }
+                    )
+                ),
+            ]
+        )
+    except Exception:
+        logger.exception("requested_feature_extractor_llm_failed")
+        return []
+
+    data = _model_dump(decision)
+    clean = _normalize_requested_feature_list(data.get("requested_non_metadata_features") or [])
+    logger.info(
+        "requested_feature_extraction | category=%r | features=%s | latest_user_message=%r",
+        category,
+        _safe_json(clean),
+        latest_user_message or user_message,
+    )
+    return clean
+
+
 def _pinecone_match_audit(
     *,
     user_message: str,
@@ -697,6 +880,7 @@ def _pinecone_match_audit(
     metadata_filters: dict[str, Any],
     search_result: PineconeListingSearchResult,
     facts: list[dict[str, Any]],
+    requested_non_metadata_features: list[str],
 ) -> dict[str, Any]:
     listings = search_result.listings or []
     decision = _pinecone_match_audit_llm().invoke(
@@ -707,7 +891,7 @@ def _pinecone_match_audit(
 Classify each supplied Pinecone result as full, partial, or alternative against the user's complete active request.
 
 Core rule:
-For overall fit, focus on category/use case, make/model/hitch/color when requested, and requested non-metadata features such as sliding gates, butterfly gates, swing gates, offroad wheels, mesh sides, tack rooms, ramps, doors, or similar trailer equipment.
+For overall fit, focus on category/use case, make/model/hitch/color when requested, and the supplied requested non-metadata features.
 
 Length, width, payload capacity, and GVWR alone do not make a full match. Do not use length, width, payload capacity, or GVWR to make a listing full, partial, or alternative. Those fields are handled elsewhere by deterministic metadata filters and reranking. You may include them in confirmed_requirements only as factual context, but they must not rescue a missing feature fit.
 
@@ -718,6 +902,9 @@ Use language understanding for natural wording variants, but be strict about fea
 
 Evidence rules:
 Use only supplied listing facts and match_evidence_text. Do not invent features, prices, specs, availability, or reasons. Missing, unclear, implied, common-for-category, or merely related evidence is unconfirmed.
+
+Important:
+Treat the supplied requested_non_metadata_features as authoritative. Do not add, infer, broaden, or substitute any new requested features from listing text or general trailer knowledge. If the supplied list is empty, return an empty requested_non_metadata_features list.
 
 Return:
 * requested_non_metadata_features: user-requested features not represented by normal structured filters.
@@ -739,6 +926,7 @@ Set intro_text empty. Do not write the intro.
                         "category": category,
                         "slots": slots,
                         "metadata_filters": metadata_filters,
+                        "requested_non_metadata_features": requested_non_metadata_features,
                         "pinecone_embedding_query_text": search_result.query_text,
                         "pinecone_metadata_filter": search_result.metadata_filter,
                         "rerank_debug": search_result.rerank_debug,
@@ -750,28 +938,13 @@ Set intro_text empty. Do not write the intro.
         ]
     )
     data = _model_dump(decision)
-    per_listing_match = _normalize_per_listing_matches(data, len(listings))
-    per_listing_match = _enforce_requested_feature_consistency(
-        per_listing_match,
-        data.get("requested_non_metadata_features") or [],
+    data = _sanitize_requested_feature_analysis(
+        data=data,
+        facts=facts,
+        requested_features=requested_non_metadata_features,
+        category=category,
+        metadata_filters=metadata_filters,
     )
-    full_count, partial_count, alternative_count = _match_count_summary(per_listing_match)
-    data["intro_text"] = ""
-    data["per_listing_match"] = per_listing_match
-    data["full_match_count"] = full_count
-    data["partial_match_count"] = partial_count
-    data["alternative_count"] = alternative_count
-    data["validated_listing_count"] = len(listings)
-    if full_count > 0 and full_count == len(listings):
-        data["overall_match_level"] = "full"
-    elif full_count > 0:
-        data["overall_match_level"] = "mixed"
-    elif partial_count > 0:
-        data["overall_match_level"] = "partial_only"
-    elif alternative_count > 0:
-        data["overall_match_level"] = "no_exact"
-    else:
-        data["overall_match_level"] = "unknown"
     return data
 
 
@@ -865,6 +1038,17 @@ def _pinecone_match_framing_text(
 
     facts = _pinecone_listing_facts(listings)
     try:
+        requested_non_metadata_features = _extract_requested_non_metadata_features(
+            user_message=user_message,
+            latest_user_message=latest_user_message,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+        )
+    except Exception:
+        logger.exception("requested_feature_extraction_failed")
+        requested_non_metadata_features = []
+    try:
         data = _pinecone_match_audit(
             user_message=user_message,
             latest_user_message=latest_user_message,
@@ -873,6 +1057,7 @@ def _pinecone_match_framing_text(
             metadata_filters=metadata_filters,
             search_result=search_result,
             facts=facts,
+            requested_non_metadata_features=requested_non_metadata_features,
         )
         _log_pinecone_match_audit(
             match_analysis={**data, "source": "audit"},
