@@ -134,10 +134,14 @@ def _mock_field_updates(monkeypatch, **values):
             allowed_category_slots=graph._category_slots(category),
             metadata_updates=metadata,
         )
+        slots, features = graph._remove_generic_haul_use_feature_duplicates(
+            slots,
+            payload["requested_non_metadata_features"],
+        )
         return graph.FieldExtractionAdjudicationDecision(
             metadata_filters_update=metadata,
             slots_collected_update=slots,
-            requested_non_metadata_features=payload["requested_non_metadata_features"],
+            requested_non_metadata_features=features,
             confidence=payload["confidence"],
             clarification_needed=payload.get("clarification_needed"),
             reason=payload.get("reason", ""),
@@ -1037,6 +1041,149 @@ def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatc
     assert out["assistant_text"] == "What type of trailer are you looking for?"
     assert out["awaiting_slot"] == "generic_category_choice"
     assert out["mind_decision"]["action"] == "respond"
+
+
+def test_generic_haul_use_stores_when_category_unknown(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        metadata_filters_update={"length_ft": "12 ft"},
+        slots_collected_update={"generic_haul_use": "debris"},
+    )
+    state = _state("I am looking for a 12ft trailer to haul some debris", category=None)
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
+    assert out["slots_collected"]["generic_haul_use"] == "debris"
+    assert out["requested_non_metadata_features"] == []
+    assert out["assistant_text"] == "What type of trailer are you looking for?"
+    assert out["awaiting_slot"] == "generic_category_choice"
+
+
+def test_generic_haul_use_maps_to_dump_haul_material(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    state = _state("a dump trailer", category=None)
+    state["awaiting_slot"] = "generic_category_choice"
+    state["slots_collected"] = {"generic_haul_use": "debris"}
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Dump"
+    assert out["slots_collected"]["haul_material"] == "debris"
+    assert "generic_haul_use" not in out["slots_collected"]
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+
+
+def test_generic_haul_use_maps_to_utility_haul_item(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    state = _state("a utility trailer", category=None)
+    state["awaiting_slot"] = "generic_category_choice"
+    state["slots_collected"] = {"generic_haul_use": "mower"}
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Utility"
+    assert out["slots_collected"]["haul_item"] == "mower"
+    assert "generic_haul_use" not in out["slots_collected"]
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+
+
+def test_generic_haul_use_duplicate_feature_removed(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"generic_haul_use": "debris"},
+        requested_non_metadata_features=["haul debris"],
+    )
+    state = _state("I need a trailer to haul debris", category=None)
+
+    extraction = graph._extract_field_updates(
+        state=state,
+        category=None,
+        awaiting_slot=None,
+        apply_slot_updates=True,
+    )
+
+    assert extraction.slots_collected_update["generic_haul_use"] == "debris"
+    assert extraction.requested_non_metadata_features == []
+
+
+def test_contact_question_with_trailer_intent_uses_faq_tool_before_generic_category(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_classify_non_recommendation_turn",
+        lambda **_kwargs: graph.NonRecommendationTurnDecision(
+            turn_type="contact_or_store_info",
+            action="send_non_sales_faq_email",
+            faq_category="contact_human",
+            faq_summary="Customer asked how to contact TrailerPlace.",
+            assistant_text="You can reach our team at 979-532-1486.",
+            should_store_freeform_fields=True,
+            confidence="high",
+            reason="contact_question_with_trailer_intent",
+        ),
+    )
+    state = _state("I want to buy a trailer but I want to know first how to contact you guys", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "send_non_sales_faq_email"
+    assert out["mind_decision"]["faq_category"] == "contact_human"
+    assert out["awaiting_slot"] is None
+    assert out["assistant_text"] == "You can reach our team at 979-532-1486."
+
+
+def test_seller_contact_request_uses_escalation_before_generic_category(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_classify_non_recommendation_turn",
+        lambda **_kwargs: graph.NonRecommendationTurnDecision(
+            turn_type="unsupported_business_action",
+            action="send_escalation_alert_email",
+            escalation_summary="Customer wants to sell trailers to TrailerPlace.",
+            assistant_text="I can send that request to our team.",
+            should_store_freeform_fields=False,
+            confidence="high",
+            reason="seller_request",
+        ),
+    )
+    state = _state("I have multiple trailers and want to sell them to you; contact me", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "send_escalation_alert_email"
+    assert out["mind_decision"]["escalation_summary"] == "Customer wants to sell trailers to TrailerPlace."
+    assert out["awaiting_slot"] is None
+
+
+def test_mixed_contact_question_preserves_explicit_trailer_metadata(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_classify_non_recommendation_turn",
+        lambda **_kwargs: graph.NonRecommendationTurnDecision(
+            turn_type="contact_or_store_info",
+            action="send_non_sales_faq_email",
+            faq_category="contact_human",
+            faq_summary="Customer asked how to contact TrailerPlace.",
+            should_store_freeform_fields=True,
+            confidence="high",
+            reason="mixed_contact_and_size",
+        ),
+    )
+    state = _state("I need a 6x12 trailer and want to know how to contact you guys", category=None)
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "send_non_sales_faq_email"
+    assert out["metadata_filters_collected"]["width_ft"] == "6"
+    assert out["metadata_filters_collected"]["length_ft"] == "12"
+    assert out["awaiting_slot"] is None
 
 
 def test_llm_field_extraction_normalizes_compact_size_order(monkeypatch):

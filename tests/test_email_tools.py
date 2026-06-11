@@ -95,3 +95,25 @@ def test_non_sales_faq_email_sets_item_of_interest_by_category(monkeypatch):
         "session-human",
         "Wants to talk to a sales representative",
     ) in calls
+
+
+def test_escalation_alert_email_uses_alert_subject_without_session_id(monkeypatch):
+    calls = []
+    monkeypatch.setattr(email_tools, "send_faq_email_sync", lambda **kwargs: calls.append(("send", kwargs)))
+
+    result = email_tools.send_escalation_alert_email(
+        full_name="Test User",
+        email="test@example.com",
+        phone="979-555-1111",
+        summary="Customer asked for a quote.",
+        user_message="Can you email me a quote?",
+        context_summary="Category: Dump",
+    )
+
+    assert result["status"] == "sent"
+    send_call = calls[0][1]
+    assert send_call["subject"] == "Escalation Alert"
+    assert "[Escalation Alert] Customer asked for a quote." in send_call["summary_line"]
+    assert "Last user message: Can you email me a quote?" in send_call["summary_line"]
+    assert "Context: Category: Dump" in send_call["summary_line"]
+    assert "session" not in result["body_preview"].lower()

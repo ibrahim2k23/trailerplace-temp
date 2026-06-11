@@ -19,8 +19,6 @@ FAQ_ITEM_OF_INTEREST_LABELS = {
     "service_parts": "Spare Parts Query",
     "store_info": "Store Information Query",
 }
-
-
 def send_interested_listing_email(
     *,
     session_id: str,
@@ -81,6 +79,43 @@ def send_non_sales_faq_email(
     update_lead_item_of_interest(
         session_id,
         FAQ_ITEM_OF_INTEREST_LABELS.get(category, "Wants to talk to a sales representative"),
+    )
+    return {
+        "status": "sent",
+        "body_preview": (
+            f"Name: {full_name}\n"
+            f"Email: {(email or '').strip() or 'Not provided'}\n"
+            f"Phone Number: {phone}\n\n"
+            f"{summary_line}"
+        ),
+    }
+
+
+def send_escalation_alert_email(
+    *,
+    full_name: str,
+    email: Optional[str],
+    phone: str,
+    summary: str,
+    user_message: str | None = None,
+    context_summary: str | None = None,
+) -> dict:
+    """Tool 4: alert the business about an unsupported customer-requested action."""
+    summary_line = (summary or "Customer requested an action the chatbot cannot complete.").strip()
+    if not summary_line.startswith("[Escalation Alert]"):
+        summary_line = f"[Escalation Alert] {summary_line}"
+    message_line = (user_message or "").strip()
+    if message_line:
+        summary_line = f"{summary_line}\n\nLast user message: {message_line}"
+    context_line = (context_summary or "").strip()
+    if context_line:
+        summary_line = f"{summary_line}\n\nContext: {context_line}"
+    send_faq_email_sync(
+        full_name=full_name,
+        email=email,
+        phone=phone,
+        subject="Escalation Alert",
+        summary_line=summary_line,
     )
     return {
         "status": "sent",

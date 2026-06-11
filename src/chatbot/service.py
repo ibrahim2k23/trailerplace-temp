@@ -19,7 +19,13 @@ from src.chatbot.graph import build_chatbot_graph
 from src.chatbot.inventory_matcher import search_trailers
 from src.chatbot.inventory_matcher import should_attempt_chat_lookup
 from src.chatbot.make_resolver import resolve_make_from_text
+from src.chatbot.prompts import (
+    TRAILERPLACE_ACTION_SECTION,
+    TRAILERPLACE_KNOWLEDGE_SECTION,
+    TRAILERPLACE_PERSONA_SECTION,
+)
 from src.chatbot.tools.email_tools import (
+    send_escalation_alert_email,
     send_interested_listing_email,
     send_non_sales_faq_email,
 )
@@ -58,6 +64,10 @@ _METADATA_UPDATE_RE = re.compile(
 )
 _CONFUSION_ESCALATION_REPLY = (
     "I've forwarded your request to our sales department, and they will reach out to you soon."
+)
+_ESCALATION_SENT_REPLY = (
+    "I've sent your query to our team, and they'll reach out to you soon. "
+    "In the meantime, I can keep helping you narrow down the right trailer."
 )
 _CONFUSION_REPEAT_THRESHOLD = 2
 _RESULT_NAV_CONFUSION_REPEAT_THRESHOLD = 3
@@ -100,6 +110,11 @@ class ContactPromptReplyDecision(BaseModel):
 
 class CatalogueOverviewDecision(BaseModel):
     is_catalogue_overview: bool = False
+    reason: str = ""
+
+
+class UnsupportedBusinessActionRoutingDecision(BaseModel):
+    should_route_graph: bool = False
     reason: str = ""
 
 
@@ -186,6 +201,14 @@ def _catalogue_overview_llm():
     model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         CatalogueOverviewDecision,
+        method="function_calling",
+    )
+
+
+def _unsupported_business_action_router_llm():
+    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        UnsupportedBusinessActionRoutingDecision,
         method="function_calling",
     )
 
@@ -631,6 +654,26 @@ def _without_latest_user_message(messages: list[dict[str, Any]], latest_message:
     return list(messages)
 
 
+def _active_question_followup(session: dict[str, Any]) -> str:
+    awaiting = str(session.get("awaiting_slot") or "").strip()
+    pending = session.get("pending_questions") or []
+    if awaiting:
+        for item in pending:
+            if str(item.get("slot") or "") == awaiting:
+                return str(item.get("question") or "").strip()
+    if pending:
+        return str(pending[0].get("question") or "").strip()
+    return ""
+
+
+def _append_active_question_if_present(session: dict[str, Any], text: str) -> str:
+    question = _active_question_followup(session)
+    base = str(text or "").strip()
+    if question and question not in base:
+        return f"{base}\n\n{question}" if base else question
+    return base
+
+
 def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None:
     action = session.get("pending_contact_action")
     if not action or not _has_contact(session):
@@ -665,7 +708,22 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
         )
         logger.info("deferred_contact_action_sent | type=faq | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return "Thanks, I saved your contact information and sent that request to our team so they can help."
+        return _append_active_question_if_present(
+            session,
+            "Thanks, I saved your contact information and sent that request to our team so they can help.",
+        )
+    if action_type == "escalation_alert":
+        result = send_escalation_alert_email(
+            full_name=session.get("customer_full_name") or "",
+            email=session.get("customer_email"),
+            phone=session.get("customer_phone") or "",
+            summary=str(action.get("summary") or "Customer requested an unsupported business action."),
+            user_message=str(action.get("user_message") or ""),
+            context_summary=str(action.get("context_summary") or ""),
+        )
+        logger.info("deferred_contact_action_sent | type=escalation_alert | result=%s", json.dumps(result, default=str))
+        session["pending_contact_action"] = None
+        return _append_active_question_if_present(session, _ESCALATION_SENT_REPLY)
     session["pending_contact_action"] = None
     return None
 
@@ -676,6 +734,9 @@ def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
             [
                 SystemMessage(
                     content=(
+                        f"{TRAILERPLACE_PERSONA_SECTION}\n\n"
+                        f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
+                        f"{TRAILERPLACE_ACTION_SECTION}\n\n"
                         "You are the Trailer Place sales chat assistant. Reply naturally to the "
                         "latest message, then invite them to share what trailer or service "
                         "help they need. If they ask what TrailerPlace has, carries, sells, or "
@@ -686,7 +747,8 @@ def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
                         "trade-ins, delivery, and service or spare parts. Do not mention rentals, "
                         "repairs, or custom modifications unless the user explicitly asks. Do not "
                         "ask for contact details here. Keep it brief."
-                        "Your purpose is to inform the user. not greet them. So do not greet the user or ask how they are doing. Just reply to their message."
+                        "Your purpose is to inform the user. not greet them. So do not greet the user or ask how they are doing. Just reply to their message. "
+                        "Do not claim that an email or escalation was sent from smalltalk; those actions must be routed through graph tools."
                     )
                 ),
                 HumanMessage(
@@ -795,6 +857,58 @@ def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> b
         return False
 
 
+def _is_unsupported_business_action_turn(session: dict[str, Any], user_message: str) -> bool:
+    text = (user_message or "").strip()
+    if not text:
+        return False
+    if not os.getenv("OPENAI_API_KEY"):
+        return False
+    try:
+        decision = _unsupported_business_action_router_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Classify whether the latest user message should be routed to the trailer-planner graph "
+                        "because it may require the Escalation Alert email tool. Return structured fields only.\n\n"
+                        "Set should_route_graph=true when the customer asks TrailerPlace/the team to perform a "
+                        "business action the chatbot cannot complete directly, such as calling or emailing the "
+                        "customer, sending a quote/invoice/paperwork, scheduling something, holding/reserving a "
+                        "trailer, providing future-arrival timing, or making a custom arrangement.\n\n"
+                        "Set should_route_graph=false for broad catalogue browsing, ordinary trailer information, "
+                        "recommendations/search requests, supported FAQ topics like financing/trade-in/service/"
+                        "store info, simple smalltalk, and direct questions the assistant can answer without a tool.\n\n"
+                        "Do not decide which tool to call. Only decide whether this turn must be routed into the graph."
+                    )
+                ),
+                HumanMessage(
+                    content=json.dumps(
+                        {
+                            "latest_user_message": text,
+                            "awaiting_slot": session.get("awaiting_slot"),
+                            "pending_questions": session.get("pending_questions") or [],
+                            "trailer_category": session.get("trailer_category"),
+                            "has_shown_search_results": bool(session.get("has_shown_search_results")),
+                            "has_last_listings": bool(session.get("last_listings") or session.get("already_shown_listing_urls")),
+                            "recent_messages": (session.get("messages") or [])[-6:],
+                        },
+                        default=str,
+                    )
+                ),
+            ]
+        )
+        result = bool(decision.should_route_graph)
+        logger.info(
+            "unsupported_business_action_route_decision | should_route_graph=%s | reason=%r | latest_message=%r",
+            result,
+            decision.reason,
+            text,
+        )
+        return result
+    except Exception:
+        logger.exception("Unsupported business action classifier failed; keeping existing routing behavior")
+        return False
+
+
 def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     """
     LLM-first routing for the main phase.
@@ -807,6 +921,9 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
         return True
 
     if _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
+        return True
+
+    if _is_unsupported_business_action_turn(session, user_message):
         return True
 
     if _is_catalogue_overview_turn(session, user_message):

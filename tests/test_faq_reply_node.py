@@ -92,3 +92,62 @@ def test_faq_node_uses_generic_fallback_for_unknown_category(monkeypatch):
     out = graph._faq_email_node(state)
 
     assert out["assistant_text"] == "You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!"
+
+
+def test_escalation_node_defers_for_contact_and_repeats_active_question():
+    state = _base_state()
+    state.update(
+        {
+            "customer_email": None,
+            "customer_phone": None,
+            "user_message": "Can you email me a quote?",
+            "mind_decision": {
+                "action": "send_escalation_alert_email",
+                "escalation_summary": "Customer asked for a quote.",
+                "unsupported_request": "Can you email me a quote?",
+            },
+            "awaiting_slot": "haul_weight_lbs",
+            "pending_questions": [
+                {"slot": "haul_weight_lbs", "question": "How much weight will you be hauling?", "required": True}
+            ],
+        }
+    )
+
+    out = graph._escalation_email_node(state)
+
+    assert out["pending_contact_action"]["type"] == "escalation_alert"
+    assert out["tool_events"][-1]["tool"] == "send_escalation_alert_email"
+    assert "phone number or email address" in out["assistant_text"]
+    assert "How much weight will you be hauling?" in out["assistant_text"]
+
+
+def test_escalation_node_sends_and_repeats_active_question(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        graph,
+        "send_escalation_alert_email",
+        lambda **kwargs: calls.append(kwargs) or {"status": "sent", "kwargs": kwargs},
+    )
+    state = _base_state()
+    state.update(
+        {
+            "user_message": "Can you email me a quote?",
+            "mind_decision": {
+                "action": "send_escalation_alert_email",
+                "escalation_summary": "Customer asked for a quote.",
+                "unsupported_request": "Can you email me a quote?",
+            },
+            "awaiting_slot": "haul_weight_lbs",
+            "pending_questions": [
+                {"slot": "haul_weight_lbs", "question": "How much weight will you be hauling?", "required": True}
+            ],
+        }
+    )
+
+    out = graph._escalation_email_node(state)
+
+    assert calls[0]["summary"] == "Customer asked for a quote."
+    assert "session_id" not in calls[0]
+    assert out["tool_events"][-1]["tool"] == "send_escalation_alert_email"
+    assert "I've sent your query to our team" in out["assistant_text"]
+    assert "How much weight will you be hauling?" in out["assistant_text"]

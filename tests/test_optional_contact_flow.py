@@ -835,6 +835,73 @@ def test_year_make_lookup_is_blocked_once_new_search_flow_has_started(monkeypatc
     assert response.assistant_text == "What kind of budget are you targeting?"
 
 
+def test_unsupported_business_action_routing_uses_structured_classifier(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001120"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(service, "_is_catalogue_overview_turn", lambda *_args, **_kwargs: False)
+
+    class _UnsupportedActionRouter:
+        def invoke(self, _messages):
+            return service.UnsupportedBusinessActionRoutingDecision(
+                should_route_graph=True,
+                reason="customer requested a business action",
+            )
+
+    monkeypatch.setattr(service, "_unsupported_business_action_router_llm", lambda: _UnsupportedActionRouter())
+
+    assert service._should_route_to_graph(session, "Please arrange the paperwork for me") is True
+
+
+def test_contact_info_question_with_buying_intent_uses_faq_tool_not_generic_category(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001121"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    session["customer_full_name"] = "Ibrahim"
+    session["customer_phone"] = "03304388550"
+    session["contact_status"] = "sufficient"
+    email_calls = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009121")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009121")
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_is_catalogue_overview_turn", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service, "_is_unsupported_business_action_turn", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        graph,
+        "_classify_non_recommendation_turn",
+        lambda **_kwargs: graph.NonRecommendationTurnDecision(
+            turn_type="contact_or_store_info",
+            action="send_non_sales_faq_email",
+            faq_category="contact_human",
+            faq_summary="Customer asked how to contact TrailerPlace.",
+            assistant_text="You can reach our team at 979-532-1486.",
+            should_store_freeform_fields=True,
+            confidence="high",
+            reason="contact_question_with_buying_intent",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "send_non_sales_faq_email",
+        lambda **kwargs: email_calls.append(kwargs) or {"status": "sent"},
+    )
+
+    response = service.handle_chat(
+        _req(session_id, "I want to buy a trailer but I want to know first how to contact you guys")
+    )
+
+    assert email_calls
+    assert email_calls[0]["faq_category"] == "contact_human"
+    assert "What type of trailer are you looking for?" not in response.assistant_text
+    assert "979-532-1486" in response.assistant_text
+
+
 def test_contact_plus_listing_interest_routes_to_graph(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001017"
     service.reset_session(session_id)

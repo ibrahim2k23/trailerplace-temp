@@ -32,6 +32,7 @@ from src.models import TrailerListing
 from src.normalizer import normalize_category, normalize_hitch, normalize_subcategory
 from src.chatbot.tools.email_tools import (
     FAQ_CATEGORY_LABELS,
+    send_escalation_alert_email,
     send_interested_listing_email,
     send_non_sales_faq_email,
 )
@@ -64,6 +65,14 @@ _FAQ_REPLY_FALLBACKS: dict[str, str] = {
     ),
 }
 _FAQ_GENERIC_FALLBACK = "Thanks, I sent that request to the team so they can help you with it."
+_ESCALATION_SENT_REPLY = (
+    "I've sent your query to our team, and they'll reach out to you soon. "
+    "In the meantime, I can keep helping you narrow down the right trailer."
+)
+_ESCALATION_CONTACT_REQUEST = (
+    "I can send that request to our team so they can follow up. Could you please share your phone number "
+    "or email address?"
+)
 _INTEREST_GENERIC_FALLBACK = (
     'Your interest in "{item_name}" has been logged. Our team will reach out to you soon. '
     f"In the meantime, feel free to visit {_SITE_URL} or call us at 979-532-1486."
@@ -75,6 +84,50 @@ _INTEREST_GENERIC_FALLBACK_NO_ITEM = (
 _INTEREST_SAFE_FALLBACK = (
     "Great, I sent your interest in that trailer to the team. They can follow up with you shortly."
 )
+def _compact_recent_context(state: ChatbotState) -> str:
+    parts: list[str] = []
+    category = str(state.get("trailer_category") or "").strip()
+    if category:
+        parts.append(f"Category: {category}")
+    slots = state.get("slots_collected") or {}
+    if slots:
+        parts.append(f"Slots: {_safe_json(slots)}")
+    metadata = state.get("metadata_filters_collected") or {}
+    if metadata:
+        parts.append(f"Metadata filters: {_safe_json(metadata)}")
+    listings = state.get("last_listings") or []
+    if listings:
+        titles = [
+            str(item.get("title") or "").strip()
+            for item in listings[:3]
+            if str(item.get("title") or "").strip()
+        ]
+        if titles:
+            parts.append(f"Recent listings shown: {'; '.join(titles)}")
+    recent = state.get("messages") or []
+    if recent:
+        parts.append(f"Recent messages: {_safe_json(recent[-4:])}")
+    return " | ".join(parts)[:1800]
+
+
+def _active_question_followup(state: ChatbotState) -> str:
+    awaiting = str(state.get("awaiting_slot") or "").strip()
+    if awaiting:
+        queued = _queued_question_for_slot(state.get("pending_questions") or [], awaiting)
+        if queued:
+            return queued
+    pending = state.get("pending_questions") or []
+    if pending:
+        return str(pending[0].get("question") or "").strip()
+    return ""
+
+
+def _append_active_question_if_present(state: ChatbotState, text: str) -> str:
+    question = _active_question_followup(state)
+    base = str(text or "").strip()
+    if question and question not in base:
+        return f"{base}\n\n{question}" if base else question
+    return base
 
 
 class MindDecision(BaseModel):
@@ -83,6 +136,7 @@ class MindDecision(BaseModel):
         "pinecone_search",
         "send_interested_listing_email",
         "send_non_sales_faq_email",
+        "send_escalation_alert_email",
         "respond",
     ] = "respond"
     assistant_text: str = ""
@@ -94,6 +148,8 @@ class MindDecision(BaseModel):
     selected_listing_url: Optional[str] = None
     faq_category: Optional[str] = None
     faq_summary: Optional[str] = None
+    escalation_summary: Optional[str] = None
+    unsupported_request: Optional[str] = None
 
 
 class FilterExtractionDecision(BaseModel):
@@ -124,6 +180,33 @@ class FieldExtractionAdjudicationDecision(BaseModel):
     reason: str = ""
 
 
+class NonRecommendationTurnDecision(BaseModel):
+    turn_type: Literal[
+        "contact_or_store_info",
+        "supported_faq",
+        "unsupported_business_action",
+        "catalogue_request",
+        "trailer_shopping_missing_category",
+        "trailer_shopping_with_category_or_filters",
+        "answer_to_active_question",
+        "smalltalk_or_other",
+    ] = "smalltalk_or_other"
+    action: Literal[
+        "respond",
+        "ask_trailer_category",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+        "continue_recommendation_flow",
+    ] = "continue_recommendation_flow"
+    faq_category: Optional[str] = None
+    faq_summary: Optional[str] = None
+    escalation_summary: Optional[str] = None
+    assistant_text: str = ""
+    should_store_freeform_fields: bool = True
+    reason: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
+
+
 class QuestionTurnDecision(BaseModel):
     answered_active_question: bool = False
     no_preference_for_active_question: bool = False
@@ -131,6 +214,15 @@ class QuestionTurnDecision(BaseModel):
     metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
     slots_collected_update: dict[str, Any] = Field(default_factory=dict)
     requested_non_metadata_features: list[str] = Field(default_factory=list)
+    email_action: Literal[
+        "none",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+    ] = "none"
+    faq_category: Optional[str] = None
+    faq_summary: Optional[str] = None
+    escalation_summary: Optional[str] = None
+    unsupported_request: Optional[str] = None
     reply_to_user: str = ""
     confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
@@ -206,6 +298,19 @@ def _field_extraction_adjudicator_llm():
     ).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         FieldExtractionAdjudicationDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _non_recommendation_turn_llm():
+    model = (
+        os.getenv("NON_RECOMMENDATION_TURN_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        NonRecommendationTurnDecision,
         method="function_calling",
     )
 
@@ -1329,6 +1434,7 @@ _DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "alumi
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
 _GENERIC_CATEGORY_CHOICE_SLOT = "generic_category_choice"
 _GENERIC_CATEGORY_QUESTION = "What type of trailer are you looking for?"
+_GENERIC_HAUL_USE_SLOT = "generic_haul_use"
 _MAKE_CATEGORY_CHOICE_SLOT = "make_category_choice"
 _MAKE_GENERIC_LENGTH_SLOT = "trailer_length_ft"
 _MAKE_GENERIC_PAYLOAD_SLOT = "haul_weight_lbs"
@@ -1340,6 +1446,15 @@ _PSEUDO_SLOT_DEFINITIONS: dict[str, dict[str, Any]] = {
     _GENERIC_CATEGORY_CHOICE_SLOT: {
         "question": _GENERIC_CATEGORY_QUESTION,
         "answer_guidance": "Store the trailer category the customer chooses. Accept supported trailer-type names only.",
+        "mapped_metadata_fields": [],
+    },
+    _GENERIC_HAUL_USE_SLOT: {
+        "question": "What will you be hauling or using the trailer for?",
+        "answer_guidance": (
+            "When current_category is unknown, store the free-form cargo, material, equipment, "
+            "or use case the customer gives, such as debris, construction debris, a mower, "
+            "a skid steer, hay, or furniture. Do not store trailer category names here."
+        ),
         "mapped_metadata_fields": [],
     },
     _MAKE_CATEGORY_CHOICE_SLOT: {
@@ -1405,7 +1520,7 @@ def _is_usable_classifier_haul_item(value: Any) -> bool:
 
 def _category_slots(category: str | None) -> set[str]:
     if not category:
-        return set()
+        return {_GENERIC_HAUL_USE_SLOT}
     spec = get_trailer_fields_as_dict(category)
     return set(spec.get("required_slots") or []) | set(spec.get("optional_slots") or [])
 
@@ -1758,10 +1873,39 @@ def _question_turn_fallback_reply(question_text: str, latest_message: str) -> st
     return ""
 
 
+def _trim_fallback_active_slot_value(active_slot: str, value: Any) -> Any:
+    text = str(value or "").strip()
+    if active_slot != "haul_item" or not text:
+        return value
+    parts = re.split(r"\s*(?:[.!?]+|\band\b)\s+(?=(?:the\s+)?trailer\b|\bit\b|\bi\s+)", text, maxsplit=1, flags=re.I)
+    return parts[0].strip() if parts and parts[0].strip() else value
+
+
+def _preserve_latest_haul_item_phrase(active_slot: str, value: Any, latest_message: str) -> Any:
+    text = str(value or "").strip()
+    latest = str(latest_message or "").strip()
+    if active_slot != "haul_item" or not text or not latest:
+        return value
+
+    first_phrase = _trim_fallback_active_slot_value(active_slot, latest)
+    normalized_value = " ".join(text.lower().split())
+    normalized_phrase = " ".join(first_phrase.lower().split())
+    if normalized_phrase in {normalized_value, f"a {normalized_value}", f"an {normalized_value}", f"the {normalized_value}"}:
+        return first_phrase
+    return value
+
+
 def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecision:
     confidence = str(data.get("confidence") or "low").lower()
     if confidence not in {"medium", "high"}:
         confidence = "low"
+    email_action = str(data.get("email_action") or "none").strip()
+    if email_action not in {
+        "none",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+    }:
+        email_action = "none"
     return QuestionTurnDecision(
         answered_active_question=bool(data.get("answered_active_question")),
         no_preference_for_active_question=bool(data.get("no_preference_for_active_question")),
@@ -1773,6 +1917,11 @@ def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecisi
             for item in (data.get("requested_non_metadata_features") or [])
             if str(item).strip()
         ],
+        email_action=email_action,  # type: ignore[arg-type]
+        faq_category=str(data.get("faq_category") or "").strip() or None,
+        faq_summary=str(data.get("faq_summary") or "").strip() or None,
+        escalation_summary=str(data.get("escalation_summary") or "").strip() or None,
+        unsupported_request=str(data.get("unsupported_request") or "").strip() or None,
         reply_to_user=str(data.get("reply_to_user") or "").strip(),
         confidence=confidence,
         reason=str(data.get("reason") or ""),
@@ -1879,6 +2028,8 @@ def _fallback_question_turn_decision(
     if active_value in (None, ""):
         active_value = _slot_updates_from_metadata(category, temp_metadata).get(active_slot)
     if active_value not in (None, ""):
+        active_value = _trim_fallback_active_slot_value(active_slot, active_value)
+        active_value = _preserve_latest_haul_item_phrase(active_slot, active_value, text)
         return QuestionTurnDecision(
             answered_active_question=True,
             active_slot_value=str(active_value).strip(),
@@ -1919,7 +2070,7 @@ def _adjudicate_active_question_turn(
     make_category_options: list[str],
 ) -> QuestionTurnDecision:
     if not os.getenv("OPENAI_API_KEY"):
-        return _fallback_question_turn_decision(
+        fallback = _fallback_question_turn_decision(
             state=state,
             category=category,
             active_slot=active_slot,
@@ -1929,6 +2080,7 @@ def _adjudicate_active_question_turn(
             pending_questions=pending_questions,
             make_category_options=make_category_options,
         )
+        return fallback
     context = {
         "latest_user_message": latest_message,
         "recent_messages": (state.get("messages") or [])[-8:],
@@ -1956,6 +2108,10 @@ def _adjudicate_active_question_turn(
                         "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
                         "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
                         "You may also extract other valid metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same latest user message.\n"
+                        "During active qualification, you may set email_action to send_non_sales_faq_email for financing, trade-in, service/parts, store/location, or supported human/contact help.\n"
+                        "During active qualification, you may set email_action to send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported business action, such as call them, email them, send a quote, send an invoice, prepare paperwork, provide future-arrival timing, reserve/hold a trailer, schedule something, or make a custom arrangement.\n"
+                        "Do not set an email action for broad catalogue browsing; that should be answered with the website link elsewhere.\n"
+                        "Never set send_interested_listing_email during active qualification.\n"
                         "Do not invent updates. Do not use listing evidence. Do not rewrite the active question. "
                         "Use medium or high confidence only when clearly supported."
                     )
@@ -1968,7 +2124,7 @@ def _adjudicate_active_question_turn(
         )
     except Exception:
         logger.exception("Question turn adjudicator failed; using fallback")
-        return _fallback_question_turn_decision(
+        fallback = _fallback_question_turn_decision(
             state=state,
             category=category,
             active_slot=active_slot,
@@ -1978,6 +2134,7 @@ def _adjudicate_active_question_turn(
             pending_questions=pending_questions,
             make_category_options=make_category_options,
         )
+        return fallback
 
 
 def _normalize_length_or_width_value(value: Any) -> Any:
@@ -2107,7 +2264,7 @@ def _legacy_field_updates_from_filter_extraction(
             state.get("user_message") or "",
             awaiting_slot,
         )
-        if apply_slot_updates and category
+        if apply_slot_updates
         else {}
     )
     return FieldExtractionAdjudicationDecision(
@@ -2155,6 +2312,7 @@ def _extract_field_updates(
         "existing_metadata_filters_collected": state.get("metadata_filters_collected") or {},
         "allowed_metadata_fields": sorted(_LLM_ADJUDICATED_METADATA_KEYS),
         "allowed_category_slots": sorted(allowed_category_slots if apply_slot_updates else set()),
+        "generic_haul_use_slot": _GENERIC_HAUL_USE_SLOT,
     }
     try:
         decision = _field_extraction_adjudicator_llm().invoke(
@@ -2167,6 +2325,8 @@ def _extract_field_updates(
                         "Do not extract make/manufacturer; make is handled by a separate resolver. "
                         "Do not extract subcategory unless current_category is Aluminum. "
                         "Use recent messages and the previous assistant question only as context for interpreting the latest user message, not as new updates. "
+                        "When current_category is unknown and the user volunteers cargo/material/equipment/use-case details such as hauling debris, carrying hay, or using the trailer for a mower, store that detail in generic_haul_use. "
+                        "generic_haul_use is a temporary category-unknown slot; do not put haul/use/cargo/material phrases into requested_non_metadata_features. "
                         "Extract requested_non_metadata_features for user-requested equipment/configuration/features not represented by metadata filters or category slots. "
                         "Do not infer requested_non_metadata_features from inventory/listing text. "
                         "Accept equivalent units such as inches when they clearly answer a length or width field. "
@@ -2231,10 +2391,11 @@ def _extract_field_updates(
             allowed_category_slots=allowed_category_slots,
             metadata_updates=metadata_updates,
         )
-        if apply_slot_updates and category
+        if apply_slot_updates
         else {}
     )
     features = _normalize_requested_feature_list(data.get("requested_non_metadata_features") or [])
+    slot_updates, features = _remove_generic_haul_use_feature_duplicates(slot_updates, features)
     return FieldExtractionAdjudicationDecision(
         metadata_filters_update=metadata_updates,
         slots_collected_update=slot_updates,
@@ -2537,6 +2698,62 @@ def _slot_updates_from_metadata(category: str | None, metadata_filters: dict[str
         if key in allowed and metadata_filters.get(key):
             updates[key] = metadata_filters[key]
     return updates
+
+
+def _normalized_generic_haul_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    for char in ",.;:!?()[]{}\"'":
+        text = text.replace(char, " ")
+    return " ".join(text.split())
+
+
+def _remove_generic_haul_use_feature_duplicates(
+    slot_updates: dict[str, Any],
+    requested_features: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    generic_value = slot_updates.get(_GENERIC_HAUL_USE_SLOT)
+    generic_text = _normalized_generic_haul_text(generic_value)
+    if not generic_text:
+        return slot_updates, requested_features
+
+    duplicate_forms = {
+        generic_text,
+        f"haul {generic_text}",
+        f"hauling {generic_text}",
+        f"carry {generic_text}",
+        f"carrying {generic_text}",
+        f"move {generic_text}",
+        f"moving {generic_text}",
+        f"use for {generic_text}",
+        f"using for {generic_text}",
+    }
+    cleaned = [
+        feature
+        for feature in requested_features
+        if _normalized_generic_haul_text(feature) not in duplicate_forms
+    ]
+    return slot_updates, cleaned
+
+
+def _apply_generic_haul_use_to_category_slot(category: str | None, slots: dict[str, Any]) -> None:
+    generic_value = slots.get(_GENERIC_HAUL_USE_SLOT)
+    if not category or generic_value in (None, ""):
+        return
+
+    allowed = _category_slots(category)
+    target_slot: str | None = None
+    for candidate in ("haul_material", "haul_item", "cargo_type", "cargo_item", "use_case"):
+        if candidate in allowed:
+            target_slot = candidate
+            break
+    if not target_slot:
+        return
+
+    if not slots.get(target_slot):
+        slots[target_slot] = generic_value
+    slots.pop(_GENERIC_HAUL_USE_SLOT, None)
 
 
 def _aluminum_base_category_subcategory(value: Any) -> str | None:
@@ -3307,6 +3524,141 @@ def _has_generic_trailer_request(text: str) -> bool:
     )
 
 
+def _classify_non_recommendation_turn(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    latest_message: str,
+    awaiting_slot: str | None,
+    pending_questions: list[QuestionItem],
+    active_qna_slot: str | None = None,
+    active_qna_question: str = "",
+) -> NonRecommendationTurnDecision:
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not str(latest_message or "").strip() or not api_key or api_key.startswith("test"):
+        return NonRecommendationTurnDecision(reason="classifier_unavailable", confidence="low")
+    context = {
+        "latest_user_message": latest_message,
+        "current_category": category,
+        "slots_collected": slots,
+        "metadata_filters_collected": metadata_filters,
+        "awaiting_slot": awaiting_slot,
+        "pending_questions": pending_questions,
+        "active_qna_slot": active_qna_slot,
+        "active_qna_question": active_qna_question,
+        "has_shown_search_results": bool(state.get("has_shown_search_results")),
+        "last_listings": state.get("last_listings") or [],
+        "recent_messages": (state.get("messages") or [])[-8:],
+        "contact_status": state.get("contact_status"),
+        "customer_has_contact": bool(state.get("customer_email") or state.get("customer_phone")),
+    }
+    try:
+        decision = _non_recommendation_turn_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Classify the latest TrailerPlace chatbot turn before the generic trailer-category question runs. "
+                        "Return structured data only.\n\n"
+                        "Priority order: contact/store/FAQ tool intent, unsupported business-action escalation, catalogue redirect, "
+                        "active QnA answer, trailer-shopping data extraction, then generic missing-category question.\n\n"
+                        "Choose send_non_sales_faq_email when the customer asks how to contact TrailerPlace, asks for the phone number, "
+                        "location, store info, sales contact, financing, trade-in, service, or parts. Use faq_category contact_human for "
+                        "general contact/sales-contact questions and store_info for location/store visit questions.\n\n"
+                        "Choose send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported "
+                        "business action such as contacting them, emailing them, sending a quote/invoice/paperwork, scheduling, "
+                        "holding/reserving a trailer, future-arrival timing, buying trailers from the customer, or custom arrangements.\n\n"
+                        "Choose ask_trailer_category only when the customer is genuinely shopping for a trailer, no category is known, "
+                        "and there is no higher-priority FAQ/escalation/catalogue intent.\n\n"
+                        "Choose continue_recommendation_flow when normal trailer QnA/search should continue and existing field extraction "
+                        "should handle freeform details. Set should_store_freeform_fields=true only for clear trailer-shopping constraints "
+                        "or active question answers. Do not infer inventory details from listings."
+                    )
+                ),
+                HumanMessage(content=_safe_json(context)),
+            ]
+        )
+        return decision if isinstance(decision, NonRecommendationTurnDecision) else NonRecommendationTurnDecision()
+    except Exception:
+        logger.exception("Non-recommendation turn classifier failed; continuing existing flow")
+        return NonRecommendationTurnDecision(reason="classifier_failed", confidence="low")
+
+
+def _non_recommendation_tool_state(
+    *,
+    state: ChatbotState,
+    turn_decision: NonRecommendationTurnDecision,
+    mind_decision: dict[str, Any],
+    category: str | None,
+    slots: dict[str, Any],
+    slots_skipped: set[str],
+    metadata_filters: dict[str, Any],
+    requested_non_metadata_features: list[str],
+    latest_message: str,
+    category_changed: bool,
+    make_changed: bool,
+    make_category_options: list[str],
+    awaiting_slot: str | None,
+    pending_questions: list[QuestionItem],
+) -> ChatbotState | None:
+    if turn_decision.confidence not in {"medium", "high"}:
+        return None
+    if turn_decision.action not in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
+        return None
+
+    decision = dict(mind_decision)
+    decision["action"] = turn_decision.action
+    assistant_text = str(turn_decision.assistant_text or decision.get("assistant_text") or "").strip()
+    if turn_decision.action == "send_non_sales_faq_email":
+        faq_category = (turn_decision.faq_category or "contact_human").strip().lower()
+        if faq_category not in FAQ_CATEGORY_LABELS:
+            faq_category = "contact_human"
+        decision["faq_category"] = faq_category
+        decision["faq_summary"] = turn_decision.faq_summary or FAQ_CATEGORY_LABELS.get(faq_category)
+    else:
+        decision["escalation_summary"] = (
+            turn_decision.escalation_summary
+            or f"Customer requested an unsupported business action: {latest_message[:240]}"
+        )
+        decision["unsupported_request"] = latest_message
+    if assistant_text:
+        decision["assistant_text"] = assistant_text
+    output_slots = slots if turn_decision.should_store_freeform_fields else dict(state.get("slots_collected") or {})
+    output_metadata = (
+        metadata_filters
+        if turn_decision.should_store_freeform_fields
+        else dict(state.get("metadata_filters_collected") or {})
+    )
+    output_features = (
+        requested_non_metadata_features
+        if turn_decision.should_store_freeform_fields
+        else list(state.get("requested_non_metadata_features") or [])
+    )
+    output_category = category if turn_decision.should_store_freeform_fields else state.get("trailer_category")
+
+    return {
+        **state,
+        "trailer_category": output_category,
+        "slots_collected": output_slots,
+        "slots_skipped": sorted(slots_skipped),
+        "metadata_filters_collected": output_metadata,
+        "requested_non_metadata_features": output_features,
+        "active_search_request_text": _updated_active_search_request_text(
+            state=state,
+            latest_message=latest_message if turn_decision.should_store_freeform_fields else "",
+            slots=output_slots,
+            metadata_filters=output_metadata,
+            reset_active_request=category_changed or make_changed,
+        ),
+        "make_category_options": make_category_options,
+        "awaiting_slot": awaiting_slot,
+        "pending_questions": pending_questions,
+        "assistant_text": assistant_text,
+        "mind_decision": decision,
+    }
+
+
 def _apply_make_resolution(
     *,
     latest_message: str,
@@ -3664,6 +4016,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             "mind_decision": decision,
         }
 
+    _apply_generic_haul_use_to_category_slot(category, slots)
+
     allowed_category_slots = _category_slots(category)
     pending_source_for_turn = [] if reset_result_state else (state.get("pending_questions") or [])
     active_qna_slot, active_qna_definition = _active_question_context(
@@ -3676,6 +4030,11 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     active_qna_question = str(active_qna_definition.get("question") or "").strip()
     active_qna_unanswered = False
     active_qna_reply = ""
+    active_qna_email_action = "none"
+    active_qna_faq_category: str | None = None
+    active_qna_faq_summary: str | None = None
+    active_qna_escalation_summary: str | None = None
+    active_qna_unsupported_request: str | None = None
     if active_qna_slot and latest_message.strip():
         question_turn = _adjudicate_active_question_turn(
             state={
@@ -3693,27 +4052,35 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             make_category_options=make_category_options,
         )
         logger.info(
-            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | confidence=%r | reason=%r",
+            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | email_action=%r | confidence=%r | reason=%r",
             active_qna_slot,
             question_turn.answered_active_question,
             question_turn.no_preference_for_active_question,
+            question_turn.email_action,
             question_turn.confidence,
             question_turn.reason,
         )
+        active_qna_email_action = question_turn.email_action
+        active_qna_faq_category = question_turn.faq_category
+        active_qna_faq_summary = question_turn.faq_summary
+        active_qna_escalation_summary = question_turn.escalation_summary
+        active_qna_unsupported_request = question_turn.unsupported_request
         if question_turn.no_preference_for_active_question:
             slots_skipped.add(str(active_qna_slot))
             awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
             for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
                 metadata_filters.pop(str(key), None)
         elif question_turn.answered_active_question and question_turn.active_slot_value not in (None, ""):
-            is_valid, reason = _validate_slot_value(active_qna_slot, question_turn.active_slot_value)
+            active_slot_value = _trim_fallback_active_slot_value(active_qna_slot, question_turn.active_slot_value)
+            active_slot_value = _preserve_latest_haul_item_phrase(active_qna_slot, active_slot_value, latest_message)
+            is_valid, reason = _validate_slot_value(active_qna_slot, active_slot_value)
             if is_valid:
-                slots[active_qna_slot] = question_turn.active_slot_value
+                slots[active_qna_slot] = active_slot_value
                 slots_skipped.discard(str(active_qna_slot))
                 awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
                 for key, value in _slot_value_to_metadata_updates(
                     active_qna_slot,
-                    question_turn.active_slot_value,
+                    active_slot_value,
                     category,
                 ).items():
                     metadata_filters[key] = value
@@ -3724,7 +4091,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 logger.info(
                     "slot_validation_failed | slot=%s | value=%r | reason=%s",
                     active_qna_slot,
-                    question_turn.active_slot_value,
+                    active_slot_value,
                     reason,
                 )
         else:
@@ -3901,7 +4268,44 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     if awaiting_slot and awaiting_slot in slots:
         awaiting_slot = None
 
-    if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT and not category:
+    should_check_pre_generic_turn = (
+        (decision.get("action") or "respond") in {"respond", "ask_next_question"}
+        and not bool(state.get("has_shown_search_results"))
+        and bool(str(latest_message or "").strip())
+    )
+    if should_check_pre_generic_turn:
+        pre_generic_turn_decision = _classify_non_recommendation_turn(
+            state=state,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=awaiting_slot,
+            pending_questions=list(state.get("pending_questions") or []),
+        )
+        pre_generic_tool_state = _non_recommendation_tool_state(
+            state=state,
+            turn_decision=pre_generic_turn_decision,
+            mind_decision=decision,
+            category=category,
+            slots=slots,
+            slots_skipped=slots_skipped,
+            metadata_filters=metadata_filters,
+            requested_non_metadata_features=requested_non_metadata_features,
+            latest_message=latest_message,
+            category_changed=category_changed,
+            make_changed=make_changed,
+            make_category_options=make_category_options,
+            awaiting_slot=awaiting_slot,
+            pending_questions=list(state.get("pending_questions") or []),
+        )
+        if pre_generic_tool_state is not None:
+            return pre_generic_tool_state
+
+    current_action = decision.get("action") or "respond"
+    tool_action_requested = current_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}
+
+    if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT and not category and not tool_action_requested:
         decision["action"] = "respond"
         return {
             **state,
@@ -3927,6 +4331,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     if (
         not category
         and awaiting_slot != _GENERIC_CATEGORY_CHOICE_SLOT
+        and not tool_action_requested
         and not _generic_category_no_preference_active(slots_skipped)
         and not (metadata_filters.get("make") and _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped)
         and _has_generic_trailer_request(latest_message)
@@ -4046,11 +4451,26 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "pinecone_search",
         "send_interested_listing_email",
         "send_non_sales_faq_email",
+        "send_escalation_alert_email",
         "respond",
     }
     action = decision.get("action") or "respond"
     if action not in valid_actions:
         action = "respond"
+    if active_qna_email_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
+        action = active_qna_email_action
+        decision["action"] = action
+        if active_qna_faq_category:
+            decision["faq_category"] = active_qna_faq_category
+        if active_qna_faq_summary:
+            decision["faq_summary"] = active_qna_faq_summary
+        if active_qna_escalation_summary:
+            decision["escalation_summary"] = active_qna_escalation_summary
+        if active_qna_unsupported_request:
+            decision["unsupported_request"] = active_qna_unsupported_request
+    elif active_qna_slot and action == "send_interested_listing_email":
+        action = "respond"
+        decision["action"] = action
     make_only_complete = bool(metadata_filters.get("make")) and not category and not make_only_missing
     generic_no_category_complete = (
         _generic_category_no_preference_active(slots_skipped)
@@ -4062,7 +4482,11 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         or make_only_complete
         or generic_no_category_complete
     )
-    if required_complete and action not in {"send_interested_listing_email", "send_non_sales_faq_email"}:
+    if required_complete and action not in {
+        "send_interested_listing_email",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+    }:
         if action != "pinecone_search":
             logger.info(
                 "action_corrected_to_search | previous_action=%s | category=%r",
@@ -4078,7 +4502,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
 
     asked = [] if reset_result_state else list(state.get("asked_questions") or [])
     assistant_text = decision.get("assistant_text") or ""
-    if active_qna_unanswered and active_qna_slot:
+    if active_qna_unanswered and active_qna_slot and action not in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
         action = "respond"
         awaiting_slot = active_qna_slot
         replay_question = active_qna_question or _queued_question_for_slot(pending, active_qna_slot)
@@ -4127,6 +4551,11 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             assistant_text = "Could you please confirm that requirement?"
     elif action == "respond" and not assistant_text:
         assistant_text = "How can I help with your trailer search?"
+
+    if action in {"send_non_sales_faq_email", "send_escalation_alert_email"} and not awaiting_slot and pending:
+        next_slot = str(pending[0].get("slot") or "").strip()
+        if next_slot:
+            awaiting_slot = next_slot
 
     slots_after = dict(slots)
     metadata_filters_after = dict(metadata_filters)
@@ -4187,6 +4616,8 @@ def _route_after_mind(state: ChatbotState) -> str:
         return "send_interested_listing_email"
     if action == "send_non_sales_faq_email":
         return "send_non_sales_faq_email"
+    if action == "send_escalation_alert_email":
+        return "send_escalation_alert_email"
     return END
 
 
@@ -4332,7 +4763,7 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
         events.append({"tool": "send_non_sales_faq_email", "result": {"status": "deferred_missing_contact"}})
         return {
             **state,
-            "assistant_text": _optional_contact_request(summary.lower()),
+            "assistant_text": _append_active_question_if_present(state, _optional_contact_request(summary.lower())),
             "pending_contact_action": {
                 "type": "faq",
                 "faq_category": category,
@@ -4371,7 +4802,47 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
     events.append({"tool": "send_non_sales_faq_email", "result": result})
     return {
         **state,
-        "assistant_text": assistant_text,
+        "assistant_text": _append_active_question_if_present(state, assistant_text),
+        "tool_events": events,
+    }
+
+
+def _escalation_email_node(state: ChatbotState) -> ChatbotState:
+    decision = state.get("mind_decision") or {}
+    summary = str(
+        decision.get("escalation_summary")
+        or decision.get("unsupported_request")
+        or state.get("user_message")
+        or "Customer requested an unsupported business action."
+    ).strip()
+    user_message = str(decision.get("unsupported_request") or state.get("user_message") or "").strip()
+    if not _has_contact(state):
+        events = list(state.get("tool_events") or [])
+        events.append({"tool": "send_escalation_alert_email", "result": {"status": "deferred_missing_contact"}})
+        return {
+            **state,
+            "assistant_text": _append_active_question_if_present(state, _ESCALATION_CONTACT_REQUEST),
+            "pending_contact_action": {
+                "type": "escalation_alert",
+                "summary": summary,
+                "user_message": user_message,
+                "context_summary": _compact_recent_context(state),
+            },
+            "tool_events": events,
+        }
+    result = send_escalation_alert_email(
+        full_name=state.get("customer_full_name") or "",
+        email=state.get("customer_email"),
+        phone=state.get("customer_phone") or "",
+        summary=summary,
+        user_message=user_message,
+        context_summary=_compact_recent_context(state),
+    )
+    events = list(state.get("tool_events") or [])
+    events.append({"tool": "send_escalation_alert_email", "result": result})
+    return {
+        **state,
+        "assistant_text": _append_active_question_if_present(state, _ESCALATION_SENT_REPLY),
         "tool_events": events,
     }
 
@@ -4384,10 +4855,12 @@ def build_chatbot_graph():
     graph.add_node("pinecone_search", _pinecone_search_node)
     graph.add_node("send_interested_listing_email", _interest_email_node)
     graph.add_node("send_non_sales_faq_email", _faq_email_node)
+    graph.add_node("send_escalation_alert_email", _escalation_email_node)
     graph.set_entry_point("mind")
     graph.add_edge("mind", "apply_mind")
     graph.add_conditional_edges("apply_mind", _route_after_mind)
     graph.add_edge("pinecone_search", END)
     graph.add_edge("send_interested_listing_email", END)
     graph.add_edge("send_non_sales_faq_email", END)
+    graph.add_edge("send_escalation_alert_email", END)
     return graph.compile()
