@@ -35,7 +35,7 @@ _SYNONYMS: dict[str, list[str]] = {
         "deckover",
         "deck over",
     ],
-    "Enclosed": ["enclosed", "box trailer", "cargo", "v-nose", "v nose"],
+    "Enclosed": ["enclosed", "box trailer", "cargo", "v-nose", "v nose","command trailer"],
     "Utility": ["utility", "landscape", "lawnmower", "atv", "bike", "motorcycle", "landscaping", "lawn mower","land scaping"],
     "Fiber": ["fiber", "splicing trailer", "fiber optic "],
     "Race Trailer": ["race trailer", "enclosed car hauler"],
@@ -46,7 +46,7 @@ _SYNONYMS: dict[str, list[str]] = {
         "dump",
         "scissor lift",
         "hoist",
-        "dump trailer",
+        "dump trailer", 
         "telescopic",
         "front lift",
     ],
@@ -77,6 +77,65 @@ class CategoryResolution:
     category: Optional[str]
     needs_clarification: bool = False
     clarification_question: Optional[str] = None
+    clarification_key: Optional[str] = None
+
+
+_CATEGORY_CLARIFICATION_RULES: dict[str, dict[str, object]] = {
+    "office_trailer_use": {
+        "trigger_terms": _OFFICE_TERMS,
+        "question": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        "options": {
+            "Fiber": _FIBER_CONTEXT_TERMS,
+            "Enclosed": _GENERAL_OFFICE_TERMS,
+        },
+    },
+}
+
+
+def _matches_any_term(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _direct_category_from_text(text: str) -> Optional[str]:
+    for category, terms in _SYNONYMS.items():
+        for term in terms:
+            if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text):
+                return category
+    return None
+
+
+def _clarification_rule(key: str) -> dict[str, object] | None:
+    return _CATEGORY_CLARIFICATION_RULES.get(str(key or "").strip())
+
+
+def category_clarification_question(key: str | None) -> Optional[str]:
+    rule = _clarification_rule(str(key or "").strip())
+    if not rule:
+        return None
+    return str(rule.get("question") or "").strip() or None
+
+
+def resolve_category_clarification_answer(text: str, clarification_key: str | None) -> CategoryResolution:
+    low = (text or "").lower()
+    rule = _clarification_rule(str(clarification_key or "").strip())
+    if not rule:
+        return CategoryResolution(_direct_category_from_text(low))
+
+    options = dict(rule.get("options") or {})
+    for category, terms in options.items():
+        if _matches_any_term(low, tuple(terms)):
+            return CategoryResolution(str(category), clarification_key=str(clarification_key or "").strip())
+
+    direct_category = _direct_category_from_text(low)
+    if direct_category:
+        return CategoryResolution(direct_category, clarification_key=str(clarification_key or "").strip())
+
+    return CategoryResolution(
+        None,
+        True,
+        str(rule.get("question") or "").strip() or None,
+        clarification_key=str(clarification_key or "").strip() or None,
+    )
 
 
 def category_prompt_block() -> str:
@@ -84,28 +143,22 @@ def category_prompt_block() -> str:
     for category in CANONICAL_CATEGORIES:
         terms = ", ".join(_SYNONYMS.get(category, []))
         lines.append(f"- {category}: {terms}")
-    lines.append(
-        "- office trailer / cooldown trailer: ask whether this is for fiber/telecom work. "
-        "If yes choose Fiber; otherwise choose Enclosed."
-    )
+    for rule in _CATEGORY_CLARIFICATION_RULES.values():
+        trigger_terms = ", ".join(rule.get("trigger_terms") or [])
+        options = []
+        for category, terms in dict(rule.get("options") or {}).items():
+            options.append(f"{category} ({', '.join(terms)})")
+        lines.append(
+            f"- {trigger_terms}: ask a clarification question first. Resolve using: {', '.join(options)}."
+        )
     return "\n".join(lines)
 
 
 def resolve_category_from_text(text: str) -> CategoryResolution:
     low = (text or "").lower()
-    if any(term in low for term in _OFFICE_TERMS):
-        if any(term in low for term in _FIBER_CONTEXT_TERMS):
-            return CategoryResolution("Fiber")
-        if any(term in low for term in _GENERAL_OFFICE_TERMS):
-            return CategoryResolution("Enclosed")
-        return CategoryResolution(
-            None,
-            True,
-            "Will this be for fiber/telecom work specifically, or a more general office trailer?",
-        )
+    for key, rule in _CATEGORY_CLARIFICATION_RULES.items():
+        trigger_terms = tuple(rule.get("trigger_terms") or ())
+        if _matches_any_term(low, trigger_terms):
+            return resolve_category_clarification_answer(low, key)
 
-    for category, terms in _SYNONYMS.items():
-        for term in terms:
-            if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", low):
-                return CategoryResolution(category)
-    return CategoryResolution(None)
+    return CategoryResolution(_direct_category_from_text(low))

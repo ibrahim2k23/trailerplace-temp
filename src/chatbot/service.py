@@ -32,6 +32,7 @@ from src.chatbot.tools.email_tools import (
 from src.conversation_store import (
     create_or_get_soft_lead,
     enqueue_upsert_conversation,
+    persist_messages_snapshot,
     update_lead_contact,
 )
 from src.models import ChatRequest, ChatResponse
@@ -124,6 +125,46 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
     return model.dict()
 
 
+def _should_save_initial_message_for_resume(message: str) -> bool:
+    text = (message or "").strip()
+    if not text or _GREETING_RE.match(text):
+        return False
+    if _is_contact_only_message(text):
+        return False
+    return True
+
+
+def _format_recent_message_transcript(messages: list[dict[str, Any]], limit: int = 4) -> str:
+    lines: list[str] = []
+    for item in (messages or [])[-limit:]:
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "User" if role == "user" else "Chatbot" if role == "assistant" else role.title() or "Message"
+        lines.append(f"{speaker}:")
+        lines.append(content)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _email_context_summary(session: dict[str, Any]) -> str:
+    parts: list[str] = []
+    category = str(session.get("trailer_category") or "").strip()
+    if category:
+        parts.append(f"Category: {category}")
+    slots = session.get("slots_collected") or {}
+    if slots:
+        parts.append(f"Slots: {json.dumps(slots, ensure_ascii=True, default=str)}")
+    metadata = session.get("metadata_filters_collected") or {}
+    if metadata:
+        parts.append(f"Metadata filters: {json.dumps(metadata, ensure_ascii=True, default=str)}")
+    transcript = _format_recent_message_transcript(session.get("messages") or [], limit=4)
+    if transcript:
+        parts.append(f"Recent conversation:\n{transcript}")
+    return " | ".join(parts)[:1800]
+
+
 def _new_session(session_id: str) -> dict[str, Any]:
     return {
         "session_id": session_id,
@@ -137,6 +178,8 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "messages": [],
         "active_search_request_text": "",
         "trailer_category": None,
+        "category_needs_clarification": False,
+        "category_clarification_key": None,
         "slots_collected": {},
         "slots_skipped": [],
         "metadata_filters_collected": {},
@@ -156,6 +199,14 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "pending_contact_action": None,
         "pending_initial_user_message": None,
     }
+
+
+def _persist_email_transcript_snapshot(session: dict[str, Any]) -> None:
+    persist_messages_snapshot(
+        session_id=str(session.get("session_id") or ""),
+        lead_id=session.get("lead_id"),
+        messages=session.get("messages") or [],
+    )
 
 
 def _get_session(session_id: str) -> dict[str, Any]:
@@ -681,6 +732,7 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
     action_type = action.get("type")
     if action_type == "interest":
         item_name = str(action.get("item_name") or "that trailer").strip()
+        _persist_email_transcript_snapshot(session)
         result = send_interested_listing_email(
             session_id=session.get("session_id") or "",
             full_name=session.get("customer_full_name") or "",
@@ -697,6 +749,7 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
     if action_type == "faq":
         category = str(action.get("faq_category") or "contact_human")
         summary = str(action.get("summary") or "")
+        _persist_email_transcript_snapshot(session)
         result = send_non_sales_faq_email(
             session_id=session.get("session_id") or "",
             full_name=session.get("customer_full_name") or "",
@@ -705,6 +758,7 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
             faq_category=category,
             summary=summary,
             user_message=str(action.get("user_message") or ""),
+            context_summary=str(action.get("context_summary") or _email_context_summary(session)),
         )
         logger.info("deferred_contact_action_sent | type=faq | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
@@ -713,13 +767,15 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
             "Thanks, I saved your contact information and sent that request to our team so they can help.",
         )
     if action_type == "escalation_alert":
+        _persist_email_transcript_snapshot(session)
         result = send_escalation_alert_email(
+            session_id=session.get("session_id") or "",
             full_name=session.get("customer_full_name") or "",
             email=session.get("customer_email"),
             phone=session.get("customer_phone") or "",
             summary=str(action.get("summary") or "Customer requested an unsupported business action."),
             user_message=str(action.get("user_message") or ""),
-            context_summary=str(action.get("context_summary") or ""),
+            context_summary=str(action.get("context_summary") or _email_context_summary(session)),
         )
         logger.info("deferred_contact_action_sent | type=escalation_alert | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
@@ -1202,12 +1258,14 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
                 "please reach out from the sales department."
             ),
             "user_message": request.message,
+            "context_summary": _email_context_summary(session),
         }
         assistant_text = (
             "I can have our sales team help with this. Could you please share your phone number "
             "or email address so they can contact you?"
         )
     elif not session.get("confusion_escalated"):
+        _persist_email_transcript_snapshot(session)
         send_non_sales_faq_email(
             session_id=session.get("session_id") or "",
             full_name=session.get("customer_full_name") or "",
@@ -1219,6 +1277,7 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
                 "please reach out from the sales department."
             ),
             user_message=request.message,
+            context_summary=_email_context_summary(session),
         )
         session["confusion_escalated"] = True
         assistant_text = _CONFUSION_ESCALATION_REPLY
@@ -1372,6 +1431,8 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "sales_phase": "main",
         "active_search_request_text": session.get("active_search_request_text") or "",
         "trailer_category": session.get("trailer_category"),
+        "category_needs_clarification": bool(session.get("category_needs_clarification")),
+        "category_clarification_key": session.get("category_clarification_key"),
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
         "slots_skipped": list(session.get("slots_skipped") or []),
         "metadata_filters_collected": deepcopy(session.get("metadata_filters_collected") or {}),
@@ -1396,6 +1457,8 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
 
 def _reset_search_state_for_category_switch(session: dict[str, Any], old_category: str, new_category: str) -> None:
     session["trailer_category"] = None
+    session["category_needs_clarification"] = False
+    session["category_clarification_key"] = None
     session["slots_collected"] = {}
     session["slots_skipped"] = []
     session["metadata_filters_collected"] = {}
@@ -1459,7 +1522,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         and not _has_full_initial_details(session)
     ):
         session["initial_contact_request_asked"] = True
-        if _has_actionable_intent(request.message):
+        if _should_save_initial_message_for_resume(request.message):
             session["pending_initial_user_message"] = request.message
         assistant_text = _initial_contact_request_text(session)
         session["messages"].append({"role": "assistant", "content": assistant_text})
@@ -1615,6 +1678,8 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
 
     for key in (
         "trailer_category",
+        "category_needs_clarification",
+        "category_clarification_key",
         "slots_collected",
         "slots_skipped",
         "metadata_filters_collected",

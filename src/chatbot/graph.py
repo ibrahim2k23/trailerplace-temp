@@ -14,7 +14,11 @@ from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
 from trailer_fields import get_trailer_fields_as_dict, list_all_categories
-from src.chatbot.categories import resolve_category_from_text
+from src.chatbot.categories import (
+    category_clarification_question,
+    resolve_category_clarification_answer,
+    resolve_category_from_text,
+)
 from src.chatbot.formatting import format_listing_results
 from src.chatbot.mini_llm_classifier import (
     HaulClassificationDecision,
@@ -40,6 +44,7 @@ from src.chatbot.tools.pinecone_search import (
     PineconeListingSearchResult,
     search_pinecone_listing_result,
 )
+from src.conversation_store import persist_messages_snapshot
 
 load_dotenv()
 
@@ -84,6 +89,22 @@ _INTEREST_GENERIC_FALLBACK_NO_ITEM = (
 _INTEREST_SAFE_FALLBACK = (
     "Great, I sent your interest in that trailer to the team. They can follow up with you shortly."
 )
+
+
+def _format_recent_message_transcript(messages: list[dict[str, Any]], limit: int = 4) -> str:
+    lines: list[str] = []
+    for item in (messages or [])[-limit:]:
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "User" if role == "user" else "Chatbot" if role == "assistant" else role.title() or "Message"
+        lines.append(f"{speaker}:")
+        lines.append(content)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _compact_recent_context(state: ChatbotState) -> str:
     parts: list[str] = []
     category = str(state.get("trailer_category") or "").strip()
@@ -106,7 +127,9 @@ def _compact_recent_context(state: ChatbotState) -> str:
             parts.append(f"Recent listings shown: {'; '.join(titles)}")
     recent = state.get("messages") or []
     if recent:
-        parts.append(f"Recent messages: {_safe_json(recent[-4:])}")
+        transcript = _format_recent_message_transcript(recent, limit=4)
+        if transcript:
+            parts.append(f"Recent conversation:\n{transcript}")
     return " | ".join(parts)[:1800]
 
 
@@ -120,6 +143,14 @@ def _active_question_followup(state: ChatbotState) -> str:
     if pending:
         return str(pending[0].get("question") or "").strip()
     return ""
+
+
+def _persist_email_transcript_snapshot(state: ChatbotState) -> None:
+    persist_messages_snapshot(
+        session_id=str(state.get("session_id") or ""),
+        lead_id=state.get("lead_id"),
+        messages=state.get("messages") or [],
+    )
 
 
 def _append_active_question_if_present(state: ChatbotState, text: str) -> str:
@@ -214,6 +245,23 @@ class QuestionTurnDecision(BaseModel):
     metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
     slots_collected_update: dict[str, Any] = Field(default_factory=dict)
     requested_non_metadata_features: list[str] = Field(default_factory=list)
+    email_action: Literal[
+        "none",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+    ] = "none"
+    faq_category: Optional[str] = None
+    faq_summary: Optional[str] = None
+    escalation_summary: Optional[str] = None
+    unsupported_request: Optional[str] = None
+    reply_to_user: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+
+
+class OfficeTrailerClarificationDecision(BaseModel):
+    answered_clarification: bool = False
+    resolved_category: Optional[Literal["Fiber", "Enclosed"]] = None
     email_action: Literal[
         "none",
         "send_non_sales_faq_email",
@@ -324,6 +372,19 @@ def _question_turn_adjudicator_llm():
     ).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         QuestionTurnDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _office_trailer_clarification_llm():
+    model = (
+        os.getenv("OFFICE_TRAILER_CLARIFICATION_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        OfficeTrailerClarificationDecision,
         method="function_calling",
     )
 
@@ -1432,6 +1493,7 @@ _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
 _DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
 _DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed", "dump"}
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
+_CATEGORY_CLARIFICATION_SLOT = "category_clarification"
 _GENERIC_CATEGORY_CHOICE_SLOT = "generic_category_choice"
 _GENERIC_CATEGORY_QUESTION = "What type of trailer are you looking for?"
 _GENERIC_HAUL_USE_SLOT = "generic_haul_use"
@@ -1443,6 +1505,14 @@ _MAKE_GENERIC_QUESTIONS = {
     _MAKE_GENERIC_PAYLOAD_SLOT: "What payload or weight capacity do you need?",
 }
 _PSEUDO_SLOT_DEFINITIONS: dict[str, dict[str, Any]] = {
+    _CATEGORY_CLARIFICATION_SLOT: {
+        "question": "",
+        "answer_guidance": (
+            "Store the user's clarification when a broad trailer phrase could map to more than one canonical "
+            "category. Resolve the category from the clarification instead of asking the generic category question."
+        ),
+        "mapped_metadata_fields": [],
+    },
     _GENERIC_CATEGORY_CHOICE_SLOT: {
         "question": _GENERIC_CATEGORY_QUESTION,
         "answer_guidance": "Store the trailer category the customer chooses. Accept supported trailer-type names only.",
@@ -1928,6 +1998,133 @@ def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecisi
     )
 
 
+def _sanitize_office_trailer_clarification_decision(data: dict[str, Any]) -> OfficeTrailerClarificationDecision:
+    confidence = str(data.get("confidence") or "low").lower()
+    if confidence not in {"medium", "high"}:
+        confidence = "low"
+    email_action = str(data.get("email_action") or "none").strip()
+    if email_action not in {
+        "none",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+    }:
+        email_action = "none"
+    resolved_category = str(data.get("resolved_category") or "").strip() or None
+    if resolved_category not in {"Fiber", "Enclosed"}:
+        resolved_category = None
+    return OfficeTrailerClarificationDecision(
+        answered_clarification=bool(data.get("answered_clarification")),
+        resolved_category=resolved_category,  # type: ignore[arg-type]
+        email_action=email_action,  # type: ignore[arg-type]
+        faq_category=str(data.get("faq_category") or "").strip() or None,
+        faq_summary=str(data.get("faq_summary") or "").strip() or None,
+        escalation_summary=str(data.get("escalation_summary") or "").strip() or None,
+        unsupported_request=str(data.get("unsupported_request") or "").strip() or None,
+        reply_to_user=str(data.get("reply_to_user") or "").strip(),
+        confidence=confidence,
+        reason=str(data.get("reason") or ""),
+    )
+
+
+def _fallback_office_trailer_clarification_decision(
+    *,
+    latest_message: str,
+    clarification_key: str | None,
+    active_question: str,
+) -> OfficeTrailerClarificationDecision:
+    resolution = resolve_category_clarification_answer(latest_message, clarification_key)
+    if resolution.category in {"Fiber", "Enclosed"}:
+        return OfficeTrailerClarificationDecision(
+            answered_clarification=True,
+            resolved_category=resolution.category,
+            confidence="high",
+            reason="deterministic_office_trailer_clarification_answer",
+        )
+    return OfficeTrailerClarificationDecision(
+        reply_to_user=_question_turn_fallback_reply(active_question, latest_message),
+        confidence="low",
+        reason="deterministic_office_trailer_clarification_unanswered",
+    )
+
+
+def _adjudicate_office_trailer_clarification_turn(
+    *,
+    state: ChatbotState,
+    active_question: str,
+    latest_message: str,
+) -> QuestionTurnDecision:
+    clarification_key = str(state.get("category_clarification_key") or "").strip() or None
+    if not os.getenv("OPENAI_API_KEY"):
+        fallback = _fallback_office_trailer_clarification_decision(
+            latest_message=latest_message,
+            clarification_key=clarification_key,
+            active_question=active_question,
+        )
+    else:
+        context = {
+            "latest_user_message": latest_message,
+            "recent_messages": (state.get("messages") or [])[-8:],
+            "active_question": active_question,
+            "clarification_key": clarification_key,
+            "valid_outcomes": {
+                "Fiber": "Fiber/telecom work, splicing, telecom setup, fiber optic use, cooldown trailer for fiber crews, or similar.",
+                "Enclosed": "General office trailer, office work, office use, office only, jobsite office, site office, mobile office, workspace, admin office, crew office, or similar.",
+            },
+            "tool_rules": {
+                "send_non_sales_faq_email": "Use for contact/human help, financing, trade-in, service/parts, or store/location info.",
+                "send_escalation_alert_email": "Use when the customer asks TrailerPlace/the team to perform an unsupported business action such as calling them, emailing them, sending a quote, invoice, paperwork, scheduling, holds, reservations, or future-arrival timing.",
+            },
+        }
+        try:
+            decision = _office_trailer_clarification_llm().invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You evaluate the user's answer to a specific office trailer clarification question. "
+                            "Return structured data only.\n"
+                            "Decide whether the customer answered whether this should route to Fiber or to Enclosed.\n"
+                            "Set answered_clarification=true only when the user clearly answered the clarification.\n"
+                            "Use resolved_category=Fiber when they mean fiber/telecom work.\n"
+                            "Use resolved_category=Enclosed when they mean a more general office trailer or office work.\n"
+                            "If the user asks a counter-question or says something unrelated, do not resolve a category. "
+                            "Provide a short reply_to_user instead.\n"
+                            "You may set email_action to send_non_sales_faq_email or send_escalation_alert_email using the existing rules.\n"
+                            "Do not invent a category if the user did not answer the clarification. "
+                            "Use medium or high confidence only when clearly supported."
+                        )
+                    ),
+                    HumanMessage(content=_safe_json(context)),
+                ]
+            )
+            fallback = _sanitize_office_trailer_clarification_decision(
+                _model_dump(decision) if isinstance(decision, BaseModel) else {}
+            )
+        except Exception:
+            logger.exception("Office trailer clarification adjudicator failed; using fallback")
+            fallback = _fallback_office_trailer_clarification_decision(
+                latest_message=latest_message,
+                clarification_key=clarification_key,
+                active_question=active_question,
+            )
+
+    return QuestionTurnDecision(
+        answered_active_question=bool(
+            fallback.answered_clarification
+            and fallback.resolved_category in {"Fiber", "Enclosed"}
+            and fallback.confidence in _CONFIDENT_CLASSIFICATIONS
+        ),
+        active_slot_value=fallback.resolved_category,
+        email_action=fallback.email_action,
+        faq_category=fallback.faq_category,
+        faq_summary=fallback.faq_summary,
+        escalation_summary=fallback.escalation_summary,
+        unsupported_request=fallback.unsupported_request,
+        reply_to_user=fallback.reply_to_user,
+        confidence=fallback.confidence,
+        reason=fallback.reason or "office_trailer_clarification",
+    )
+
+
 def _fallback_question_turn_decision(
     *,
     state: ChatbotState,
@@ -1993,6 +2190,13 @@ def _fallback_question_turn_decision(
             reply_to_user=_question_turn_fallback_reply(active_question, text),
             reason="unanswered_generic_category_choice",
             confidence="low",
+        )
+
+    if active_slot == _CATEGORY_CLARIFICATION_SLOT and str(state.get("category_clarification_key") or "").strip() == "office_trailer_use":
+        return _adjudicate_office_trailer_clarification_turn(
+            state=state,
+            active_question=active_question,
+            latest_message=text,
         )
 
     preference_decision = classify_no_preference(
@@ -2069,6 +2273,12 @@ def _adjudicate_active_question_turn(
     pending_questions: list[QuestionItem],
     make_category_options: list[str],
 ) -> QuestionTurnDecision:
+    if active_slot == _CATEGORY_CLARIFICATION_SLOT and str(state.get("category_clarification_key") or "").strip() == "office_trailer_use":
+        return _adjudicate_office_trailer_clarification_turn(
+            state=state,
+            active_question=active_question,
+            latest_message=latest_message,
+        )
     if not os.getenv("OPENAI_API_KEY"):
         fallback = _fallback_question_turn_decision(
             state=state,
@@ -3223,12 +3433,16 @@ def _catalogue_redirect_state(
     slots: dict[str, Any],
     slots_skipped: set[str],
     metadata_filters: dict[str, Any],
+    category_needs_clarification: bool = False,
+    category_clarification_key: str | None = None,
 ) -> ChatbotState:
     decision["action"] = "respond"
     logger.info("catalogue_redirect_applied | user_message=%r", state.get("user_message"))
     return {
         **state,
         "trailer_category": category,
+        "category_needs_clarification": category_needs_clarification,
+        "category_clarification_key": category_clarification_key,
         "slots_collected": slots,
         "slots_skipped": sorted(slots_skipped),
         "metadata_filters_collected": metadata_filters,
@@ -3247,8 +3461,13 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "category_needs_clarification": True,
+            "category_clarification_key": resolution.clarification_key,
             "assistant_text": clarification,
-            "mind_decision": {"action": "respond", "assistant_text": clarification},
+            "mind_decision": {
+                "action": "respond",
+                "assistant_text": clarification,
+                "category_clarification_key": resolution.clarification_key,
+            },
         }
 
     category_locked_pre_results = bool(state.get("trailer_category")) and not bool(
@@ -3805,6 +4024,29 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     invalid_required_slot: str | None = None
     awaiting_slot = state.get("awaiting_slot")
     category_before = state.get("trailer_category")
+    latest_message = state.get("user_message") or ""
+    latest_message_resolution = resolve_category_from_text(latest_message)
+    category_needs_clarification = bool(state.get("category_needs_clarification"))
+    category_clarification_key = str(state.get("category_clarification_key") or "").strip() or None
+    if (
+        latest_message_resolution.needs_clarification
+        and not category_before
+        and awaiting_slot != _CATEGORY_CLARIFICATION_SLOT
+    ):
+        proposed_category = decision.get("trailer_category")
+        if proposed_category:
+            logger.info(
+                "ambiguous_category_blocks_direct_assignment | proposed_category=%r | clarification_key=%r | user_message=%r",
+                proposed_category,
+                latest_message_resolution.clarification_key,
+                latest_message,
+            )
+            decision.pop("trailer_category", None)
+        category_needs_clarification = True
+        category_clarification_key = (
+            latest_message_resolution.clarification_key
+            or category_clarification_key
+        )
     category_proposed = decision.get("trailer_category") or category_before
     category_locked_pre_results = bool(category_before) and not bool(
         state.get("has_shown_search_results")
@@ -3836,7 +4078,6 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         awaiting_slot = None
         reset_result_state = True
 
-    latest_message = state.get("user_message") or ""
     make_category_options = list(state.get("make_category_options") or [])
     if _catalogue_redirect_allowed(
         state,
@@ -3850,7 +4091,39 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             slots=slots,
             slots_skipped=slots_skipped,
             metadata_filters=metadata_filters,
+            category_needs_clarification=category_needs_clarification,
+            category_clarification_key=category_clarification_key,
         )
+
+    if category_needs_clarification and not category and awaiting_slot != _CATEGORY_CLARIFICATION_SLOT:
+        clarification_question = (
+            category_clarification_question(category_clarification_key)
+            or str(state.get("assistant_text") or decision.get("assistant_text") or "").strip()
+            or "Could you clarify which type you mean?"
+        )
+        decision["action"] = "respond"
+        return {
+            **state,
+            "trailer_category": None,
+            "category_needs_clarification": True,
+            "category_clarification_key": category_clarification_key,
+            "slots_collected": slots,
+            "slots_skipped": sorted(slots_skipped),
+            "metadata_filters_collected": metadata_filters,
+            "requested_non_metadata_features": requested_non_metadata_features,
+            "active_search_request_text": _updated_active_search_request_text(
+                state=state,
+                latest_message="",
+                slots=slots,
+                metadata_filters=metadata_filters,
+                reset_active_request=category_changed or make_changed,
+            ),
+            "make_category_options": make_category_options,
+            "awaiting_slot": _CATEGORY_CLARIFICATION_SLOT,
+            "pending_questions": [],
+            "assistant_text": clarification_question,
+            "mind_decision": decision,
+        }
 
     if awaiting_slot == _MAKE_CATEGORY_CHOICE_SLOT:
         chosen_category = _category_from_choice(latest_message, make_category_options)
@@ -3891,6 +4164,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             return {
                 **state,
                 "trailer_category": category,
+                "category_needs_clarification": category_needs_clarification,
+                "category_clarification_key": category_clarification_key,
                 "slots_collected": slots,
                 "slots_skipped": sorted(slots_skipped),
                 "metadata_filters_collected": metadata_filters,
@@ -3943,6 +4218,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             return {
                 **state,
                 "trailer_category": category,
+                "category_needs_clarification": category_needs_clarification,
+                "category_clarification_key": category_clarification_key,
                 "slots_collected": slots,
                 "slots_skipped": sorted(slots_skipped),
                 "metadata_filters_collected": metadata_filters,
@@ -3998,6 +4275,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "trailer_category": category,
+            "category_needs_clarification": category_needs_clarification,
+            "category_clarification_key": category_clarification_key,
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
@@ -4070,6 +4349,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
             for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
                 metadata_filters.pop(str(key), None)
+        elif (
+            active_qna_slot == _CATEGORY_CLARIFICATION_SLOT
+            and question_turn.answered_active_question
+            and question_turn.active_slot_value in {"Fiber", "Enclosed"}
+        ):
+            category = str(question_turn.active_slot_value)
+            category_needs_clarification = False
+            category_clarification_key = None
+            awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
+            reset_result_state = True
         elif question_turn.answered_active_question and question_turn.active_slot_value not in (None, ""):
             active_slot_value = _trim_fallback_active_slot_value(active_qna_slot, question_turn.active_slot_value)
             active_slot_value = _preserve_latest_haul_item_phrase(active_qna_slot, active_slot_value, latest_message)
@@ -4188,6 +4477,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 slots=slots,
                 slots_skipped=slots_skipped,
                 metadata_filters=metadata_filters,
+                category_needs_clarification=category_needs_clarification,
+                category_clarification_key=category_clarification_key,
             )
         awaiting_slot, slots_skipped, _removed_filters = _apply_preference_null_decision(
             category=category,
@@ -4310,6 +4601,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "trailer_category": category,
+            "category_needs_clarification": category_needs_clarification,
+            "category_clarification_key": category_clarification_key,
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
@@ -4340,6 +4633,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "trailer_category": category,
+            "category_needs_clarification": category_needs_clarification,
+            "category_clarification_key": category_clarification_key,
             "slots_collected": slots,
             "slots_skipped": sorted(slots_skipped),
             "metadata_filters_collected": metadata_filters,
@@ -4590,6 +4885,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     return {
         **state,
         "trailer_category": category,
+        "category_needs_clarification": category_needs_clarification,
+        "category_clarification_key": category_clarification_key,
         "slots_collected": slots,
         "slots_skipped": sorted(slots_skipped),
         "metadata_filters_collected": metadata_filters,
@@ -4718,6 +5015,7 @@ def _interest_email_node(state: ChatbotState) -> ChatbotState:
             },
             "tool_events": events,
         }
+    _persist_email_transcript_snapshot(state)
     result = send_interested_listing_email(
         session_id=state.get("session_id") or "",
         full_name=state.get("customer_full_name") or "",
@@ -4769,9 +5067,11 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
                 "faq_category": category,
                 "summary": summary,
                 "user_message": state.get("user_message") or "",
+                "context_summary": _compact_recent_context(state),
             },
             "tool_events": events,
         }
+    _persist_email_transcript_snapshot(state)
     result = send_non_sales_faq_email(
         session_id=state.get("session_id") or "",
         full_name=state.get("customer_full_name") or "",
@@ -4780,6 +5080,7 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
         faq_category=category,
         summary=summary,
         user_message=state.get("user_message") or "",
+        context_summary=_compact_recent_context(state),
     )
     planner_reply = str(decision.get("assistant_text") or state.get("assistant_text") or "").strip()
     category_reply = _FAQ_REPLY_FALLBACKS.get(category, "").strip()
@@ -4830,7 +5131,9 @@ def _escalation_email_node(state: ChatbotState) -> ChatbotState:
             },
             "tool_events": events,
         }
+    _persist_email_transcript_snapshot(state)
     result = send_escalation_alert_email(
+        session_id=state.get("session_id") or "",
         full_name=state.get("customer_full_name") or "",
         email=state.get("customer_email"),
         phone=state.get("customer_phone") or "",

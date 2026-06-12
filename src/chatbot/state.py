@@ -23,6 +23,7 @@ class ChatbotState(TypedDict, total=False):
     sales_phase: str
     trailer_category: Optional[str]
     category_needs_clarification: bool
+    category_clarification_key: Optional[str]
     slots_collected: dict[str, Any]
     slots_skipped: list[str]
     metadata_filters_collected: dict[str, Any]

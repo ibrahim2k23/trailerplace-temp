@@ -53,6 +53,28 @@ def _merge_existing_feedback(
     return merged
 
 
+def _messages_to_conversation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    conversation: list[dict[str, Any]] = []
+    for idx in range(0, len(messages or []), 2):
+        user_msg = messages[idx] if idx < len(messages or []) else None
+        assistant_msg = messages[idx + 1] if idx + 1 < len(messages or []) else None
+        turn = {
+            "user": user_msg.get("content") if isinstance(user_msg, dict) else None,
+            "chatbot": assistant_msg.get("content") if isinstance(assistant_msg, dict) else None,
+        }
+        if isinstance(assistant_msg, dict):
+            for key in ("trailer_category", "metadata_filters_collected"):
+                if assistant_msg.get(key) not in (None, "", [], {}):
+                    turn[key] = assistant_msg[key]
+            feedback = assistant_msg.get("feedback")
+            if feedback in (None, ""):
+                feedback = assistant_msg.get("user_feedback")
+            if feedback not in (None, ""):
+                turn["feedback"] = feedback
+        conversation.append(turn)
+    return conversation
+
+
 def ensure_persistence_schema() -> None:
     if not persistence_enabled():
         return
@@ -199,6 +221,36 @@ def upsert_conversation(
             )
             session.add(row)
         session.commit()
+
+
+def persist_messages_snapshot(
+    *,
+    session_id: str,
+    lead_id: Optional[str],
+    messages: list[dict[str, Any]],
+) -> None:
+    if not persistence_enabled() or not lead_id or not session_id:
+        return
+    upsert_conversation(
+        session_id=session_id,
+        lead_id=lead_id,
+        conversation=_messages_to_conversation(messages or []),
+    )
+
+
+def get_conversation(session_id: str) -> list[dict[str, Any]]:
+    if not persistence_enabled() or not session_id:
+        return []
+    ensure_persistence_schema()
+    try:
+        sid = _as_uuid(session_id)
+    except Exception:
+        return []
+    with _session() as session:
+        row = session.get(ChatbotConversation, sid)
+        if not row or not isinstance(row.conversation, list):
+            return []
+        return list(row.conversation)
 
 
 def enqueue_upsert_conversation(

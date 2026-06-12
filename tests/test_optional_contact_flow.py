@@ -52,6 +52,36 @@ def test_first_message_without_contact_creates_lead_and_asks_for_details(monkeyp
     assert lead_calls[0]["phone"] is None
 
 
+def test_simple_catalogue_question_resumes_after_contact(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001022"
+    service.reset_session(session_id)
+    invoked = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009022")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009022")
+    monkeypatch.setattr(service, "_classify_contact_prompt_reply", lambda *_args, **_kwargs: _decision("resume_saved_request"))
+    monkeypatch.setattr(service, "_contact_prompt_bridge_text", _bridge)
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda _session, message: invoked.append(message) or True)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda _session, message, _shown: {
+            "assistant_text": "TrailerPlace carries utility, dump, equipment, enclosed, flatbed, car hauler, livestock, tilt, roll-off, and more.",
+            "tool_events": [],
+            "last_listings": [],
+        },
+    )
+
+    first = service.handle_chat(_req(session_id, "Hello. What type of trailers do you guys have?"))
+    second = service.handle_chat(_req(session_id, "my name is Ibrahim and phone is 03304388550"))
+
+    assert "Before we get started" in first.assistant_text
+    assert second.assistant_text.startswith("Bridge[resume_saved_request]\n\nTrailerPlace carries")
+    assert invoked[-1] == "Hello. What type of trailers do you guys have?"
+    assert service._get_session(session_id)["pending_initial_user_message"] is None
+
+
 def test_stock_lookup_before_results_stays_in_contact_flow(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001019"
     service.reset_session(session_id)
@@ -337,6 +367,57 @@ def test_resumed_graph_does_not_receive_contact_reply_as_recent_context(monkeypa
     assert "Bridge[resume_saved_request]" in response.assistant_text
     assert all("not comfortable" not in str(msg.get("content") or "") for msg in graph_messages)
     assert any("looking for a trailer" in str(msg.get("content") or "") for msg in graph_messages)
+
+
+def test_category_clarification_state_survives_after_contact_resume(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001022"
+    service.reset_session(session_id)
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009022")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009022")
+    monkeypatch.setattr(service, "_classify_contact_prompt_reply", lambda *_args, **_kwargs: _decision("resume_saved_request"))
+    monkeypatch.setattr(service, "_contact_prompt_bridge_text", _bridge)
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+
+    def _invoke_graph(session, message, _shown):
+        if message == "I am looking for an office trailer":
+            return {
+                "assistant_text": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+                "tool_events": [],
+                "last_listings": [],
+                "trailer_category": None,
+                "category_needs_clarification": True,
+                "category_clarification_key": "office_trailer_use",
+                "awaiting_slot": "category_clarification",
+                "pending_questions": [],
+            }
+        assert session["category_needs_clarification"] is True
+        assert session["category_clarification_key"] == "office_trailer_use"
+        assert session["awaiting_slot"] == "category_clarification"
+        return {
+            "assistant_text": "What will you be using the enclosed trailer for?",
+            "tool_events": [],
+            "last_listings": [],
+            "trailer_category": "Enclosed",
+            "category_needs_clarification": False,
+            "category_clarification_key": None,
+            "awaiting_slot": "use_case",
+            "pending_questions": [{"slot": "use_case", "question": "What will you be using the enclosed trailer for?"}],
+        }
+
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(service, "_invoke_graph", _invoke_graph)
+
+    first = service.handle_chat(_req(session_id, "I am looking for an office trailer"))
+    second = service.handle_chat(_req(session_id, "my name is Ibrahim and phone is 03304388550"))
+    third = service.handle_chat(_req(session_id, "it'll be for office only"))
+
+    assert "Before we get started" in first.assistant_text
+    assert "Will this be for fiber/telecom work specifically" in second.assistant_text
+    assert third.assistant_text == "What will you be using the enclosed trailer for?"
+    assert service._get_session(session_id)["trailer_category"] == "Enclosed"
+    assert service._get_session(session_id)["category_needs_clarification"] is False
+    assert service._get_session(session_id)["category_clarification_key"] is None
 
 
 def test_contact_prompt_bridge_uses_llm_text(monkeypatch):

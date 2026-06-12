@@ -137,6 +137,9 @@ def test_escalation_node_sends_and_repeats_active_question(monkeypatch):
                 "escalation_summary": "Customer asked for a quote.",
                 "unsupported_request": "Can you email me a quote?",
             },
+            "messages": [
+                {"role": "user", "content": "Can you email me a quote?"},
+            ],
             "awaiting_slot": "haul_weight_lbs",
             "pending_questions": [
                 {"slot": "haul_weight_lbs", "question": "How much weight will you be hauling?", "required": True}
@@ -148,6 +151,7 @@ def test_escalation_node_sends_and_repeats_active_question(monkeypatch):
 
     assert calls[0]["summary"] == "Customer asked for a quote."
     assert "session_id" not in calls[0]
+    assert "Recent conversation:\nUser:\nCan you email me a quote?" in calls[0]["context_summary"]
     assert out["tool_events"][-1]["tool"] == "send_escalation_alert_email"
     assert "I've sent your query to our team" in out["assistant_text"]
     assert "How much weight will you be hauling?" in out["assistant_text"]

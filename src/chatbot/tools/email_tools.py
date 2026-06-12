@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Optional
 
 from src.email_sender import send_faq_email_sync, send_ticket_notification
-from src.conversation_store import promote_lead_to_hard, update_lead_item_of_interest
+from src.conversation_store import (
+    get_conversation,
+    promote_lead_to_hard,
+    update_lead_item_of_interest,
+)
 
 FAQ_CATEGORY_LABELS = {
     "contact_human": "Customer asked to contact a person.",
@@ -19,6 +23,36 @@ FAQ_ITEM_OF_INTEREST_LABELS = {
     "service_parts": "Spare Parts Query",
     "store_info": "Store Information Query",
 }
+
+
+def _conversation_transcript_from_db(session_id: str) -> str:
+    turns = get_conversation(session_id)
+    if not turns:
+        return ""
+    lines: list[str] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        user_text = str(turn.get("user") or "").strip()
+        chatbot_text = str(turn.get("chatbot") or "").strip()
+        if user_text:
+            lines.append("User:")
+            lines.append(user_text)
+            lines.append("")
+        if chatbot_text:
+            lines.append("Chatbot:")
+            lines.append(chatbot_text)
+            lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _append_conversation(summary_text: str, session_id: str) -> str:
+    transcript = _conversation_transcript_from_db(session_id)
+    if not transcript:
+        return summary_text
+    return f"{summary_text}\n\nConversation:\n{transcript}"
+
+
 def send_interested_listing_email(
     *,
     session_id: str,
@@ -29,11 +63,13 @@ def send_interested_listing_email(
 ) -> dict:
     """Tool 2: notify the business that the customer is interested in a listing."""
     item = (item_name or "").strip()
+    details = _append_conversation("", session_id).strip()
     send_ticket_notification(
         full_name=full_name,
         email=email,
         phone=phone,
         item_name=item,
+        details=details,
     )
     promote_lead_to_hard(session_id)
     update_lead_item_of_interest(session_id, item)
@@ -44,6 +80,7 @@ def send_interested_listing_email(
             f"Email: {(email or '').strip() or 'Not provided'}\n"
             f"Phone Number: {phone}\n\n"
             f'The user is interested in "{item}"'
+            + (f"\n\n{details}" if details else "")
         ),
     }
 
@@ -57,6 +94,7 @@ def send_non_sales_faq_email(
     faq_category: str,
     summary: str | None = None,
     user_message: str | None = None,
+    context_summary: str | None = None,
 ) -> dict:
     """Tool 3: notify the business about contact, financing, trade-in, service, or store info."""
     category = (faq_category or "contact_human").strip().lower()
@@ -65,9 +103,7 @@ def send_non_sales_faq_email(
     summary_line = (summary or FAQ_CATEGORY_LABELS[category]).strip()
     if not summary_line.startswith(f"[{category}]"):
         summary_line = f"[{category}] {summary_line}"
-    message_line = (user_message or "").strip()
-    if message_line:
-        summary_line = f"{summary_line}\n\nLast user message: {message_line}"
+    summary_line = _append_conversation(summary_line, session_id)
     send_faq_email_sync(
         full_name=full_name,
         email=email,
@@ -93,6 +129,7 @@ def send_non_sales_faq_email(
 
 def send_escalation_alert_email(
     *,
+    session_id: str = "",
     full_name: str,
     email: Optional[str],
     phone: str,
@@ -104,12 +141,7 @@ def send_escalation_alert_email(
     summary_line = (summary or "Customer requested an action the chatbot cannot complete.").strip()
     if not summary_line.startswith("[Escalation Alert]"):
         summary_line = f"[Escalation Alert] {summary_line}"
-    message_line = (user_message or "").strip()
-    if message_line:
-        summary_line = f"{summary_line}\n\nLast user message: {message_line}"
-    context_line = (context_summary or "").strip()
-    if context_line:
-        summary_line = f"{summary_line}\n\nContext: {context_line}"
+    summary_line = _append_conversation(summary_line, session_id)
     send_faq_email_sync(
         full_name=full_name,
         email=email,

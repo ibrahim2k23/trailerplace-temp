@@ -16,6 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -50,6 +51,7 @@ _AUTH_CONFIGURED = bool(_AUTH_USER and _AUTH_PASS)
 _THINKING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_thinking")
 _THINKING_POLL_MS = int((os.getenv("THINKING_AGENT_POLL_MS") or "700").strip())
 CHATBOT_API_URL = (os.getenv("CHATBOT_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
+_RULES_DOC_PATH = Path(__file__).with_name("langgraph_rules_vs_excel.md")
 
 
 def _reset_api_session(session_id: str) -> None:
@@ -74,6 +76,21 @@ def _run_thinking_job(session_id: str, payload: dict) -> dict:
     result = generate_thinking_flow(payload)
     log_thinking_flow(session_id, payload, result)
     return result
+
+
+def _load_rules_markdown() -> str:
+    try:
+        return _RULES_DOC_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "The rules document could not be found."
+    except OSError as exc:
+        return f"Unable to load the rules document: {exc!s}"
+
+
+def _render_rules_page() -> None:
+    st.markdown("### Rules")
+    st.caption("Reference view for the current chatbot rules and behavior.")
+    st.markdown(_load_rules_markdown())
 
 
 st.set_page_config(
@@ -267,6 +284,8 @@ if "sales_phase" not in st.session_state:
     st.session_state.sales_phase = "main"
 if "onboarding_api_messages" not in st.session_state:
     st.session_state.onboarding_api_messages = []
+if "app_page" not in st.session_state:
+    st.session_state.app_page = "Chatbot"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -345,6 +364,12 @@ elif (
 with st.sidebar:
     st.markdown("### 🚛 TrailerPlace")
     st.caption("AI Sales Assistant")
+    st.radio(
+        "View",
+        ("Chatbot", "Rules"),
+        key="app_page",
+        label_visibility="collapsed",
+    )
     st.divider()
     st.markdown("📍 Wharton, TX")
     st.markdown("📞 (979) 532-1486")
@@ -389,6 +414,10 @@ with st.sidebar:
             if k in st.session_state:
                 del st.session_state[k]
         st.rerun()
+
+if st.session_state.get("app_page") == "Rules":
+    _render_rules_page()
+    st.stop()
 
 
 # ─────────────────────────────────────────────────────────────

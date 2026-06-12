@@ -161,6 +161,7 @@ def send_ticket_notification(
     email: Optional[str],
     phone: str,
     item_name: str,
+    details: Optional[str] = None,
 ) -> None:
     """
     Send lead notification to EMAIL_TO. Subject is fixed (ticket notification).
@@ -172,12 +173,15 @@ def send_ticket_notification(
         raise RuntimeError("EMAIL_TO or RECIPIENT_EMAIL is not set in the environment")
 
     email_line = (email or "").strip() or "Not provided"
+    details_block = (details or "").strip()
     body = (
         f"Full Name: {full_name}\n"
         f"Email: {email_line}\n"
         f"Phone Number: {phone}\n"
         f'\nThe user is interested in "{item_name}"\n'
     )
+    if details_block:
+        body = f"{body}\n{details_block}\n"
     sender = get_email_sender()
     sender.send_plain_text(to_addr, TICKET_EMAIL_SUBJECT, body)
     logger.info("Ticket notification email sent to configured EMAIL_TO")

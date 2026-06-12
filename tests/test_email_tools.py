@@ -50,6 +50,7 @@ def test_non_sales_faq_email_promotes_lead_to_hard(monkeypatch):
         faq_category="financing",
         summary="Customer asked about financing.",
         user_message="Can you help me with financing?",
+        context_summary="Recent conversation:\nUser:\nCan you help me with financing?\n\nChatbot:\nWe offer financing options.",
     )
 
     assert result["status"] == "sent"
@@ -57,7 +58,7 @@ def test_non_sales_faq_email_promotes_lead_to_hard(monkeypatch):
     assert ("interest", "session-456", "Finance Query") in calls
     send_call = calls[0][1]
     assert "Customer asked about financing." in send_call["summary_line"]
-    assert "Last user message: Can you help me with financing?" in send_call["summary_line"]
+    assert "Context:\nRecent conversation:\nUser:\nCan you help me with financing?" in send_call["summary_line"]
 
 
 def test_non_sales_faq_email_sets_item_of_interest_by_category(monkeypatch):
@@ -114,6 +115,5 @@ def test_escalation_alert_email_uses_alert_subject_without_session_id(monkeypatc
     send_call = calls[0][1]
     assert send_call["subject"] == "Escalation Alert"
     assert "[Escalation Alert] Customer asked for a quote." in send_call["summary_line"]
-    assert "Last user message: Can you email me a quote?" in send_call["summary_line"]
-    assert "Context: Category: Dump" in send_call["summary_line"]
+    assert "Context:\nCategory: Dump" in send_call["summary_line"]
     assert "session" not in result["body_preview"].lower()

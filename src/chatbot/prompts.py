@@ -93,20 +93,36 @@ Email: <email or Not provided>
 Phone Number: <phone>
 
 The user is interested in "<listing title>"
+
+Conversation:
+User:
+...
+Chatbot:
+...
 - send_non_sales_faq_email: sends a non-sales notification. Body format must be:
 Name: <name>
 Email: <email or Not provided>
 Phone Number: <phone>
 
 [<category>] <one sentence summary>
+
+Conversation:
+User:
+...
+Chatbot:
+...
 - send_escalation_alert_email: sends an Escalation Alert for unsupported customer-requested actions. Body format must be:
 Name: <name>
 Email: <email or Not provided>
 Phone Number: <phone>
 
 [Escalation Alert] <one sentence summary>
-Last user message: <latest user message>
-Context: <compact recent conversation/search context>
+
+Conversation:
+User:
+...
+Chatbot:
+...
 
 FAQ category identifiers:
 - contact_human

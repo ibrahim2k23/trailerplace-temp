@@ -1077,6 +1077,211 @@ def test_generic_haul_use_maps_to_dump_haul_material(monkeypatch):
     assert out["awaiting_slot"] == "haul_weight_lbs"
 
 
+def test_office_trailer_asks_specific_clarification_not_generic_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+
+    planned = graph._mind_node(_state("I am looking for an office trailer", category=None))
+    out = graph._apply_mind_node(planned)
+
+    assert out["trailer_category"] is None
+    assert out["assistant_text"] == "Will this be for fiber/telecom work specifically, or a more general office trailer?"
+    assert out["awaiting_slot"] == "category_clarification"
+    assert out["category_needs_clarification"] is True
+    assert out["category_clarification_key"] == "office_trailer_use"
+    assert out["slots_collected"] == {}
+
+
+def test_office_trailer_blocks_direct_enclosed_guess_until_clarified(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I am loking for an office trailer", category=None)
+    state["mind_decision"]["action"] = "respond"
+    state["mind_decision"]["trailer_category"] = "Enclosed"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["assistant_text"] == "Will this be for fiber/telecom work specifically, or a more general office trailer?"
+    assert out["awaiting_slot"] == "category_clarification"
+    assert out["category_needs_clarification"] is True
+    assert out["category_clarification_key"] == "office_trailer_use"
+
+
+def test_office_trailer_clarification_answer_resolves_to_fiber(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("fiber", category=None)
+    state["awaiting_slot"] = "category_clarification"
+    state["category_needs_clarification"] = True
+    state["category_clarification_key"] = "office_trailer_use"
+    state["messages"] = [
+        {"role": "user", "content": "I am looking for an office trailer"},
+        {
+            "role": "assistant",
+            "content": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        },
+        {"role": "user", "content": "fiber"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Fiber"
+    assert out["category_needs_clarification"] is False
+    assert out["category_clarification_key"] is None
+    assert out["awaiting_slot"] != "category_clarification"
+
+
+def test_office_trailer_clarification_answer_resolves_to_enclosed(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("general office", category=None)
+    state["awaiting_slot"] = "category_clarification"
+    state["category_needs_clarification"] = True
+    state["category_clarification_key"] = "office_trailer_use"
+    state["messages"] = [
+        {"role": "user", "content": "I am looking for an office trailer"},
+        {
+            "role": "assistant",
+            "content": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        },
+        {"role": "user", "content": "general office"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Enclosed"
+    assert out["category_needs_clarification"] is False
+    assert out["category_clarification_key"] is None
+
+
+def test_office_trailer_clarification_repeats_when_answer_unclear(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    state = _state("not sure yet", category=None)
+    state["awaiting_slot"] = "category_clarification"
+    state["category_needs_clarification"] = True
+    state["category_clarification_key"] = "office_trailer_use"
+    state["messages"] = [
+        {"role": "user", "content": "I am looking for an office trailer"},
+        {
+            "role": "assistant",
+            "content": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        },
+        {"role": "user", "content": "not sure yet"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] is None
+    assert out["assistant_text"] == "No problem.\n\nWill this be for fiber/telecom work specifically, or a more general office trailer?"
+    assert out["awaiting_slot"] == "category_clarification"
+    assert out["category_needs_clarification"] is True
+
+
+def test_office_trailer_clarification_llm_maps_office_work_to_enclosed(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _FakeClarifier:
+        def invoke(self, _messages):
+            return graph.OfficeTrailerClarificationDecision(
+                answered_clarification=True,
+                resolved_category="Enclosed",
+                confidence="high",
+                reason="office_work_means_general_office",
+            )
+
+    monkeypatch.setattr(graph, "_office_trailer_clarification_llm", lambda: _FakeClarifier())
+    state = _state("it'll be for office work", category=None)
+    state["awaiting_slot"] = "category_clarification"
+    state["category_needs_clarification"] = True
+    state["category_clarification_key"] = "office_trailer_use"
+    state["messages"] = [
+        {"role": "user", "content": "I am looking for an office trailer"},
+        {
+            "role": "assistant",
+            "content": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        },
+        {"role": "user", "content": "it'll be for office work"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Enclosed"
+    assert out["category_needs_clarification"] is False
+    assert out["category_clarification_key"] is None
+
+
+def test_office_trailer_clarification_llm_maps_fiber_splicing_to_fiber(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _FakeClarifier:
+        def invoke(self, _messages):
+            return graph.OfficeTrailerClarificationDecision(
+                answered_clarification=True,
+                resolved_category="Fiber",
+                confidence="high",
+                reason="fiber_splicing_means_fiber",
+            )
+
+    monkeypatch.setattr(graph, "_office_trailer_clarification_llm", lambda: _FakeClarifier())
+    state = _state("for fiber splicing", category=None)
+    state["awaiting_slot"] = "category_clarification"
+    state["category_needs_clarification"] = True
+    state["category_clarification_key"] = "office_trailer_use"
+    state["messages"] = [
+        {"role": "user", "content": "I am looking for an office trailer"},
+        {
+            "role": "assistant",
+            "content": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        },
+        {"role": "user", "content": "for fiber splicing"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Fiber"
+    assert out["category_needs_clarification"] is False
+    assert out["category_clarification_key"] is None
+
+
+def test_office_trailer_clarification_can_trigger_faq_and_preserve_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _FakeClarifier:
+        def invoke(self, _messages):
+            return graph.OfficeTrailerClarificationDecision(
+                answered_clarification=False,
+                email_action="send_non_sales_faq_email",
+                faq_category="contact_human",
+                faq_summary="Customer asked how to contact TrailerPlace during office trailer clarification.",
+                reply_to_user="You can reach our team at 979-532-1486.",
+                confidence="high",
+                reason="contact_question_during_clarification",
+            )
+
+    monkeypatch.setattr(graph, "_office_trailer_clarification_llm", lambda: _FakeClarifier())
+    state = _state("how do I contact you guys?", category=None)
+    state["awaiting_slot"] = "category_clarification"
+    state["category_needs_clarification"] = True
+    state["category_clarification_key"] = "office_trailer_use"
+    state["messages"] = [
+        {"role": "user", "content": "I am looking for an office trailer"},
+        {
+            "role": "assistant",
+            "content": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
+        },
+        {"role": "user", "content": "how do I contact you guys?"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "send_non_sales_faq_email"
+    assert out["mind_decision"]["faq_category"] == "contact_human"
+    assert out["awaiting_slot"] == "category_clarification"
+    assert out["category_needs_clarification"] is True
+    assert out["category_clarification_key"] == "office_trailer_use"
+
+
 def test_generic_haul_use_maps_to_utility_haul_item(monkeypatch):
     _mock_field_updates(monkeypatch)
     state = _state("a utility trailer", category=None)
