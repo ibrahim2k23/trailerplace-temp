@@ -1,13 +1,8 @@
 ﻿from __future__ import annotations
 
 import logging
-import os
 import re
-from functools import lru_cache
 from typing import Any
-
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 # (display label, listing keys in preference order)
 _BULLET_FIELDS: list[tuple[str, tuple[str, ...]]] = [
@@ -38,23 +33,6 @@ _FULL_MATCH_LANGUAGE_RE = re.compile(
     r"|\bperfect\s+for\s+(?:your\s+)?(?:specifications|requirements|needs|livestock needs|hauling needs)\b",
     re.I,
 )
-
-
-def _why_it_fits_llm_enabled() -> bool:
-    return (os.getenv("WHY_IT_FITS_LLM_ENABLED") or "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-
-
-@lru_cache(maxsize=1)
-def _why_it_fits_llm() -> ChatOpenAI:
-    model = (os.getenv("WHY_IT_FITS_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
-    return ChatOpenAI(model=model, temperature=0.4)
-
-
 def _first_value(listing: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = listing.get(key)
@@ -227,81 +205,6 @@ def _why_it_fits_body(
     if (user_message or "").strip():
         return "A solid option based on your request and the specs available on this listing."
     return "A strong option based on your current search filters."
-
-
-def _why_it_fits_llm_line(
-    listing: dict[str, Any],
-    *,
-    category: str | None,
-    slots: dict[str, Any],
-    user_message: str,
-    fallback_line: str,
-) -> str:
-    if not _why_it_fits_llm_enabled():
-        return fallback_line
-
-    focus = ""
-    for key in (
-        "haul_item",
-        "vehicle_type",
-        "haul_material",
-        "use_case",
-        "fiber_use_case",
-        "base_category",
-    ):
-        if slots.get(key):
-            focus = str(slots[key]).strip()
-            break
-
-    context = {
-        "title": listing.get("title"),
-        "category": category,
-        "focus": focus,
-        "user_message": user_message,
-        "price": listing.get("price_display") or listing.get("price"),
-        "length": listing.get("length"),
-        "hitch_type": listing.get("hitch_type"),
-        "gvwr": listing.get("gvwr"),
-        "payload_capacity": listing.get("payload_capacity"),
-        "color": listing.get("color"),
-        "match_validation": listing.get("match_validation") if isinstance(listing.get("match_validation"), dict) else {},
-    }
-
-    try:
-        response = _why_it_fits_llm().invoke(
-            [
-                SystemMessage(
-                    content=(
-                        """Write exactly one short customer-facing sentence for Why-it-fits.
-Use only supplied listing context, confirmed_requirements, and match_validation. Do not invent specs, feature matches, prices, availability, discounts, condition, stock status, links, or reasons.
-Tone: positive trailer sales advisor, natural, commercially smart, and not robotic. Sell the trailer honestly by highlighting confirmed strengths only.
-If match_validation.match_level is full, you may confidently position the trailer as a strong fit using confirmed specs and features.
-If match_validation.match_level is partial or alternative, do not claim or imply that the trailer fully matches the user's request. Instead, highlight confirmed strengths, practical value, trailer type, build quality, brand, condition, use case, or confirmed features that make it worth comparing.
-Do not mention requested non-metadata features unless they appear in confirmed_requirements.
-Do not mention length, width, payload capacity, or GVWR unless that specific value is explicitly confirmed as matching the user's requested value or requested range.
-If length, width, payload capacity, or GVWR is different from the user's request, outside the requested range, missing, unclear, approximate, or not explicitly confirmed as matching, do not mention that field at all.
-Never use negative or mismatch language such as "partial match", "close alternative", "based on", "exceeds", "does not meet", "mismatch", "missing", "unclear", "too wide", "too tall", "shorter than", "longer than", "outside", "different from", or "requirement".
-Do not say it meets the user's needs, request, specifications, or criteria unless match_validation.match_level is full.
-Avoid repeating "this is in the X category" or restating generic category labels unless it adds meaningful customer value.
-No markdown, no bullets, no quotes, no emojis, max 26 words.
-"""
-                    )
-                ),
-                HumanMessage(content=str(context)),
-            ]
-        )
-        line = str(response.content or "").strip()
-        line = re.sub(r"\s+", " ", line)
-        if not line:
-            return fallback_line
-        if line.startswith('"') and line.endswith('"') and len(line) > 1:
-            line = line[1:-1].strip()
-        return _safe_sales_blurb(line, listing=listing, fallback_line=fallback_line)
-    except Exception:
-        logger.exception("Why-it-fits LLM generation failed; falling back to deterministic line")
-        return fallback_line
-
-
 def format_listing_results(
     listings: list[dict[str, Any]],
     *,
@@ -334,13 +237,7 @@ def format_listing_results(
             slots=slots or {},
             user_message=user_message,
         )
-        why = _why_it_fits_llm_line(
-            listing,
-            category=category,
-            slots=slots or {},
-            user_message=user_message,
-            fallback_line=why_fallback,
-        )
+        why = why_fallback
 
         block_parts = [line1]
         if bullet_lines:

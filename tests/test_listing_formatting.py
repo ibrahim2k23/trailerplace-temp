@@ -2,7 +2,6 @@ from src.chatbot import formatting
 
 
 def test_listing_results_use_plain_visible_numbers_without_fixed_interest_prompt(monkeypatch):
-    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: False)
     listings = [
         {
             "title": "Trailer A",
@@ -35,16 +34,6 @@ def test_listing_results_use_plain_visible_numbers_without_fixed_interest_prompt
 
 
 def test_why_it_fits_llm_cannot_claim_unconfirmed_requested_feature(monkeypatch):
-    class _BadWhyLLM:
-        def invoke(self, _messages):
-            return type(
-                "_Response",
-                (),
-                {"content": "This trailer features a convenient swing slide gate for livestock loading."},
-            )()
-
-    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: True)
-    monkeypatch.setattr(formatting, "_why_it_fits_llm", lambda: _BadWhyLLM())
     listings = [
         {
             "title": "12 Ft Livestock Trailer",
@@ -74,7 +63,6 @@ def test_why_it_fits_llm_cannot_claim_unconfirmed_requested_feature(monkeypatch)
 
 
 def test_why_it_fits_prefers_safe_sales_blurb_from_match_validation(monkeypatch):
-    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: False)
     listings = [
         {
             "title": "Livestock Trailer",
@@ -101,16 +89,6 @@ def test_why_it_fits_prefers_safe_sales_blurb_from_match_validation(monkeypatch)
 
 
 def test_why_it_fits_rejects_negative_structured_mismatch_language(monkeypatch):
-    class _BadWhyLLM:
-        def invoke(self, _messages):
-            return type(
-                "_Response",
-                (),
-                {"content": "This trailer is useful, but it exceeds your 12 ft requirement."},
-            )()
-
-    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: True)
-    monkeypatch.setattr(formatting, "_why_it_fits_llm", lambda: _BadWhyLLM())
     listings = [
         {
             "title": "16 Ft Livestock Trailer",
@@ -136,16 +114,6 @@ def test_why_it_fits_rejects_negative_structured_mismatch_language(monkeypatch):
 
 
 def test_why_it_fits_rejects_perfect_for_needs_on_non_full_listing(monkeypatch):
-    class _BadWhyLLM:
-        def invoke(self, _messages):
-            return type(
-                "_Response",
-                (),
-                {"content": "This livestock trailer is perfect for your livestock needs."},
-            )()
-
-    monkeypatch.setattr(formatting, "_why_it_fits_llm_enabled", lambda: True)
-    monkeypatch.setattr(formatting, "_why_it_fits_llm", lambda: _BadWhyLLM())
     listings = [
         {
             "title": "Livestock Trailer",
