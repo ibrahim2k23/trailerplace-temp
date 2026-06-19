@@ -548,6 +548,20 @@ components.html(
       opacity: 1 !important;
       filter: {'brightness(0)' if not _dark else 'brightness(0) invert(1)'} !important;
     }}
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stExpandSidebarButton"] * {{
+      color: {'#111827' if not _dark else '#F8FAFC'} !important;
+      -webkit-text-fill-color: {'#111827' if not _dark else '#F8FAFC'} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stExpandSidebarButton"] svg,
+    [data-testid="stExpandSidebarButton"] svg * {{
+      color: {'#111827' if not _dark else '#F8FAFC'} !important;
+      fill: {'#111827' if not _dark else '#F8FAFC'} !important;
+      stroke: {'#111827' if not _dark else '#F8FAFC'} !important;
+      opacity: 1 !important;
+      filter: {'brightness(0)' if not _dark else 'brightness(0) invert(1)'} !important;
+    }}
     [data-testid="stSidebarCollapseButton"] button:hover,
     [data-testid="stSidebarCollapsedControl"] button:hover {{
       color: {_theme['text']} !important;
@@ -682,6 +696,18 @@ components.html(
       background: transparent !important;
       border: 0 !important;
     }}
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] code {{
+      padding: 0 !important;
+      margin: 0 !important;
+      color: inherit !important;
+      background: transparent !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      font-family: inherit !important;
+      font-size: inherit !important;
+      font-weight: inherit !important;
+      letter-spacing: inherit !important;
+    }}
     [data-testid="stChatInput"] > div {{
       background: {_theme['surface']} !important; border: 1px solid var(--tp-border) !important;
       border-radius: 18px !important; box-shadow: 0 12px 36px var(--tp-shadow) !important;
@@ -698,6 +724,7 @@ components.html(
       background: {_theme['surface']} !important;
       background-color: {_theme['surface']} !important;
       color: {_theme['text']} !important;
+      caret-color: {_theme['text']} !important;
       -webkit-text-fill-color: {_theme['text']} !important;
       opacity: 1 !important;
     }}
@@ -744,7 +771,12 @@ components.html(
     [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]:active {{
       border: 0 !important; outline: 0 !important; box-shadow: none !important;
     }}
-    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {{ background: {_theme['surface_2']} !important; }}
+    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {{
+      background: {_theme['surface_2']} !important;
+      color: {_theme['text']} !important;
+      caret-color: {_theme['text']} !important;
+      -webkit-text-fill-color: {_theme['text']} !important;
+    }}
     [data-testid="stTextInput"] [data-testid="stWidgetLabel"] p {{
       color: {_theme['text']} !important;
     }}
@@ -789,6 +821,15 @@ components.html(
       pointer-events: none !important; position: absolute !important; right: 0 !important;
     }}
     [data-testid="stVerticalBlockBorderWrapper"] {{ background: {_theme['surface']} !important; border-radius: 14px !important; }}
+    [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stChatMessage"] [data-testid="stForm"] {{
+      background: {_theme['surface']} !important;
+      border: 1px solid {'#334155' if _dark else '#CBD5E1'} !important;
+      border-radius: 12px !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stTextArea"] textarea {{
+      border-color: {'#475569' if _dark else '#94A3B8'} !important;
+    }}
     [data-testid="stFormSubmitButton"] button {{
       background: #F97316 !important; color: #FFFFFF !important;
       border: 1px solid #F97316 !important;
@@ -805,7 +846,7 @@ components.html(
     [data-testid="stChatMessage"] [data-testid="stFormSubmitButton"] button {{
       background: {_theme['surface_2']} !important;
       color: {_theme['text']} !important;
-      border: 1px solid {_theme['border']} !important;
+      border: 1px solid {'#475569' if _dark else '#CBD5E1'} !important;
       box-shadow: none !important;
     }}
     [data-testid="stChatMessage"] [data-testid="stFormSubmitButton"] button:hover {{
@@ -1313,7 +1354,7 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
                 )
                 r.raise_for_status()
                 data = r.json()
-            except requests.RequestException as exc:
+            except (requests.RequestException, ValueError) as exc:
                 response_text = (
                     f"Sorry — the assistant service is unavailable ({exc!s}). "
                     f"Start the API with `python main.py` (default {CHATBOT_API_URL})."
@@ -1334,6 +1375,7 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
                     st.session_state.customer_phone = data["customer_phone"]
                 if data.get("main_prior_messages") is not None:
                     st.session_state.main_prior_messages = data["main_prior_messages"]
+                thinking_context = data.get("thinking_context")
 
                 listings = []
                 for d in (data.get("listings") or []):
@@ -1372,6 +1414,23 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
                         )
                     except Exception:
                         pass
+
+            # Commit the completed response before rendering or optional
+            # bookkeeping. Keeping this state update next to the HTTP result
+            # prevents a later rerun/error from dropping a successful reply.
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response_text,
+                "listings": listings or None,
+                "user_feedback": None,
+                "thinking_payload": (
+                    thinking_context
+                    if thinking_agent_enabled() and thinking_context is not None
+                    else None
+                ),
+                "thinking_result": None,
+            })
+            assistant_message_index = len(st.session_state.messages) - 1
         st.markdown(response_text)
         for i, listing in enumerate(listings or [], 1):
             render_card(listing, i)
@@ -1392,6 +1451,9 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
             st.session_state.last_thinking_result = _sync_thinking_result
             st.session_state.thinking_status = "done" if _sync_thinking_result.get("status") == "ok" else "error"
             st.session_state.thinking_future = None
+            st.session_state.messages[assistant_message_index][
+                "thinking_result"
+            ] = _sync_thinking_result
 
     # 5. Remember listing URLs shown this turn (Pinecone "show more" exclude list)
     sid = st.session_state.get("chat_session_id")
@@ -1400,16 +1462,6 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
             sid,
             [str(x.url or "") for x in listings if getattr(x, "url", None)],
         )
-
-    # 6. Persist assistant message in UI state
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": response_text,
-        "listings": listings or None,
-        "user_feedback": None,
-        "thinking_payload": thinking_context if thinking_agent_enabled() and thinking_context is not None else None,
-        "thinking_result": _sync_thinking_result,  # None when background; filled by poll loop
-    })
 
     # 8. Rerun to reset widget state — prevents the "send twice" bug.
     #    Content is already rendered above so the rerun re-draws from history seamlessly.

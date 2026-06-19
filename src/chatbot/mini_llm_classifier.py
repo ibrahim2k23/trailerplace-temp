@@ -133,32 +133,63 @@ def classify_haul_requirements(
         "recent_messages": recent_messages or [],
         "slots_collected": slots_collected or {},
         "metadata_filters_collected": metadata_filters_collected or {},
-        "lightweight_keywords": LIGHTWEIGHT_KEYWORDS,
-        "heavy_duty_keywords": HEAVY_DUTY_KEYWORDS,
     }
+    system_prompt = (
+        "Classify whether trailer qualification questions should be adjusted.\n"
+        "Rules:\n"
+        "- Read latest_user_message first and use recent context only to resolve references.\n"
+        "- matched_item must contain the specific cargo/item the user says they will haul, "
+        "using a concise phrase grounded in the user's words.\n"
+        "- A recommendation question such as 'which trailer is suitable for a dirt bike?' "
+        "still explicitly states the hauled item; return that item in matched_item.\n"
+        "- Never return is_lightweight_utility_load=true or needs_width_question=true with "
+        "matched_item=null when an item is stated in the latest message or context.\n"
+        "- Do not use a trailer category, trailer description, size, make, or model as matched_item.\n"
+        "- For Utility only, mark is_lightweight_utility_load when the haul item is likely 1500 lbs or less.\n"
+        "- For categories except Utility, Enclosed, and Flatbed, mark needs_width_question when "
+        "the item is very large, wide, heavy-duty, or a vehicle such as a car or tractor.\n"
+        "- Do not request a width question for Utility, Enclosed, or Flatbed.\n"
+        "- Use medium or high confidence only when the item is clear."
+    )
     try:
-        return _haul_classifier_llm().invoke(
+        decision = _haul_classifier_llm().invoke(
             [
-                SystemMessage(
-                    content=(
-                        "Classify whether trailer qualification questions should be adjusted.\n"
-                        "Rules:\n"
-                        "- For Utility only, mark is_lightweight_utility_load when the haul item is likely 1500 lbs or less.\n"
-                        "- For categories except Utility, Enclosed, and Flatbed, mark needs_width_question when the item is very large, wide, heavy-duty or an item of a vehicle brand or similar nature such as cars, tractors etc.\n"
-                        "- Treat the keyword lists as strong examples, but similar items may qualify.\n"
-                        "- Do not request a width question for Utility, Enclosed, or Flatbed.\n"
-                        "- Use medium or high confidence only when the item is clear."
-                    )
-                ),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=f"Return structured classification for:\n{json.dumps(context, default=str)}"),
             ]
         )
+        if (
+            not str(decision.matched_item or "").strip()
+            and (
+                decision.is_lightweight_utility_load
+                or decision.needs_width_question
+                or decision.confidence in {"medium", "high"}
+            )
+        ):
+            decision = _haul_classifier_llm().invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            system_prompt
+                            + "\nThe first classification was incomplete. Re-evaluate the conversation "
+                            "and return a corrected, fully consistent classification. Do not invent an "
+                            "item; when cargo is explicitly stated, matched_item is required."
+                        )
+                    ),
+                    HumanMessage(
+                        content=(
+                            "Conversation context:\n"
+                            f"{json.dumps(context, default=str)}\n\n"
+                            "Incomplete first classification:\n"
+                            f"{json.dumps(decision.model_dump(), default=str)}"
+                        )
+                    ),
+                ]
+            )
+        return decision
     except Exception:
-        logger.exception("Haul classifier LLM failed; using keyword fallback")
-        return fallback_haul_classification(
-            category=category,
-            user_message=user_message,
-            recent_messages=recent_messages,
-            slots_collected=slots_collected,
-            metadata_filters_collected=metadata_filters_collected,
+        logger.exception("Haul classifier LLM failed; returning an unclassified result")
+        return HaulClassificationDecision(
+            reason="The LLM classifier was unavailable.",
+            confidence="low",
         )
