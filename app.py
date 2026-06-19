@@ -777,6 +777,33 @@ components.html(
       caret-color: {_theme['text']} !important;
       -webkit-text-fill-color: {_theme['text']} !important;
     }}
+    /* Browser saved-info / autofill paints its own colors unless overridden. */
+    [data-testid="stTextInput"] input:-webkit-autofill,
+    [data-testid="stTextInput"] input:-webkit-autofill:hover,
+    [data-testid="stTextInput"] input:-webkit-autofill:focus,
+    [data-testid="stTextInput"] input:-webkit-autofill:active,
+    [data-testid="stTextArea"] textarea:-webkit-autofill,
+    [data-testid="stTextArea"] textarea:-webkit-autofill:hover,
+    [data-testid="stTextArea"] textarea:-webkit-autofill:focus,
+    [data-testid="stTextArea"] textarea:-webkit-autofill:active {{
+      -webkit-box-shadow: 0 0 0 1000px {_theme['surface_2']} inset !important;
+      box-shadow: 0 0 0 1000px {_theme['surface_2']} inset !important;
+      -webkit-text-fill-color: {_theme['text']} !important;
+      caret-color: {_theme['text']} !important;
+      border-color: {_theme['border']} !important;
+      transition: background-color 99999s ease-out 0s;
+    }}
+    [data-testid="stTextInputRootElement"]:has(input:-webkit-autofill),
+    [data-testid="stTextInputRootElement"]:has(input:-webkit-autofill:focus) {{
+      background: {_theme['surface_2']} !important;
+      background-color: {_theme['surface_2']} !important;
+    }}
+    [data-testid="stTextInput"] input:autofill,
+    [data-testid="stTextArea"] textarea:autofill {{
+      box-shadow: 0 0 0 1000px {_theme['surface_2']} inset !important;
+      -webkit-text-fill-color: {_theme['text']} !important;
+      caret-color: {_theme['text']} !important;
+    }}
     [data-testid="stTextInput"] [data-testid="stWidgetLabel"] p {{
       color: {_theme['text']} !important;
     }}
