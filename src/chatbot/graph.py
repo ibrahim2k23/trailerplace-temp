@@ -398,10 +398,13 @@ def _pinecone_match_audit_llm():
     model = (
         os.getenv("PINECONE_MATCH_AUDIT_MODEL")
         or os.getenv("PINECONE_MATCH_FRAMING_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
+        or "gpt-5-mini"
     ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+
+    return ChatOpenAI(
+        model=model,
+        reasoning_effort="medium",
+    ).with_structured_output(
         PineconeMatchFramingDecision,
         method="function_calling",
     )
@@ -545,6 +548,56 @@ def _normalize_requested_feature_list(features: list[Any]) -> list[str]:
     return clean
 
 
+def _build_match_short_reason(
+    *,
+    item: dict[str, Any],
+    fact: dict[str, Any],
+    category: str | None,
+    metadata_filters: dict[str, Any],
+    requested_features: list[str],
+) -> str:
+    level = _safe_match_level(item.get("match_level"))
+    confirmed = [
+        str(value).strip()
+        for value in (item.get("confirmed_requirements") or [])
+        if str(value).strip()
+    ]
+    missing = [
+        str(value).strip()
+        for value in (item.get("missing_or_unconfirmed_requirements") or [])
+        if str(value).strip()
+    ]
+    context_match = _structured_listing_context_matches(
+        fact=fact,
+        category=category,
+        metadata_filters=metadata_filters,
+    )
+
+    if level == "full":
+        if requested_features:
+            return "full: category/structured filters align and all requested features are confirmed"
+        return "full: category/structured filters align and no requested feature is left unconfirmed"
+    if level == "partial":
+        partial_reasons: list[str] = []
+        if missing:
+            partial_reasons.append(f"requested features still unconfirmed: {', '.join(missing)}")
+        if confirmed:
+            partial_reasons.append("relevant fit signals are confirmed")
+        if not partial_reasons:
+            partial_reasons.append("relevant listing, but exact requested combination is not fully confirmed")
+        return f"partial: {'; '.join(partial_reasons)}"
+    if level == "alternative":
+        alternative_reasons: list[str] = []
+        if not context_match:
+            alternative_reasons.append("structured category/filter mismatch")
+        if missing:
+            alternative_reasons.append(f"requested features not confirmed: {', '.join(missing)}")
+        if not alternative_reasons:
+            alternative_reasons.append("relevant inventory option, but requested combination is not confirmed")
+        return f"alternative: {'; '.join(alternative_reasons)}"
+    return "unknown: match auditor did not return a recognized match level"
+
+
 def _structured_listing_context_matches(
     *,
     fact: dict[str, Any],
@@ -607,19 +660,38 @@ def _sanitize_requested_feature_analysis(
             if _normalized_requirement_text(value) in allowed_keys
         ]
         updated["missing_or_unconfirmed_requirements"] = filtered_missing
-        if (
+        fact = by_position.get(int(updated.get("position") or 0), {})
+        context_match = _structured_listing_context_matches(
+            fact=fact,
+            category=category,
+            metadata_filters=metadata_filters,
+        )
+        if not clean_requested and context_match:
+            updated["match_level"] = "full"
+        elif (
             filtered_missing != original_missing
             and not filtered_missing
-            and _structured_listing_context_matches(
-                fact=by_position.get(int(updated.get("position") or 0), {}),
-                category=category,
-                metadata_filters=metadata_filters,
-            )
+            and context_match
         ):
             updated["match_level"] = "full"
+        updated["short_reason"] = _build_match_short_reason(
+            item=updated,
+            fact=fact,
+            category=category,
+            metadata_filters=metadata_filters,
+            requested_features=clean_requested,
+        )
         sanitized.append(updated)
 
     sanitized = _enforce_requested_feature_consistency(sanitized, clean_requested)
+    for item in sanitized:
+        item["short_reason"] = _build_match_short_reason(
+            item=item,
+            fact=by_position.get(int(item.get("position") or 0), {}),
+            category=category,
+            metadata_filters=metadata_filters,
+            requested_features=clean_requested,
+        )
     full_count, partial_count, alternative_count = _match_count_summary(sanitized)
     overall_match_level = "unknown"
     if full_count > 0 and full_count == len(facts):
@@ -1077,11 +1149,7 @@ Classify each supplied Pinecone result as full, partial, or alternative against 
 Core rule:
 For overall fit, focus on category/use case, make/model/hitch/color when requested, and the supplied requested non-metadata features.
 
-Length, width, payload capacity, and GVWR are handled primarily by deterministic metadata filters and reranking. Matching values for these fields alone never make a listing full, partial, or alternative, and must never rescue a missing feature fit.
-
-However, if the user's request specifies an exact length, width, payload capacity, or GVWR value and a supplied listing's value clearly contradicts that requested value, the listing's match_level must NOT be full. In that case, cap match_level at partial (if the requested non-metadata features are otherwise confirmed and the category/use case fits) or alternative (otherwise). Never use these fields to upgrade a listing to full.
-
-You may include length, width, payload capacity, and GVWR in confirmed_requirements only as factual context. Never reference any such contradiction in intro_text, sales_blurb, or missing_or_unconfirmed_requirements — those remain governed by the rules below about not mentioning length/width/payload/GVWR mismatches.
+Length, width, payload capacity, and GVWR are handled outside this audit. Do not use them to decide full, partial, or alternative. Do not downgrade or upgrade a listing because of those fields. They may appear in confirmed_requirements only as factual context.
 
 Strict feature validation:
 Match requested non-metadata features by exact feature concept, not by broad category words.
@@ -1094,14 +1162,39 @@ Use only supplied listing facts and match_evidence_text. Do not invent features,
 Important:
 Treat the supplied requested_non_metadata_features as authoritative. Do not add, infer, broaden, or substitute any new requested features from listing text or general trailer knowledge. If the supplied list is empty, return an empty requested_non_metadata_features list.
 
+Critical defaulting rule:
+If requested_non_metadata_features is empty, and the listing matches the requested category/use case plus any explicitly requested make, hitch, color, or subcategory filters, classify it as full. Do not use partial or alternative in that case unless there is a mismatch on one of those requested category/structured filters.
+
 Return:
-* intro_text: one short customer-facing intro sentence or two short sentences before the listings. Max 55 words. No markdown, bullets, labels, or quotes. Do not ask for contact details, phone number, email, callback, or sales follow-up. If full_match_count is 0, say the exact requested combination is not clearly shown/currently shown, then positively position the displayed trailers as strongest available options, practical choices, or useful comparison options. Do not call them strong matches, close matches, best matches, top matches, closest matches, best-fitting options, or exact matches. If full_match_count is greater than 0, say confirmed fits are shown first, followed by relevant options worth comparing. Do not mention length, width, payload capacity, or GVWR mismatches. Do not list specific mismatches. Do not say all results meet the user's needs, request, specifications, or criteria unless every displayed listing is full.
+
+* intro_text: Write 1–2 short sentences for the customer, shown before the listings. Maximum 55 words total. Plain text only — no markdown, no bullets, no labels, no quotation marks. Never ask for contact details, phone number, email, callback, or any sales follow-up.
+
+Pick exactly ONE scenario below based on full_match_count and follow it exactly. Do not mix wording from other scenarios.
+
+SCENARIO A — full_match_count = 0:
+Say that the exact requested combination is not currently shown. Then describe the listed trailers positively using phrases like "strongest available options," "practical choices," or "useful options to compare."
+Never use these words/phrases here: strong match, close match, best match, top match, closest match, best-fitting, exact match.
+Example: "We don't have that exact combination right now, but here are some practical options worth comparing."
+
+SCENARIO B — full_match_count is 1 to 5:
+Say that confirmed fits are shown first, followed by other relevant options worth comparing.
+Example: "Your confirmed fits are listed first, followed by other relevant trailers worth comparing."
+
+SCENARIO C — full_match_count = 6:
+Confidently state that every trailer shown is a confirmed match for exactly what the customer asked for. End with a short, confident line that this is a ready-to-compare lineup built for their exact request. Write it like an upbeat, confident marketer — not a flat confirmation.
+Example: "Every trailer below is a confirmed match for exactly what you're looking for — a ready-to-compare lineup built around your exact request."
+
+Rules for ALL scenarios:(extremely important — follow these carefully)
+- Never mention length, width, payload capacity, or GVWR for auditing purposes.
+- Never list specific mismatches.
+- Never say "all results meet your needs/request/specifications/criteria" unless full_match_count = 6.
+
 * requested_non_metadata_features: user-requested features not represented by normal structured filters.
 * per_listing_match for every supplied listing position.
-* match_level: full only if all requested non-metadata features are explicitly confirmed, the listing fits the main trailer type/use case, AND the listing does not contradict any user-specified length, width, payload capacity, or GVWR value. Use partial when some important requested features are confirmed but others are missing/unconfirmed, or when all requested non-metadata features are confirmed but a user-specified length/width/payload capacity/GVWR value is contradicted by the listing. Use alternative when the listing is relevant but the requested feature combination is not confirmed.
+* match_level: full if the listing fits the main trailer type/use case and all explicitly requested non-metadata features are confirmed. If requested_non_metadata_features is empty, use full whenever the listing matches the requested category/use case plus any explicitly requested make, hitch, color, or subcategory filters. Use partial when some explicitly requested non-metadata features are confirmed but others are missing/unconfirmed. Use alternative when the listing is relevant but the explicitly requested feature combination is not confirmed.
 * confirmed_requirements: only confirmed facts/features.
 * missing_or_unconfirmed_requirements: requested features absent, ambiguous, merely similar, unsupported, or replaced by a different feature type. missing_or_unconfirmed_requirements must include requested features that are not confirmed.
-* sales_blurb: Talk like an experieced sales representative who wants to make a trailer sale. Make one positive customer-facing sentence, max 28 words, highlighting confirmed strengths only.It should be engaging for the customer. Do not say partial match, alternative, mismatch, missing, requirement, exceeds, does not meet, or fully/exactly/perfectly matches unless match_level is full."""
+* sales_blurb: Talk like an experienced sales representative who wants to make a trailer sale. Make one positive customer-facing sentence, max 28 words, highlighting confirmed strengths only. It should be engaging for the customer. Do not say partial match, alternative, mismatch, missing, requirement, exceeds, does not meet, or fully/exactly/perfectly matches unless match_level is full."""
             ),
             HumanMessage(
                 content=_safe_json(
@@ -1270,7 +1363,7 @@ def _result_interest_followup_text(
     del user_message, category, slots
     if not listings:
         return ""
-    return "Want to compare any of these side by side?"
+    return "Do any of these trailers interest you?"
 
 
 def _has_contact(state: ChatbotState) -> bool:
@@ -2925,17 +3018,24 @@ def _apply_haul_classification_effects(
     cat = category.strip().lower()
 
     matched_item_is_usable = _is_usable_classifier_haul_item(classification.matched_item)
-    if confident and matched_item_is_usable and classification.matched_item and not slots.get("haul_item"):
-        if "haul_item" in _category_slots(category):
-            slots["haul_item"] = classification.matched_item
+    if confident and matched_item_is_usable and classification.matched_item:
+        allowed_slots = _category_slots(category)
+        target_slot: str | None = None
+        for candidate in ("haul_material", "haul_item"):
+            if candidate in allowed_slots and not slots.get(candidate):
+                target_slot = candidate
+                break
+        if target_slot:
+            slots[target_slot] = classification.matched_item
             logger.info(
-                "classification_haul_item_filled | category=%r | matched_item=%r | reason=%r",
+                "classification_haul_item_filled | category=%r | target_slot=%r | matched_item=%r | reason=%r",
                 category,
+                target_slot,
                 classification.matched_item,
                 classification.reason,
             )
 
-    known_haul_item = bool(slots.get("haul_item") or matched_item_is_usable)
+    known_haul_item = bool(slots.get("haul_item") or slots.get("haul_material") or matched_item_is_usable)
     if cat == "utility" and confident and classification.is_lightweight_utility_load and known_haul_item:
         required_slots = [slot for slot in required_slots if slot != "haul_weight_lbs"]
         if not metadata_filters.get("payload_lbs") and not slots.get("haul_weight_lbs"):
