@@ -1302,6 +1302,53 @@ class _PineconeValidationLLM:
         return self.decision
 
 
+def test_auditor_input_hides_dimensions_and_weights(monkeypatch):
+    captured = {}
+    listing = {
+        "title": "2026 24 ft Livestock Trailer - 15181",
+        "category": "Livestock",
+        "price": "$23,995",
+        "length": "24 ft",
+        "payload_capacity": "10,170 lbs",
+        "match_evidence_text": "Length: 24 ft | Payload Capacity: 10,170 lbs | Sliding gate included",
+    }
+    result = graph.PineconeListingSearchResult(
+        listings=[listing],
+        query_text="20 ft livestock trailer with 5,000 lbs payload and sliding gate",
+        metadata_filter={"length_ft_num": {"$gte": 20}, "category": {"$eq": "Livestock"}},
+        rerank_debug={"required_length_ft": 20, "required_payload_lbs": 5000},
+    )
+    monkeypatch.setattr(
+        graph,
+        "_pinecone_match_audit_llm",
+        lambda: _PineconeValidationLLM(
+            graph.PineconeMatchFramingDecision(
+                intro_text="Confirmed feature fit.",
+                per_listing_match=[graph.PineconeListingMatchDecision(position=1, match_level="full")],
+            ),
+            captured,
+        ),
+    )
+
+    graph._pinecone_match_audit(
+        user_message="I need a 20 ft livestock trailer with 5,000 lbs payload and sliding gate",
+        latest_user_message=None,
+        category="Livestock",
+        slots={"trailer_length_ft": "20", "payload_need": "5000 lbs"},
+        metadata_filters={"length_ft": "20", "payload_lbs": "5000", "color": "Black"},
+        search_result=result,
+        facts=graph._pinecone_listing_facts([listing]),
+        requested_non_metadata_features=["sliding gate"],
+    )
+
+    human = captured["human"].lower()
+    for hidden in ("20 ft", "24 ft", "5,000 lbs", "10,170 lbs", "length_ft", "payload_lbs", "rerank_debug"):
+        assert hidden not in human
+    assert "sliding gate" in human
+    assert "$23,995" in human
+    assert "2026" in human
+
+
 def test_pinecone_validation_reorders_full_match_before_alternatives(monkeypatch):
     state = {
         "trailer_category": "Livestock",

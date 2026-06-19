@@ -49,7 +49,10 @@ _AUTH_USER = (os.getenv("TRAILERPLACE_APP_USERNAME") or "").strip()
 _AUTH_PASS = (os.getenv("TRAILERPLACE_APP_PASSWORD") or "").strip()
 _AUTH_CONFIGURED = bool(_AUTH_USER and _AUTH_PASS)
 _THINKING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_thinking")
+_BACKEND_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_backend_ready")
 _THINKING_POLL_MS = int((os.getenv("THINKING_AGENT_POLL_MS") or "700").strip())
+_BACKEND_READY_TIMEOUT = float((os.getenv("BACKEND_READY_TIMEOUT_SECONDS") or "180").strip())
+_BACKEND_READY_POLL = float((os.getenv("BACKEND_READY_POLL_SECONDS") or "2").strip())
 CHATBOT_API_URL = (os.getenv("CHATBOT_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
 _RULES_DOC_PATH = Path(__file__).with_name("langgraph_rules_vs_excel.md")
 
@@ -78,6 +81,21 @@ def _run_thinking_job(session_id: str, payload: dict) -> dict:
     return result
 
 
+def _wait_for_backend_ready() -> dict[str, str]:
+    deadline = time.monotonic() + max(5.0, _BACKEND_READY_TIMEOUT)
+    last_error = "Backend did not become ready in time."
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(f"{CHATBOT_API_URL}/health", timeout=5)
+            if response.ok and (response.json().get("status") == "ok"):
+                return {"status": "ready", "error": ""}
+            last_error = f"Health check returned HTTP {response.status_code}."
+        except (requests.RequestException, ValueError) as exc:
+            last_error = str(exc)
+        time.sleep(max(0.5, _BACKEND_READY_POLL))
+    return {"status": "error", "error": last_error}
+
+
 def _load_rules_markdown() -> str:
     try:
         return _RULES_DOC_PATH.read_text(encoding="utf-8")
@@ -88,8 +106,7 @@ def _load_rules_markdown() -> str:
 
 
 def _render_rules_page() -> None:
-    st.markdown("### Rules")
-    st.caption("Reference view for the current chatbot rules and behavior.")
+    _render_header("Rules", "Reference view for the current chatbot rules and behavior.")
     st.markdown(_load_rules_markdown())
 
 
@@ -102,100 +119,296 @@ st.set_page_config(
 
 # ─────────────────────────────────────────────────────────────
 # CSS INJECTION — via iframe JS so Streamlit sanitizer is bypassed
+#
+# Design direction: a dealer's dispatch desk, not a generic AI chat.
+# Dark asphalt-and-steel surface, a "spec sheet" card for listings,
+# Clean system typography for a familiar chat interface, with a
+# hazard-stripe rule (the
+# reflective tape on a trailer's rear doors) as the one repeating
+# signature motif instead of a generic divider.
 # ─────────────────────────────────────────────────────────────
 components.html("""
 <script>
 (function() {
   var css = `
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
-
     :root {
-      --tp-bg: var(--background-color);
-      --tp-secondary-bg: var(--secondary-background-color);
-      --tp-text: var(--text-color);
-      --tp-border: rgba(128, 128, 128, 0.28);
-      --tp-shadow: rgba(0, 0, 0, 0.15);
+      --tp-font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --tp-bg: #000000;
+      --tp-secondary-bg: #0D0D0D;
+      --tp-card-bg: #171717;
+      --tp-text: #ECECEC;
+      --tp-text-muted: #AFAFAF;
+      --tp-border: rgba(255,255,255,0.12);
+      --tp-accent: #F97316;
+      --tp-accent-dim: rgba(249,115,22,0.38);
+      --tp-amber: #FBBF24;
+      --tp-green: #22C55E;
+      --tp-shadow: rgba(0,0,0,0.45);
     }
 
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"],
-    [data-testid="stChatMessage"], [data-testid="stChatMessage"] * {
-      font-family: 'Outfit', sans-serif !important;
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+      font-family: var(--tp-font) !important;
     }
-    [data-testid="stAppViewContainer"], [data-testid="stMain"] {
-      background: var(--tp-bg) !important;
+    [data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stApp"] {
+      background-color: var(--tp-bg) !important;
+      background-image: none !important;
       color: var(--tp-text) !important;
     }
+    [data-testid="stHeader"] { background: transparent !important; }
 
-    /* Hide chrome */
-    #MainMenu, footer, [data-testid="stToolbar"],
-    [data-testid="stDecoration"] { display: none !important; }
+    /* Hide chrome — keep sidebar collapse control, it lives outside the toolbar */
+    #MainMenu, footer, [data-testid="stDecoration"] { display: none !important; }
 
     .block-container {
-      padding: 1.5rem 1.5rem 0.5rem 1.5rem !important;
-      max-width: 800px !important;
+      padding: 1.25rem 1.5rem 1rem 1.5rem !important;
+      max-width: 760px !important;
     }
 
-    /* Sidebar */
-    [data-testid="stSidebar"] { background: var(--tp-secondary-bg) !important; }
+    /* ── Signature element: hazard-stripe rule, like reflective trailer tape ── */
+    .tp-hazard {
+      height: 4px;
+      border-radius: 3px;
+      margin: 10px 0 22px 0;
+      background: repeating-linear-gradient(
+        135deg,
+        var(--tp-accent) 0px, var(--tp-accent) 10px,
+        #14161A 10px, #14161A 20px
+      );
+      opacity: 0.92;
+    }
+
+    /* ── Header: dispatch-ticket style ── */
+    .tp-header-eyebrow {
+      font-family: var(--tp-font);
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 1.1px;
+      color: var(--tp-amber);
+      text-transform: uppercase;
+      display: flex; align-items: center; gap: 7px;
+      margin-bottom: 4px;
+    }
+    .tp-header-eyebrow .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--tp-green);
+      box-shadow: 0 0 6px var(--tp-green);
+      flex-shrink: 0;
+    }
+    .tp-header-title {
+      font-family: var(--tp-font);
+      font-weight: 600;
+      font-size: 27px;
+      letter-spacing: -0.55px;
+      color: var(--tp-text);
+      line-height: 1.2;
+    }
+    .tp-header-sub {
+      font-size: 13px;
+      color: var(--tp-text-muted);
+      margin-top: 3px;
+    }
+
+    /* ── Sidebar: vehicle-plate styling ── */
+    [data-testid="stSidebar"] {
+      background: var(--tp-secondary-bg) !important;
+      border-right: 1px solid var(--tp-border) !important;
+      color: var(--tp-text) !important;
+      font-family: var(--tp-font) !important;
+    }
     [data-testid="stSidebar"] * {
       color: var(--tp-text) !important;
-      font-family: 'Outfit', sans-serif !important;
     }
     [data-testid="stSidebar"] hr { border-color: var(--tp-border) !important; }
     [data-testid="stSidebar"] button {
       background: var(--tp-bg) !important;
       border: 1px solid var(--tp-border) !important;
       color: var(--tp-text) !important;
-      border-radius: 8px !important;
-      font-family: 'Outfit', sans-serif !important;
-      transition: background .15s;
+      border-radius: 9px !important;
+      font-family: var(--tp-font) !important;
+      font-weight: 500 !important;
+      transition: border-color .15s, background .15s;
     }
-    [data-testid="stSidebar"] button:hover { filter: brightness(0.96); }
+    [data-testid="stSidebar"] button:hover {
+      border-color: var(--tp-accent-dim) !important;
+      background: #20242C !important;
+    }
+    .tp-plate {
+      font-family: var(--tp-font);
+      font-weight: 600;
+      font-size: 20px;
+      letter-spacing: -.3px;
+      color: var(--tp-text);
+      line-height: 1.15;
+    }
+    .tp-plate-sub {
+      font-family: var(--tp-font);
+      font-weight: 500;
+      font-size: 10.5px;
+      color: var(--tp-amber);
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+    .tp-info-row {
+      font-family: var(--tp-font) !important;
+      font-size: 12.5px;
+      color: var(--tp-text-muted) !important;
+      display: flex; gap: 9px; align-items: center;
+      padding: 5px 0;
+    }
+    .tp-info-row b { color: var(--tp-text) !important; font-weight: 500; }
 
-    /* Chat input */
+    /* ── Generic form controls (login + feedback) ── */
+    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {
+      background: var(--tp-secondary-bg) !important;
+      border: 1px solid var(--tp-border) !important;
+      color: var(--tp-text) !important;
+      border-radius: 8px !important;
+    }
+    [data-testid="stTextInput"] input:focus, [data-testid="stTextArea"] textarea:focus {
+      border-color: var(--tp-accent-dim) !important;
+      box-shadow: 0 0 0 1px var(--tp-accent-dim) !important;
+    }
+    div[data-testid="stButton"] button, div[data-testid="stFormSubmitButton"] button {
+      border-radius: 9px !important;
+      font-family: var(--tp-font) !important;
+      font-weight: 500 !important;
+      background: var(--tp-secondary-bg);
+      border: 1px solid var(--tp-border);
+      color: var(--tp-text);
+    }
+    div[data-testid="stFormSubmitButton"] button[kind="primary"] {
+      background: var(--tp-accent) !important;
+      border: none !important;
+      color: #fff !important;
+    }
+    div[data-testid="stFormSubmitButton"] button[kind="primary"]:hover { background: #EA6A0A !important; }
+    div[data-testid="stButton"] button[kind="primary"] {
+      background: var(--tp-accent) !important;
+      border: none !important;
+      color: #fff !important;
+    }
+    div[data-testid="stButton"] button[kind="primary"]:hover { background: #EA6A0A !important; }
+    [data-testid="stSidebar"] button[kind="primary"] {
+      background: var(--tp-accent) !important;
+      border: none !important;
+      color: #fff !important;
+    }
+    [data-testid="stSidebar"] button[kind="primary"]:hover { background: #EA6A0A !important; }
+    /* Tab-style nav buttons (Chatbot / Rules) */
+    .tp-nav-row div[data-testid="stButton"] button {
+      font-weight: 600 !important;
+      letter-spacing: .2px;
+    }
+    /* Keep Streamlit's native animated sidebar, but give both toggle states
+       the same compact, ChatGPT-like treatment. */
+    [data-testid="stSidebar"] {
+      transition: transform 240ms cubic-bezier(.22, 1, .36, 1),
+                  margin-left 240ms cubic-bezier(.22, 1, .36, 1) !important;
+    }
+    [data-testid="stSidebarCollapseButton"] button,
+    [data-testid="stSidebarCollapsedControl"] button {
+      width: 36px !important;
+      min-width: 36px !important;
+      height: 36px !important;
+      padding: 0 !important;
+      font-size: 17px !important;
+      line-height: 1 !important;
+      border-color: transparent !important;
+      background: transparent !important;
+    }
+    [data-testid="stSidebarCollapseButton"] button:hover,
+    [data-testid="stSidebarCollapsedControl"] button:hover {
+      background: rgba(255,255,255,0.07) !important;
+      border-color: var(--tp-border) !important;
+    }
+    [data-testid="stSidebarCollapseButton"] {
+      top: 0.65rem !important;
+      right: 0.75rem !important;
+    }
+    [data-testid="stSidebarCollapsedControl"] {
+      display: block !important;
+      position: fixed !important;
+      top: 0.8rem !important;
+      left: 0.8rem !important;
+      z-index: 1000000 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+      border-color: var(--tp-border) !important;
+      background: var(--tp-secondary-bg) !important;
+      border-radius: 10px !important;
+    }
+    [data-testid="stCaptionContainer"] { color: var(--tp-text-muted) !important; }
+
+    /* ── Chat input ── */
+    [data-testid="stBottom"],
+    [data-testid="stBottom"] > div,
+    [data-testid="stBottomBlockContainer"],
+    [data-testid="stChatInputContainer"] {
+      background: #000000 !important;
+      background-color: #000000 !important;
+      background-image: none !important;
+    }
+    [data-testid="stBottom"]::before,
+    [data-testid="stBottom"]::after,
+    [data-testid="stBottomBlockContainer"]::before,
+    [data-testid="stBottomBlockContainer"]::after {
+      background: #000000 !important;
+      background-image: none !important;
+    }
     [data-testid="stChatInput"] > div {
       background: var(--tp-secondary-bg) !important;
       border: 1.5px solid var(--tp-border) !important;
       border-radius: 14px !important;
-      box-shadow: 0 2px 10px var(--tp-shadow) !important;
+      box-shadow: 0 4px 18px var(--tp-shadow) !important;
     }
     [data-testid="stChatInput"] textarea {
-      font-family: 'Outfit', sans-serif !important;
+      font-family: var(--tp-font) !important;
       font-size: 15px !important;
       color: var(--tp-text) !important;
-      caret-color: var(--tp-text) !important;
+      caret-color: var(--tp-accent) !important;
+      background: transparent !important;
     }
     [data-testid="stChatInput"] textarea::placeholder {
-      color: rgba(148, 163, 184, 0.95) !important;
+      color: rgba(156, 163, 175, 0.85) !important;
     }
     [data-testid="stChatInput"] button {
-      background: #F97316 !important;
+      background: var(--tp-accent) !important;
       border-radius: 10px !important;
       border: none !important;
     }
     [data-testid="stChatInput"] button:hover { background: #EA6A0A !important; }
     [data-testid="stChatInput"] button svg { stroke: #fff !important; fill: #fff !important; }
+    .tp-init-status {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      color: var(--tp-text-muted); font-size: 14px; padding: 10px 0 4px;
+    }
+    .tp-init-spinner {
+      width: 16px; height: 16px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.18); border-top-color: var(--tp-accent);
+      animation: tp-spin .8s linear infinite;
+    }
+    @keyframes tp-spin { to { transform: rotate(360deg); } }
 
     /* Remove chat message default background box */
     [data-testid="stChatMessage"] {
       background: transparent !important;
       box-shadow: none !important;
       border: none !important;
-      padding: 2px 0 !important;
+      padding: 3px 0 !important;
       gap: 8px !important;
     }
-    [data-testid="stChatMessageContent"] {
-      background: transparent !important;
-    }
+    [data-testid="stChatMessageContent"] { background: transparent !important; }
+    [data-testid="stChatMessageContent"] p { color: var(--tp-text) !important; }
 
     /* Scrollbar */
-    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #D1CCC4; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb { background: #3A3F49; border-radius: 10px; }
   `;
-  var el = window.parent.document.createElement('style');
-  el.textContent = css;
-  window.parent.document.head.appendChild(el);
+  var styleEl = window.parent.document.createElement('style');
+  styleEl.textContent = css;
+  window.parent.document.head.appendChild(styleEl);
 })();
 </script>
 """, height=0)
@@ -203,6 +416,8 @@ components.html("""
 
 # ─────────────────────────────────────────────────────────────
 # TRAILER CARD — inline styles only, no class dependencies
+# Styled as a work-order / spec sheet: bright paper against the
+# dark dispatch-desk background, hazard-stripe across the top edge.
 # ─────────────────────────────────────────────────────────────
 def _format_type_for_card(category_subcategory: str) -> str:
     """Storage may be 'Category > Subcategory'; the card shows only the main category."""
@@ -236,39 +451,42 @@ def render_card(listing: TrailerListing, rank: int):
     ]
     spec_cells = "".join(
         f'<div style="min-width:88px;">'
-        f'<div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#9CA3AF;font-weight:500;font-family:Outfit,sans-serif;">{lbl}</div>'
-        f'<div style="font-size:13px;font-weight:600;color:#18181B;font-family:Outfit,sans-serif;">{val}</div>'
+        f'<div style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#9CA3AF;font-weight:600;font-family:var(--tp-font);">{lbl}</div>'
+        f'<div style="font-size:13px;font-weight:600;color:#18181B;font-family:var(--tp-font);">{val}</div>'
         f'</div>'
         for lbl, val in specs if val
     )
     pay_html = (
-        f'<div style="font-size:12px;color:#6B7280;margin-top:3px;font-family:Outfit,sans-serif;">'
+        f'<div style="font-size:12px;color:#6B7280;margin-top:3px;font-family:var(--tp-font);">'
         f'Payments from <b style="color:#18181B;">{listing.payments_from}</b></div>'
     ) if listing.payments_from else ""
 
     # No line may start with 4+ spaces — Streamlit Markdown treats that as a code block
     # and would render literal tags like </div> in a monospace box.
     st.markdown(
-        f'<div style="background:#FFFFFF;border:1px solid #E9E6E0;border-left:4px solid #F97316;'
-        f"border-radius:12px;padding:16px 18px;margin:8px 0 4px 0;"
-        f'box-shadow:0 2px 8px rgba(0,0,0,0.07);">'
+        f'<div style="background:#FFFFFF;border:1px solid #E9E6E0;border-radius:12px;'
+        f'overflow:hidden;margin:10px 0 4px 0;box-shadow:0 6px 20px rgba(0,0,0,0.35);">'
+        f'<div style="height:4px;background:repeating-linear-gradient(135deg,#F97316 0px,#F97316 9px,#FFFFFF 9px,#FFFFFF 18px);"></div>'
+        f'<div style="padding:14px 18px 16px 18px;">'
         f'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">'
         f'<div>'
-        f'<div style="font-size:15px;font-weight:700;color:#18181B;margin-bottom:5px;font-family:Outfit,sans-serif;">'
-        f"#{rank}&nbsp;&nbsp;{listing.title}</div>"
+        f'<div style="font-family:var(--tp-font);font-size:10.5px;letter-spacing:.8px;'
+        f'color:#9CA3AF;text-transform:uppercase;margin-bottom:4px;">Listing #{rank:02d}</div>'
+        f'<div style="font-size:15px;font-weight:700;color:#18181B;margin-bottom:5px;font-family:var(--tp-font);">'
+        f"{listing.title}</div>"
         f'<span style="display:inline-block;padding:2px 10px;border-radius:20px;'
         f"background:{badge_bg};color:{badge_fg};font-size:11px;font-weight:600;"
-        f'font-family:Outfit,sans-serif;">{listing.condition}</span></div>'
+        f'font-family:var(--tp-font);">{listing.condition}</span></div>'
         f'<div style="text-align:right;">'
-        f'<div style="font-size:21px;font-weight:800;color:#F97316;font-family:Outfit,sans-serif;">{price_str}</div>'
+        f'<div style="font-size:21px;font-weight:700;color:#F97316;font-family:var(--tp-font);">{price_str}</div>'
         f"{pay_html}</div></div>"
         f'<div style="border-top:1px solid #F3F0EB;margin:12px 0;"></div>'
         f'<div style="display:flex;flex-wrap:wrap;gap:14px 20px;">{spec_cells}</div>'
         f'<a href="{listing.url}" target="_blank" '
         f'style="display:inline-block;margin-top:14px;background:#F97316;color:#FFFFFF;'
-        f"padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;"
-        f'text-decoration:none;font-family:Outfit,sans-serif;">'
-        f"View Full Listing &rarr;</a></div>",
+        f"padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;letter-spacing:.2px;"
+        f'text-decoration:none;font-family:var(--tp-font);">'
+        f"View Full Listing &rarr;</a></div></div>",
         unsafe_allow_html=True,
     )
 
@@ -286,6 +504,22 @@ if "onboarding_api_messages" not in st.session_state:
     st.session_state.onboarding_api_messages = []
 if "app_page" not in st.session_state:
     st.session_state.app_page = "Chatbot"
+def _render_header(title: str, subtitle: str) -> None:
+    st.markdown(
+        '<div class="tp-header-eyebrow"><span class="dot"></span>TRAILERPLACE · LIVE CHAT</div>'
+        f'<div class="tp-header-title">{title}</div>'
+        f'<div class="tp-header-sub">{subtitle}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="tp-hazard"></div>', unsafe_allow_html=True)
+
+
+def _start_backend_initialization() -> None:
+    st.session_state.backend_ready_status = "initializing"
+    st.session_state.backend_ready_error = ""
+    st.session_state.backend_ready_future = _BACKEND_EXECUTOR.submit(
+        _wait_for_backend_ready
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -300,17 +534,20 @@ if not _AUTH_CONFIGURED:
 
 if not st.session_state.auth_ok:
     with st.sidebar:
-        st.markdown("### 🚛 TrailerPlace")
-        st.caption("Sign in to continue")
-    st.markdown("### Sales Chat")
-    st.caption("Sign in to use the assistant")
+        st.markdown(
+            '<div class="tp-plate">🚛 TrailerPlace</div>'
+            '<div class="tp-plate-sub">Sign in to continue</div>',
+            unsafe_allow_html=True,
+        )
+    _render_header("Sales Chat", "Sign in to use the assistant")
     with st.form("app_login"):
         u = st.text_input("Username", autocomplete="username")
         p = st.text_input("Password", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
         if submitted:
             if u.strip() == _AUTH_USER and _password_matches(p, _AUTH_PASS):
                 st.session_state.auth_ok = True
+                _start_backend_initialization()
                 st.rerun()
             else:
                 st.error("Incorrect username or password.")
@@ -319,6 +556,18 @@ if not st.session_state.auth_ok:
 
 if "chat_session_id" not in st.session_state:
     st.session_state.chat_session_id = str(uuid.uuid4())
+if "backend_ready_status" not in st.session_state:
+    _start_backend_initialization()
+backend_ready_future = st.session_state.get("backend_ready_future")
+if (
+    st.session_state.get("backend_ready_status") == "initializing"
+    and isinstance(backend_ready_future, Future)
+    and backend_ready_future.done()
+):
+    backend_ready_result = backend_ready_future.result()
+    st.session_state.backend_ready_status = backend_ready_result.get("status", "error")
+    st.session_state.backend_ready_error = backend_ready_result.get("error", "")
+    st.session_state.backend_ready_future = None
 if "last_thinking_result" not in st.session_state:
     st.session_state.last_thinking_result = None
 if "thinking_status" not in st.session_state:
@@ -362,19 +611,39 @@ elif (
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🚛 TrailerPlace")
-    st.caption("AI Sales Assistant")
-    st.radio(
-        "View",
-        ("Chatbot", "Rules"),
-        key="app_page",
-        label_visibility="collapsed",
+    st.markdown(
+        '<div class="tp-plate">🚛 TrailerPlace</div>'
+        '<div class="tp-plate-sub">Sales Desk · Wharton, TX</div>',
+        unsafe_allow_html=True,
     )
+    st.markdown('<div class="tp-hazard" style="margin:12px 0 16px 0;"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="tp-nav-row">', unsafe_allow_html=True)
+    nav_cols = st.columns(2)
+    with nav_cols[0]:
+        if st.button(
+            "💬 Chatbot",
+            use_container_width=True,
+            type=("primary" if st.session_state.app_page == "Chatbot" else "secondary"),
+        ):
+            st.session_state.app_page = "Chatbot"
+            st.rerun()
+    with nav_cols[1]:
+        if st.button(
+            "📋 Rules",
+            use_container_width=True,
+            type=("primary" if st.session_state.app_page == "Rules" else "secondary"),
+        ):
+            st.session_state.app_page = "Rules"
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
     st.divider()
-    st.markdown("📍 Wharton, TX")
-    st.markdown("📞 (979) 532-1486")
-    st.markdown("💳 Financing available")
-    st.markdown("🚚 Delivery available")
+    st.markdown(
+        '<div class="tp-info-row">📍 <b>Wharton, TX</b></div>'
+        '<div class="tp-info-row">📞 <b>(979) 532-1486</b></div>'
+        '<div class="tp-info-row">💳 <b>Financing available</b></div>'
+        '<div class="tp-info-row">🚚 <b>Delivery available</b></div>',
+        unsafe_allow_html=True,
+    )
     st.divider()
     if st.button("↺  New Conversation", use_container_width=True):
         old_sid = st.session_state.get("chat_session_id")
@@ -410,6 +679,9 @@ with st.sidebar:
             "customer_full_name",
             "customer_email",
             "customer_phone",
+            "backend_ready_status",
+            "backend_ready_error",
+            "backend_ready_future",
         ):
             if k in st.session_state:
                 del st.session_state[k]
@@ -423,8 +695,10 @@ if st.session_state.get("app_page") == "Rules":
 # ─────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────
-st.markdown("### Sales Chat")
-st.caption("Ask about any trailer in our inventory")
+_render_header(
+    "Sales Chat",
+    "Ask about any trailer in our inventory — we'll pull real listings as we go.",
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -437,12 +711,10 @@ if not st.session_state.messages:
     )
     st.markdown(
         f"""
-<div style="text-align:center;padding:60px 20px 40px 20px;">
-  <div style="font-size:36px;margin-bottom:12px;">🚛</div>
-  <div style="font-size:17px;font-weight:600;color:var(--text-color);margin-bottom:6px;font-family:Outfit,sans-serif;">
-    Welcome to TrailerPlace
-  </div>
-  <div style="font-size:14px;color:var(--text-color);opacity:.72;max-width:360px;margin:0 auto;line-height:1.6;font-family:Outfit,sans-serif;">
+<div style="text-align:center;padding:56px 20px 36px 20px;">
+  <div style="font-size:34px;margin-bottom:10px;">🚛</div>
+  <div class="tp-header-title" style="font-size:20px;margin-bottom:8px;">Welcome to TrailerPlace</div>
+  <div style="font-size:14px;color:var(--tp-text-muted);max-width:380px;margin:0 auto;line-height:1.65;font-family:var(--tp-font);">
     {_welcome_hint}
   </div>
 </div>
@@ -554,7 +826,23 @@ placeholder = (
     "Type a message…" if st.session_state.messages else "What kind of trailer are you looking for?"
 )
 
-if prompt := st.chat_input(placeholder):
+backend_status = st.session_state.get("backend_ready_status", "initializing")
+backend_ready = backend_status == "ready"
+if backend_status == "initializing":
+    st.markdown(
+        '<div class="tp-init-status"><span class="tp-init-spinner"></span>'
+        '<span>Chatbot initializing…</span></div>',
+        unsafe_allow_html=True,
+    )
+    placeholder = "Chatbot initializing…"
+elif backend_status == "error":
+    st.error("The chatbot is taking longer than expected to initialize.")
+    if st.button("Retry initialization", type="primary"):
+        _start_backend_initialization()
+        st.rerun()
+    placeholder = "Chatbot unavailable"
+
+if prompt := st.chat_input(placeholder, disabled=not backend_ready):
     # 1. Persist user message
     st.session_state.messages.append({"role": "user", "content": prompt, "listings": None})
 
@@ -690,4 +978,8 @@ if prompt := st.chat_input(placeholder):
 
     # 8. Rerun to reset widget state — prevents the "send twice" bug.
     #    Content is already rendered above so the rerun re-draws from history seamlessly.
+    st.rerun()
+
+if backend_status == "initializing":
+    time.sleep(1)
     st.rerun()

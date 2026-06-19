@@ -403,10 +403,12 @@ def _pinecone_match_audit_llm():
 
     return ChatOpenAI(
         model=model,
-        reasoning_effort="medium",
+        temperature=None,
+        use_responses_api=True,
+        reasoning={"effort": "minimal"},
     ).with_structured_output(
         PineconeMatchFramingDecision,
-        method="function_calling",
+        method="json_schema",
     )
 
 
@@ -1050,25 +1052,65 @@ def _updated_active_search_request_text(
     return base
 
 
+_AUDIT_IGNORED_KEY_PARTS = (
+    "length",
+    "width",
+    "height",
+    "size",
+    "weight",
+    "payload",
+    "gvwr",
+    "axle_capacity",
+)
+
+
+def _audit_sanitize_mapping(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _audit_sanitize_mapping(item)
+            for key, item in value.items()
+            if not any(part in str(key).lower() for part in _AUDIT_IGNORED_KEY_PARTS)
+        }
+    if isinstance(value, list):
+        return [_audit_sanitize_mapping(item) for item in value]
+    return value
+
+
+def _audit_sanitize_text(value: Any) -> str:
+    text = str(value or "")
+    ignored_label = re.compile(
+        r"^\s*(?:current\s+requirements\s*:\s*)?(?:filter_)?(?:trailer_)?"
+        r"(?:length(?:_ft)?|width(?:_ft)?|height(?:_ft)?|size|payload(?:_lbs|\s+capacity)?|gvwr|"
+        r"dry\s+weight|axle\s+capacity|weight(?:\s+capacity)?)\s*(?:[:;,]|\s+\d)",
+        re.I,
+    )
+    pieces = re.split(r"([|\n;])", text)
+    text = "".join(
+        "" if ignored_label.search(piece) else piece
+        for piece in pieces
+    )
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?(?:\s*[xX]\s*\d+(?:\.\d+)?)?\b", " ", text)
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ft|feet|foot|inches?|inch)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b\d[\d,]*(?:\.\d+)?\s*(?:lbs?|pounds?|tons?|#)(?=\s|$|[|,;])", " ", text, flags=re.I)
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*['\"]", " ", text)
+    text = re.sub(r"\s*\|\s*(?=\||$)", " ", text)
+    return re.sub(r"\s+", " ", text).strip(" |;,.-")
+
+
 def _pinecone_listing_facts(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "position": idx,
-            "title": str(item.get("title") or "").strip(),
-            "url": item.get("url"),
+            "title": _audit_sanitize_text(item.get("title")),
             "category": item.get("category"),
             "subcategory": item.get("subcategory"),
             "make": item.get("make"),
-            "model": item.get("model"),
+            "model": _audit_sanitize_text(item.get("model")),
             "price": item.get("price_display") or item.get("price"),
-            "length": item.get("length"),
-            "width": item.get("width"),
             "hitch_type": item.get("hitch_type"),
             "color": item.get("color"),
-            "gvwr": item.get("gvwr"),
-            "payload_capacity": item.get("payload_capacity"),
             "relevance_score": item.get("relevance_score"),
-            "match_evidence_text": str(item.get("match_evidence_text") or "")[:1800],
+            "match_evidence_text": _audit_sanitize_text(item.get("match_evidence_text"))[:1800],
         }
         for idx, item in enumerate(listings[:6], 1)
     ]
@@ -1139,9 +1181,12 @@ def _pinecone_match_audit(
     requested_non_metadata_features: list[str],
 ) -> dict[str, Any]:
     listings = search_result.listings or []
-    decision = _pinecone_match_audit_llm().invoke(
-        [
-            SystemMessage(
+    audit_user_message = _audit_sanitize_text(user_message)
+    audit_latest_message = _audit_sanitize_text(latest_user_message or user_message)
+    audit_slots = _audit_sanitize_mapping(slots)
+    audit_metadata_filters = _audit_sanitize_mapping(metadata_filters)
+    audit_messages = [
+        SystemMessage(
                 content="""You are an internal trailer match auditor. Return structured audit data only.
 
 Classify each supplied Pinecone result as full, partial, or alternative against the user's complete active request.
@@ -1149,7 +1194,7 @@ Classify each supplied Pinecone result as full, partial, or alternative against 
 Core rule:
 For overall fit, focus on category/use case, make/model/hitch/color when requested, and the supplied requested non-metadata features.
 
-Length, width, payload capacity, and GVWR are handled outside this audit. Do not use them to decide full, partial, or alternative. Do not downgrade or upgrade a listing because of those fields. They may appear in confirmed_requirements only as factual context.
+Length, width, height, payload capacity, GVWR, and other weights are handled outside this audit and removed from your context. Never infer, evaluate, mention, or return them.
 
 Strict feature validation:
 Match requested non-metadata features by exact feature concept, not by broad category words.
@@ -1185,7 +1230,7 @@ Confidently state that every trailer shown is a confirmed match for exactly what
 Example: "Every trailer below is a confirmed match for exactly what you're looking for — a ready-to-compare lineup built around your exact request."
 
 Rules for ALL scenarios:(extremely important — follow these carefully)
-- Never mention length, width, payload capacity, or GVWR for auditing purposes.
+- Never mention dimensions, payload capacity, GVWR, or other weights.
 - Never list specific mismatches.
 - Never say "all results meet your needs/request/specifications/criteria" unless full_match_count = 6.
 
@@ -1195,34 +1240,101 @@ Rules for ALL scenarios:(extremely important — follow these carefully)
 * confirmed_requirements: only confirmed facts/features.
 * missing_or_unconfirmed_requirements: requested features absent, ambiguous, merely similar, unsupported, or replaced by a different feature type. missing_or_unconfirmed_requirements must include requested features that are not confirmed.
 * sales_blurb: Talk like an experienced sales representative who wants to make a trailer sale. Make one positive customer-facing sentence, max 28 words, highlighting confirmed strengths only. It should be engaging for the customer. Do not say partial match, alternative, mismatch, missing, requirement, exceeds, does not meet, or fully/exactly/perfectly matches unless match_level is full."""
-            ),
-            HumanMessage(
+        ),
+        HumanMessage(
                 content=_safe_json(
                     {
-                        "user_message": user_message,
-                        "active_search_request_text": user_message,
-                        "latest_user_message": latest_user_message or user_message,
+                        "user_message": audit_user_message,
+                        "active_search_request_text": audit_user_message,
+                        "latest_user_message": audit_latest_message,
                         "category": category,
-                        "slots": slots,
-                        "metadata_filters": metadata_filters,
+                        "slots": audit_slots,
+                        "metadata_filters": audit_metadata_filters,
                         "requested_non_metadata_features": requested_non_metadata_features,
-                        "pinecone_embedding_query_text": search_result.query_text,
-                        "pinecone_metadata_filter": search_result.metadata_filter,
-                        "rerank_debug": search_result.rerank_debug,
+                        "pinecone_embedding_query_text": _audit_sanitize_text(search_result.query_text),
+                        "pinecone_metadata_filter": _audit_sanitize_mapping(search_result.metadata_filter),
                         "make_debug": search_result.make_debug,
                         "listings": facts,
                     }
                 )
-            ),
-        ]
+        ),
+    ]
+    output_schema = (
+        PineconeMatchFramingDecision.model_json_schema()
+        if hasattr(PineconeMatchFramingDecision, "model_json_schema")
+        else PineconeMatchFramingDecision.schema()
     )
-    data = _model_dump(decision)
+    logger.info(
+        "pinecone_match_audit_input_json | %s",
+        _safe_json(
+            {
+                "model": (
+                    os.getenv("PINECONE_MATCH_AUDIT_MODEL")
+                    or os.getenv("PINECONE_MATCH_FRAMING_MODEL")
+                    or "gpt-5.4-mini"
+                ).strip(),
+                "temperature": None,
+                "use_responses_api": True,
+                "reasoning": {"effort": "none"},
+                "structured_output_method": "json_schema",
+                "structured_output_schema": output_schema,
+                "messages": [
+                    {
+                        "role": "system" if isinstance(message, SystemMessage) else "user",
+                        "content": message.content,
+                    }
+                    for message in audit_messages
+                ],
+            }
+        ),
+    )
+
+    decision = _pinecone_match_audit_llm().invoke(audit_messages)
+    raw_data = _model_dump(decision)
+    logger.info(
+        "pinecone_match_audit_output_json | %s",
+        _safe_json(raw_data),
+    )
+
+    raw_counts = (
+        raw_data.get("overall_match_level"),
+        raw_data.get("full_match_count"),
+        raw_data.get("partial_match_count"),
+        raw_data.get("alternative_count"),
+    )
+    data = raw_data
     data = _sanitize_requested_feature_analysis(
         data=data,
         facts=facts,
         requested_features=requested_non_metadata_features,
         category=category,
         metadata_filters=metadata_filters,
+    )
+    validated_counts = (
+        data.get("overall_match_level"),
+        data.get("full_match_count"),
+        data.get("partial_match_count"),
+        data.get("alternative_count"),
+    )
+    if validated_counts != raw_counts:
+        full_count = int(data.get("full_match_count") or 0)
+        listing_count = int(data.get("validated_listing_count") or len(facts))
+        if full_count == listing_count and listing_count:
+            data["intro_text"] = (
+                "Every trailer below is a confirmed match for the audited features—a ready-to-compare lineup built around your request."
+            )
+        elif full_count:
+            data["intro_text"] = (
+                "Your confirmed fits are listed first, followed by other relevant trailers worth comparing."
+            )
+        else:
+            data["intro_text"] = (
+                "We don't have that exact feature combination right now, but here are some practical options worth comparing."
+            )
+        data["reason"] = "Final match summary regenerated after deterministic validation."
+    logger.info(
+        "pinecone_match_audit_validated_output_json | %s",
+        _safe_json(data),
     )
     return data
 
