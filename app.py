@@ -113,8 +113,43 @@ def _render_rules_page() -> None:
 st.set_page_config(
     page_title="TrailerPlace · Assistant",
     page_icon="🚛",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="expanded",
+)
+
+_requested_theme = st.query_params.get("theme")
+if "ui_dark_mode" not in st.session_state:
+    st.session_state.ui_dark_mode = _requested_theme == "dark"
+
+# Streamlit session state is reset when the server/app restarts. Restore the
+# last browser preference through localStorage, with the URL as the bridge
+# that Python can read before rendering the theme.
+components.html(
+    """
+<script>
+(function() {
+  const parentWindow = window.parent;
+  const storageKey = "trailerplace-ui-theme";
+  const url = new URL(parentWindow.location.href);
+  const urlTheme = url.searchParams.get("theme");
+  const savedTheme = parentWindow.localStorage.getItem(storageKey);
+
+  if (!urlTheme && (savedTheme === "light" || savedTheme === "dark")) {
+    url.searchParams.set("theme", savedTheme);
+    parentWindow.location.replace(url.toString());
+    return;
+  }
+  if (!urlTheme) {
+    parentWindow.localStorage.setItem(storageKey, "light");
+    url.searchParams.set("theme", "light");
+    parentWindow.history.replaceState({}, "", url.toString());
+  } else if (urlTheme === "light" || urlTheme === "dark") {
+    parentWindow.localStorage.setItem(storageKey, urlTheme);
+  }
+})();
+</script>
+""",
+    height=0,
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -413,6 +448,390 @@ components.html("""
 </script>
 """, height=0)
 
+# Theme-aware polish layer. It follows the base skin so every Streamlit
+# surface uses one semantic palette in both modes.
+_dark = st.session_state.ui_dark_mode
+_theme = {
+    "bg": "#0B1018" if _dark else "#F5F7FA",
+    "sidebar": "#101722" if _dark else "#FFFFFF",
+    "surface": "#151E2B" if _dark else "#FFFFFF",
+    "surface_2": "#1B2636" if _dark else "#F8FAFC",
+    "text": "#F1F5F9" if _dark else "#172033",
+    "muted": "#94A3B8" if _dark else "#64748B",
+    "border": "rgba(148,163,184,.20)" if _dark else "#E2E8F0",
+    "accent_soft": "rgba(249,115,22,.14)" if _dark else "#FFF1E8",
+    "shadow": "rgba(0,0,0,.28)" if _dark else "rgba(15,23,42,.09)",
+}
+components.html(
+    f"""
+<script>
+(function() {{
+  const doc = window.parent.document;
+  const activeTheme = "{'dark' if _dark else 'light'}";
+  const parentWindow = window.parent;
+  const themeUrl = new URL(parentWindow.location.href);
+  const serverHadTheme = {str(_requested_theme in ('light', 'dark')).lower()};
+  doc.documentElement.dataset.tpTheme = activeTheme;
+  if (serverHadTheme) {{
+    parentWindow.localStorage.setItem("trailerplace-ui-theme", activeTheme);
+  }}
+  if (serverHadTheme && themeUrl.searchParams.get("theme") !== activeTheme) {{
+    themeUrl.searchParams.set("theme", activeTheme);
+    parentWindow.history.replaceState({{}}, "", themeUrl.toString());
+  }}
+  const old = doc.getElementById('tp-theme-polish');
+  if (old) old.remove();
+  const style = doc.createElement('style');
+  style.id = 'tp-theme-polish';
+  style.textContent = `
+    :root {{
+      --tp-font: Inter, Aptos, "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      --tp-bg: {_theme['bg']}; --tp-secondary-bg: {_theme['surface']};
+      --tp-card-bg: {_theme['surface']}; --tp-text: {_theme['text']};
+      --tp-text-muted: {_theme['muted']}; --tp-border: {_theme['border']};
+      --tp-accent: #F97316; --tp-accent-dim: {_theme['accent_soft']};
+      --tp-shadow: {_theme['shadow']};
+    }}
+    html, body, [class*="css"] {{ font-family: var(--tp-font) !important; }}
+    body, [data-testid="stAppViewContainer"], [data-testid="stMain"],
+    [data-testid="stBottom"], [data-testid="stBottom"] > div,
+    [data-testid="stBottomBlockContainer"], [data-testid="stChatInputContainer"] {{
+      background: var(--tp-bg) !important; color: var(--tp-text) !important;
+    }}
+    [data-testid="stBottom"]::before, [data-testid="stBottom"]::after,
+    [data-testid="stBottomBlockContainer"]::before, [data-testid="stBottomBlockContainer"]::after {{
+      background: var(--tp-bg) !important;
+    }}
+    [data-testid="stAppViewContainer"] {{
+      background-image: none !important;
+    }}
+    [data-testid="stSidebar"] {{
+      background: {_theme['sidebar']} !important; border-right: 1px solid var(--tp-border) !important;
+      box-shadow: 8px 0 28px rgba(15,23,42,.04) !important;
+    }}
+    [data-testid="stSidebar"] button {{ background: transparent !important; }}
+    [data-testid="stSidebar"] button:hover {{ background: {_theme['surface_2']} !important; border-color: var(--tp-border) !important; }}
+    [data-testid="stSidebar"] button[kind="primary"] {{
+      background: var(--tp-accent) !important; color: white !important;
+      box-shadow: 0 4px 14px rgba(249,115,22,.22) !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] button,
+    [data-testid="stSidebarCollapsedControl"] button {{
+      color: {_theme['text']} !important;
+      background: transparent !important;
+      border-color: transparent !important;
+      outline: none !important;
+      box-shadow: none !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] button span,
+    [data-testid="stSidebarCollapsedControl"] button span {{
+      color: {_theme['text']} !important;
+      -webkit-text-fill-color: {_theme['text']} !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] button svg,
+    [data-testid="stSidebarCollapsedControl"] button svg {{
+      color: {_theme['text']} !important;
+      fill: currentColor !important;
+      stroke: currentColor !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] button,
+    [data-testid="stSidebarCollapsedControl"] button * {{
+      color: {'#111827' if not _dark else '#F8FAFC'} !important;
+      -webkit-text-fill-color: {'#111827' if not _dark else '#F8FAFC'} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] button svg,
+    [data-testid="stSidebarCollapsedControl"] button svg * {{
+      color: {'#111827' if not _dark else '#F8FAFC'} !important;
+      fill: {'#111827' if not _dark else '#F8FAFC'} !important;
+      stroke: {'#111827' if not _dark else '#F8FAFC'} !important;
+      opacity: 1 !important;
+      filter: {'brightness(0)' if not _dark else 'brightness(0) invert(1)'} !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] button:hover,
+    [data-testid="stSidebarCollapsedControl"] button:hover {{
+      color: {_theme['text']} !important;
+      background: {_theme['surface_2']} !important;
+      border-color: var(--tp-border) !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] {{ padding: .25rem .1rem .7rem; }}
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label p {{
+      color: var(--tp-text-muted) !important; font-size: .82rem !important; font-weight: 600 !important;
+    }}
+    /* Streamlit renders st.toggle through its checkbox primitive. Give the
+       switch explicit geometry and contrast so light mode never washes out. */
+    [data-testid="stCheckbox"] label[data-baseweb="checkbox"] > div:first-of-type {{
+      width: 48px !important; min-width: 48px !important;
+      height: 28px !important; min-height: 28px !important;
+      margin: 0 !important; padding: 3px !important;
+      box-sizing: border-box !important;
+      border: 1px solid {'#475569' if _dark else '#B8BEC8'} !important;
+      border-radius: 999px !important;
+      background: {'#334155' if _dark else '#D8DAE0'} !important;
+      box-shadow: inset 0 1px 2px rgba(15,23,42,.13) !important;
+    }}
+    [data-testid="stCheckbox"] label[data-baseweb="checkbox"] > div:first-of-type > div {{
+      width: 20px !important; height: 20px !important;
+      border: 1px solid rgba(15,23,42,.12) !important;
+      border-radius: 50% !important; background: #FFFFFF !important;
+      box-shadow: 0 1px 3px rgba(15,23,42,.28) !important;
+      transform: translateX(0) !important;
+    }}
+    [data-testid="stCheckbox"] label[data-baseweb="checkbox"]:has(input:checked) > div:first-of-type {{
+      border-color: #EA580C !important; background: #F97316 !important;
+    }}
+    [data-testid="stCheckbox"] label[data-baseweb="checkbox"]:has(input:checked) > div:first-of-type > div {{
+      transform: translateX(20px) !important;
+    }}
+    [data-testid="stTooltipIcon"] button {{
+      width: 22px !important; min-width: 22px !important; height: 22px !important;
+      padding: 0 !important; border: 0 !important; border-radius: 50% !important;
+      background: transparent !important; box-shadow: none !important;
+    }}
+    [data-testid="stTooltipIcon"] svg {{
+      width: 16px !important; height: 16px !important;
+      color: {_theme['muted']} !important; stroke: {_theme['muted']} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stSpinner"], [data-testid="stSpinner"] > div {{
+      color: {_theme['text']} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stSpinner"] svg {{
+      color: {_theme['text']} !important;
+      fill: {_theme['text']} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stSpinner"] svg path {{
+      fill: currentColor !important;
+    }}
+    [data-testid="stSpinner"] i {{
+      border-color: {'rgba(241,245,249,.22)' if _dark else 'rgba(23,32,51,.18)'} !important;
+      border-top-color: {_theme['text']} !important;
+      opacity: 1 !important;
+    }}
+    .block-container {{ max-width: 960px !important; padding: 2rem 2.25rem 7.5rem !important; }}
+    .tp-header-eyebrow {{ color: var(--tp-accent) !important; letter-spacing: 1.35px !important; }}
+    .tp-header-title {{ font-size: clamp(1.7rem, 3vw, 2.25rem) !important; font-weight: 720 !important; }}
+    .tp-header-sub {{ font-size: .92rem !important; line-height: 1.6 !important; }}
+    .tp-hazard {{ height: 2px !important; margin-top: 16px !important; background: linear-gradient(90deg, var(--tp-accent), rgba(249,115,22,.12), transparent) !important; }}
+    .tp-plate {{ font-size: 1.28rem !important; letter-spacing: -.02em !important; }}
+    .tp-plate-sub {{ color: var(--tp-text-muted) !important; letter-spacing: .11em !important; }}
+    [data-testid="stChatMessage"] {{ padding: .65rem .75rem !important; margin: .4rem 0 !important; border-radius: 16px !important; }}
+    [data-testid="stChatMessage"][aria-label="user"],
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {{
+      background: var(--tp-accent-dim) !important; margin-left: clamp(1rem, 12vw, 7rem) !important;
+    }}
+    [data-testid="stChatMessage"][aria-label="assistant"],
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {{
+      background: {_theme['surface']} !important; border: 1px solid var(--tp-border) !important;
+      box-shadow: 0 5px 18px var(--tp-shadow) !important; margin-right: clamp(0rem, 5vw, 3rem) !important;
+    }}
+    [data-testid="stChatMessageContent"] p {{ line-height: 1.65 !important; }}
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] strong,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] b,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] em,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] blockquote,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h4 {{
+      color: {_theme['text']} !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] a {{
+      color: {'#60A5FA' if _dark else '#2563EB'} !important;
+      text-decoration-color: currentColor !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] hr {{
+      height: 0 !important;
+      margin: 1.75rem 0 !important;
+      border: 0 !important;
+      border-top: 1px solid {_theme['border']} !important;
+      background: transparent !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] h4,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] h5,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] h6 {{
+      color: {_theme['text']} !important;
+    }}
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] code {{
+      padding: .12rem .38rem !important;
+      color: {'#FDBA74' if _dark else '#C2410C'} !important;
+      background: {_theme['surface_2']} !important;
+      border: 1px solid {_theme['border']} !important;
+      border-radius: 5px !important;
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace !important;
+      font-size: .88em !important;
+    }}
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] pre {{
+      color: {_theme['text']} !important;
+      background: {_theme['surface_2']} !important;
+      border: 1px solid {_theme['border']} !important;
+      border-radius: 10px !important;
+    }}
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] pre code {{
+      padding: 0 !important;
+      color: {_theme['text']} !important;
+      background: transparent !important;
+      border: 0 !important;
+    }}
+    [data-testid="stChatInput"] > div {{
+      background: {_theme['surface']} !important; border: 1px solid var(--tp-border) !important;
+      border-radius: 18px !important; box-shadow: 0 12px 36px var(--tp-shadow) !important;
+    }}
+    [data-testid="stChatInputTextArea"],
+    [data-testid="stChatInputTextArea"] textarea,
+    [data-testid="stChatInput"] [data-baseweb="textarea"] {{
+      background: {_theme['surface']} !important;
+      background-color: {_theme['surface']} !important;
+      color: {_theme['text']} !important;
+    }}
+    [data-testid="stChatInput"] textarea[data-testid="stChatInputTextArea"],
+    [data-testid="stBottom"] [data-testid="stChatInput"] textarea {{
+      background: {_theme['surface']} !important;
+      background-color: {_theme['surface']} !important;
+      color: {_theme['text']} !important;
+      -webkit-text-fill-color: {_theme['text']} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stChatInputTextArea"]::placeholder,
+    [data-testid="stChatInputTextArea"] textarea::placeholder {{
+      color: {_theme['muted']} !important;
+      opacity: 1 !important;
+    }}
+    [data-testid="stChatInput"] > div:focus-within {{
+      border-color: rgba(249,115,22,.65) !important;
+      box-shadow: 0 0 0 3px {_theme['accent_soft']}, 0 12px 36px var(--tp-shadow) !important;
+    }}
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"],
+    [data-testid="stChatInput"] button[data-testid="stChatInputSubmitButton"] {{
+      width: 82px !important; min-width: 82px !important;
+      height: 40px !important; min-height: 40px !important;
+      padding: 0 14px !important;
+      display: inline-flex !important; align-items: center !important; justify-content: center !important;
+      background: {_theme['surface_2']} !important;
+      color: {_theme['text']} !important;
+      border: 0 !important; outline: 0 !important;
+      border-radius: 8px !important; box-shadow: none !important;
+      font-size: 0 !important;
+    }}
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"] svg {{
+      display: none !important;
+    }}
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]::before {{
+      content: "→  Ask";
+      display: block;
+      color: {_theme['text']};
+      font-family: var(--tp-font);
+      font-size: 14px;
+      font-weight: 650;
+      line-height: 1;
+      white-space: pre;
+    }}
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]:hover {{
+      background: {'#263447' if _dark else '#EEF2F6'} !important;
+      border: 0 !important; outline: 0 !important; box-shadow: none !important;
+    }}
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]:focus,
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]:focus-visible,
+    [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]:active {{
+      border: 0 !important; outline: 0 !important; box-shadow: none !important;
+    }}
+    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {{ background: {_theme['surface_2']} !important; }}
+    [data-testid="stTextInput"] [data-testid="stWidgetLabel"] p {{
+      color: {_theme['text']} !important;
+    }}
+    [data-testid="stTextInputRootElement"],
+    [data-testid="stTextInputRootElement"][data-baseweb="input"] {{
+      background: {_theme['surface_2']} !important;
+      background-color: {_theme['surface_2']} !important;
+      overflow: hidden !important;
+    }}
+    [data-testid="stTextInputRootElement"]:focus-within {{
+      border-color: #F97316 !important;
+      box-shadow: 0 0 0 3px {_theme['accent_soft']} !important;
+    }}
+    [data-testid="stTextInputRootElement"]:has(input[type="password"]) > div:last-child {{
+      background: {_theme['surface_2']} !important;
+      background-color: {_theme['surface_2']} !important;
+      color: {_theme['text']} !important;
+      border-left: 1px solid {_theme['border']} !important;
+    }}
+    [data-testid="stTextInputRootElement"]:has(input[type="password"]) > div:last-child > * {{
+      background: transparent !important;
+      background-color: transparent !important;
+    }}
+    [data-testid="stTextInputRootElement"]:has(input[type="password"]) > div:last-child button {{
+      background: transparent !important; border: 0 !important;
+      color: {_theme['text']} !important; box-shadow: none !important;
+    }}
+    [data-testid="stTextInputRootElement"]:has(input[type="password"]) > div:last-child svg,
+    [data-testid="stTextInputRootElement"]:has(input[type="password"]) > div:last-child svg path {{
+      color: {_theme['text']} !important; fill: currentColor !important;
+    }}
+    /* Keep the login form visually quiet: Streamlit adds this focus-only
+       keyboard hint, while Edge/WebKit may add a second password reveal UI. */
+    [data-testid="InputInstructions"] {{ display: none !important; }}
+    [data-testid="stTextInput"] input[type="password"]::-ms-reveal,
+    [data-testid="stTextInput"] input[type="password"]::-ms-clear {{
+      display: none !important; width: 0 !important; height: 0 !important;
+    }}
+    [data-testid="stTextInput"] input[type="password"]::-webkit-credentials-auto-fill-button,
+    [data-testid="stTextInput"] input[type="password"]::-webkit-contacts-auto-fill-button {{
+      visibility: hidden !important; display: none !important;
+      pointer-events: none !important; position: absolute !important; right: 0 !important;
+    }}
+    [data-testid="stVerticalBlockBorderWrapper"] {{ background: {_theme['surface']} !important; border-radius: 14px !important; }}
+    [data-testid="stFormSubmitButton"] button {{
+      background: #F97316 !important; color: #FFFFFF !important;
+      border: 1px solid #F97316 !important;
+      box-shadow: 0 5px 14px rgba(249,115,22,.20) !important;
+    }}
+    [data-testid="stFormSubmitButton"] button:hover {{
+      background: #EA580C !important; border-color: #EA580C !important;
+    }}
+    [data-testid="stFormSubmitButton"] button:focus,
+    [data-testid="stFormSubmitButton"] button:focus-visible {{
+      outline: none !important;
+      box-shadow: 0 0 0 3px {_theme['accent_soft']}, 0 5px 14px rgba(249,115,22,.20) !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stFormSubmitButton"] button {{
+      background: {_theme['surface_2']} !important;
+      color: {_theme['text']} !important;
+      border: 1px solid {_theme['border']} !important;
+      box-shadow: none !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stFormSubmitButton"] button:hover {{
+      background: {'#263447' if _dark else '#EEF2F6'} !important;
+      color: {_theme['text']} !important;
+      border-color: {'#475569' if _dark else '#CBD5E1'} !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stFormSubmitButton"] button:focus,
+    [data-testid="stChatMessage"] [data-testid="stFormSubmitButton"] button:focus-visible {{
+      outline: none !important;
+      box-shadow: 0 0 0 3px {'rgba(148,163,184,.16)' if _dark else 'rgba(100,116,139,.12)'} !important;
+    }}
+    .trailerplace-insights {{ color: var(--tp-text-muted) !important; background: {_theme['surface_2']} !important; border-color: var(--tp-border) !important; }}
+    [data-testid="stAlert"] {{ border-radius: 12px !important; }}
+    @media (max-width: 700px) {{
+      .block-container {{ padding: 1.25rem 1rem 7rem !important; }}
+      [data-testid="stChatMessage"] {{ margin-left: 0 !important; margin-right: 0 !important; }}
+    }}
+  `;
+  doc.head.appendChild(style);
+}})();
+</script>
+""",
+    height=0,
+)
+
 
 # ─────────────────────────────────────────────────────────────
 # TRAILER CARD — inline styles only, no class dependencies
@@ -428,6 +847,12 @@ def _format_type_for_card(category_subcategory: str) -> str:
 
 
 def render_card(listing: TrailerListing, rank: int):
+    dark = st.session_state.get("ui_dark_mode", True)
+    card_bg = "#151E2B" if dark else "#FFFFFF"
+    card_text = "#F1F5F9" if dark else "#172033"
+    card_muted = "#94A3B8" if dark else "#64748B"
+    card_border = "rgba(148,163,184,.20)" if dark else "#E2E8F0"
+    card_rule = "#263447" if dark else "#EEF2F6"
     price_str = (
         listing.price_display
         or (f"${listing.price:,.0f}" if listing.price is not None else "Call for price")
@@ -451,28 +876,28 @@ def render_card(listing: TrailerListing, rank: int):
     ]
     spec_cells = "".join(
         f'<div style="min-width:88px;">'
-        f'<div style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#9CA3AF;font-weight:600;font-family:var(--tp-font);">{lbl}</div>'
-        f'<div style="font-size:13px;font-weight:600;color:#18181B;font-family:var(--tp-font);">{val}</div>'
+        f'<div style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:{card_muted};font-weight:600;font-family:var(--tp-font);">{lbl}</div>'
+        f'<div style="font-size:13px;font-weight:600;color:{card_text};font-family:var(--tp-font);">{val}</div>'
         f'</div>'
         for lbl, val in specs if val
     )
     pay_html = (
-        f'<div style="font-size:12px;color:#6B7280;margin-top:3px;font-family:var(--tp-font);">'
-        f'Payments from <b style="color:#18181B;">{listing.payments_from}</b></div>'
+        f'<div style="font-size:12px;color:{card_muted};margin-top:3px;font-family:var(--tp-font);">'
+        f'Payments from <b style="color:{card_text};">{listing.payments_from}</b></div>'
     ) if listing.payments_from else ""
 
     # No line may start with 4+ spaces — Streamlit Markdown treats that as a code block
     # and would render literal tags like </div> in a monospace box.
     st.markdown(
-        f'<div style="background:#FFFFFF;border:1px solid #E9E6E0;border-radius:12px;'
-        f'overflow:hidden;margin:10px 0 4px 0;box-shadow:0 6px 20px rgba(0,0,0,0.35);">'
-        f'<div style="height:4px;background:repeating-linear-gradient(135deg,#F97316 0px,#F97316 9px,#FFFFFF 9px,#FFFFFF 18px);"></div>'
+        f'<div style="background:{card_bg};border:1px solid {card_border};border-radius:14px;'
+        f'overflow:hidden;margin:12px 0 6px 0;box-shadow:0 8px 24px var(--tp-shadow);">'
+        f'<div style="height:3px;background:linear-gradient(90deg,#F97316,#FB923C,transparent);"></div>'
         f'<div style="padding:14px 18px 16px 18px;">'
         f'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">'
         f'<div>'
         f'<div style="font-family:var(--tp-font);font-size:10.5px;letter-spacing:.8px;'
-        f'color:#9CA3AF;text-transform:uppercase;margin-bottom:4px;">Listing #{rank:02d}</div>'
-        f'<div style="font-size:15px;font-weight:700;color:#18181B;margin-bottom:5px;font-family:var(--tp-font);">'
+        f'color:{card_muted};text-transform:uppercase;margin-bottom:4px;">Listing #{rank:02d}</div>'
+        f'<div style="font-size:15px;font-weight:700;color:{card_text};margin-bottom:5px;font-family:var(--tp-font);">'
         f"{listing.title}</div>"
         f'<span style="display:inline-block;padding:2px 10px;border-radius:20px;'
         f"background:{badge_bg};color:{badge_fg};font-size:11px;font-weight:600;"
@@ -480,7 +905,7 @@ def render_card(listing: TrailerListing, rank: int):
         f'<div style="text-align:right;">'
         f'<div style="font-size:21px;font-weight:700;color:#F97316;font-family:var(--tp-font);">{price_str}</div>'
         f"{pay_html}</div></div>"
-        f'<div style="border-top:1px solid #F3F0EB;margin:12px 0;"></div>'
+        f'<div style="border-top:1px solid {card_rule};margin:12px 0;"></div>'
         f'<div style="display:flex;flex-wrap:wrap;gap:14px 20px;">{spec_cells}</div>'
         f'<a href="{listing.url}" target="_blank" '
         f'style="display:inline-block;margin-top:14px;background:#F97316;color:#FFFFFF;'
@@ -538,6 +963,11 @@ if not st.session_state.auth_ok:
             '<div class="tp-plate">🚛 TrailerPlace</div>'
             '<div class="tp-plate-sub">Sign in to continue</div>',
             unsafe_allow_html=True,
+        )
+        st.toggle(
+            "Dark mode",
+            key="ui_dark_mode",
+            help="Switch between the light and dark workspace themes.",
         )
     _render_header("Sales Chat", "Sign in to use the assistant")
     with st.form("app_login"):
@@ -617,6 +1047,11 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown('<div class="tp-hazard" style="margin:12px 0 16px 0;"></div>', unsafe_allow_html=True)
+    st.toggle(
+        "Dark mode",
+        key="ui_dark_mode",
+        help="Switch between the light and dark workspace themes.",
+    )
     st.markdown('<div class="tp-nav-row">', unsafe_allow_html=True)
     nav_cols = st.columns(2)
     with nav_cols[0]:
