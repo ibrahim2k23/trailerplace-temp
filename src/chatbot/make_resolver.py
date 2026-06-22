@@ -3,12 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from functools import lru_cache
 from typing import Literal
-
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from pydantic import BaseModel
 
 from src.chatbot.make_inventory import known_makes
 
@@ -21,12 +16,6 @@ class MakeResolution:
     make: str | None = None
     confidence: str = "none"
     match_type: MatchType | None = None
-    reason: str = ""
-
-
-class _LLMMakeResolution(BaseModel):
-    make: str | None = None
-    confidence: Literal["none", "low", "medium", "high"] = "none"
     reason: str = ""
 
 
@@ -189,49 +178,8 @@ def _resolve_deterministic(text: str) -> MakeResolution:
     return MakeResolution()
 
 
-@lru_cache(maxsize=1)
-def _llm():
-    return ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(
-        _LLMMakeResolution,
-        method="function_calling",
-    )
-
-
-def _resolve_with_llm(text: str) -> MakeResolution:
-    valid = known_makes()
-    if not valid or not str(text or "").strip():
-        return MakeResolution()
-    try:
-        result = _llm().invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "Resolve the trailer make mentioned by the user. "
-                        "Choose only from the provided make list. Return null if unclear. "
-                        "Never choose Gooseneck unless the user clearly means the brand or manufacturer, "
-                        "because gooseneck usually means hitch type."
-                    )
-                ),
-                HumanMessage(
-                    content=f"Known makes: {', '.join(valid)}\nUser message: {text}"
-                ),
-            ]
-        )
-    except Exception:
-        return MakeResolution()
-
-    make = result.make if result.make in valid else None
-    if not make or result.confidence not in {"medium", "high"}:
-        return MakeResolution()
-    if not _candidate_allowed(make, text):
-        return MakeResolution(None, "none", None, "gooseneck_without_brand_context")
-    return MakeResolution(make, result.confidence, "llm", result.reason)
-
-
 def resolve_make_from_text(text: str, *, use_llm_fallback: bool = True) -> MakeResolution:
-    if use_llm_fallback:
-        llm_resolution = _resolve_with_llm(text)
-        if llm_resolution.make or llm_resolution.reason == "gooseneck_without_brand_context":
-            return llm_resolution
-
+    # Makes must always be grounded in the user's text. Keep the argument for
+    # caller compatibility, but never allow the LLM to choose a make.
+    del use_llm_fallback
     return _resolve_deterministic(text)

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from src.chatbot.categories import category_prompt_block
+from src.chatbot.make_inventory import make_prompt_block
 
 
 TRAILERPLACE_PERSONA_SECTION = """
@@ -154,4 +155,6 @@ Important Action examples with respect to Pinecone search tool:
 Listing blocks after search are formatted in code. Do not invent listings or add made-up listing details.
 
 {category_prompt_block()}
+
+{make_prompt_block()}
 """.strip()

@@ -1006,26 +1006,22 @@ def test_utility_lightweight_user_weight_overrides_payload_default(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
-def test_generic_length_trailer_request_asks_for_category(monkeypatch):
-    _use_fallback_extractor(monkeypatch)
-
+def test_main_llm_resolves_category_without_inventing_make(monkeypatch):
     class _FakeMindLLM:
         def invoke(self, _messages):
             return graph.MindDecision(
-                action="pinecone_search",
-                trailer_category="Utility",
+                action="ask_next_question",
+                trailer_category="Livestock",
             )
 
     monkeypatch.setattr(graph, "_mind_llm", lambda: _FakeMindLLM())
 
-    planned = graph._mind_node(_state("I am looking for a 12 ft trailer", category=None))
-    out = graph._apply_mind_node(planned)
+    message = "suggest me a trailer to load live stock"
+    planned = graph._mind_node(_state(message, category=None))
+    make = make_resolver.resolve_make_from_text(message)
 
-    assert out["trailer_category"] is None
-    assert out["assistant_text"] == "What type of trailer are you looking for?"
-    assert out["awaiting_slot"] == "generic_category_choice"
-    assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
-    assert out["mind_decision"]["action"] == "respond"
+    assert planned["mind_decision"]["trailer_category"] == "Livestock"
+    assert make.make is None
 
 
 def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatch):

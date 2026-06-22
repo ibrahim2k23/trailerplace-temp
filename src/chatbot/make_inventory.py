@@ -93,6 +93,20 @@ def known_makes() -> tuple[str, ...]:
     return load_make_inventory().canonical_makes
 
 
+def make_prompt_block() -> str:
+    inventory = load_make_inventory()
+    lines = ["Canonical trailer makes/brands available in the current inventory:"]
+    if not inventory.canonical_makes:
+        lines.append("- No makes are currently available from the inventory workbook.")
+        return "\n".join(lines)
+
+    for make in inventory.canonical_makes:
+        categories = inventory.categories_by_make.get(make, ())
+        category_text = ", ".join(categories) if categories else "category unavailable"
+        lines.append(f"- {make}: {category_text}")
+    return "\n".join(lines)
+
+
 def categories_for_make(make: str) -> tuple[str, ...]:
     return load_make_inventory().categories_by_make.get(make, ())
 

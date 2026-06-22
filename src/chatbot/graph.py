@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from trailer_fields import get_trailer_fields_as_dict, list_all_categories
 from src.chatbot.categories import (
+    CANONICAL_CATEGORIES,
+    category_prompt_block,
     category_clarification_question,
     resolve_category_clarification_answer,
     resolve_category_from_text,
@@ -28,9 +30,9 @@ from src.chatbot.mini_preference_classifier import (
     PreferenceNullDecision,
     classify_no_preference,
 )
-from src.chatbot.make_inventory import categories_for_make
+from src.chatbot.make_inventory import categories_for_make, make_prompt_block
 from src.chatbot.make_resolver import resolve_make_from_text
-from src.chatbot.prompts import MIND_SYSTEM_PROMPT
+from src.chatbot.prompts import MIND_SYSTEM_PROMPT, TRAILERPLACE_KNOWLEDGE_SECTION
 from src.chatbot.state import ChatbotState, QuestionItem
 from src.models import TrailerListing
 from src.normalizer import normalize_category, normalize_hitch, normalize_subcategory
@@ -2328,6 +2330,9 @@ def _adjudicate_active_question_turn(
             [
                 SystemMessage(
                     content=(
+                        f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
+                        f"{category_prompt_block()}\n\n"
+                        f"{make_prompt_block()}\n\n"
                         "You evaluate the latest user turn while a trailer qualification question is active. "
                         "Return structured data only.\n"
                         "Determine whether the user answered the active question, explicitly said no preference, or did not answer it.\n"
@@ -2335,6 +2340,9 @@ def _adjudicate_active_question_turn(
                         "If the active question was answered, set answered_active_question=true and provide active_slot_value.\n"
                         "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
                         "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
+                        "Use the TrailerPlace knowledge, canonical category, and canonical make blocks above when answering counter-questions.\n"
+                        "If the user asks which trailer types, categories, or makes are available, directly list the relevant available values from those blocks in reply_to_user. "
+                        "Do not merely say you can help, and do not ask the active qualification question inside reply_to_user because the application appends that question afterward.\n"
                         "You may also extract other valid metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same latest user message.\n"
                         "During active qualification, you may set email_action to send_non_sales_faq_email for financing, trade-in, service/parts, store/location, or supported human/contact help.\n"
                         "During active qualification, you may set email_action to send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported business action, such as call them, email them, send a quote, send an invoice, prepare paperwork, provide future-arrival timing, reserve/hold a trailer, schedule something, or make a custom arrangement.\n"
@@ -3539,21 +3547,15 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
                 ),
             ]
         )
-        if deterministic_hint and not decision.trailer_category:
-            decision.trailer_category = deterministic_hint
     except Exception:
         logger.exception("Mind LLM failed; using fallback decision")
         decision = _fallback_decision(state)
         if deterministic_hint and not decision.trailer_category:
             decision.trailer_category = deterministic_hint
 
-    if (
-        not deterministic_hint
-        and not state.get("trailer_category")
-        and decision.trailer_category
-    ):
+    if decision.trailer_category and decision.trailer_category not in CANONICAL_CATEGORIES:
         logger.info(
-            "llm_category_ignored_without_deterministic_match | proposed_category=%r | user_message=%r",
+            "llm_category_ignored_noncanonical | proposed_category=%r | user_message=%r",
             decision.trailer_category,
             state.get("user_message"),
         )
@@ -3909,13 +3911,9 @@ def _apply_make_resolution(
     category: str | None,
     metadata_filters: dict[str, Any],
 ) -> tuple[str | None, list[str], str | None]:
-    explicit_category = resolve_category_from_text(latest_message).category
-    if explicit_category and not category:
-        category = explicit_category
-
     resolution = resolve_make_from_text(
         latest_message,
-        use_llm_fallback=True,
+        use_llm_fallback=False,
     )
     if not resolution.make:
         return category, [], None
@@ -4215,53 +4213,74 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             category = chosen_category
             awaiting_slot = None
             reset_result_state = True
-        elif _classify_generic_category_no_preference(
-            user_message=latest_message,
-            metadata_filters=metadata_filters,
-            slots=slots,
-        ):
-            awaiting_slot = None
-            slots_skipped.add(_GENERIC_CATEGORY_CHOICE_SLOT)
         elif latest_message.strip():
-            _apply_explicit_filter_extraction(
-                state=state,
+            question_turn = _adjudicate_active_question_turn(
+                state={
+                    **state,
+                    "trailer_category": category,
+                    "slots_collected": slots,
+                    "metadata_filters_collected": metadata_filters,
+                },
                 category=category,
-                slots=slots,
-                metadata_filters=metadata_filters,
+                active_slot=_GENERIC_CATEGORY_CHOICE_SLOT,
+                active_question=_GENERIC_CATEGORY_QUESTION,
+                active_definition=_slot_definition(
+                    _GENERIC_CATEGORY_CHOICE_SLOT,
+                    category=category,
+                    queued_question=_GENERIC_CATEGORY_QUESTION,
+                ),
                 latest_message=latest_message,
-                awaiting_slot=None,
-                apply_slot_updates=False,
+                pending_questions=[],
+                make_category_options=make_category_options,
             )
-            make_resolution = resolve_make_from_text(latest_message, use_llm_fallback=False)
-            if make_resolution.make:
-                metadata_filters["make"] = make_resolution.make
-            assistant_text = _GENERIC_CATEGORY_QUESTION
-            reply_prefix = _question_turn_fallback_reply(assistant_text, latest_message)
-            if reply_prefix:
-                assistant_text = f"{reply_prefix}\n\n{assistant_text}"
-            decision["action"] = "respond"
-            return {
-                **state,
-                "trailer_category": category,
-                "category_needs_clarification": category_needs_clarification,
-                "category_clarification_key": category_clarification_key,
-                "slots_collected": slots,
-                "slots_skipped": sorted(slots_skipped),
-                "metadata_filters_collected": metadata_filters,
-                "requested_non_metadata_features": requested_non_metadata_features,
-                "active_search_request_text": _updated_active_search_request_text(
+            if question_turn.no_preference_for_active_question:
+                awaiting_slot = None
+                slots_skipped.add(_GENERIC_CATEGORY_CHOICE_SLOT)
+                continue_generic_category_flow = True
+            else:
+                continue_generic_category_flow = False
+
+            if continue_generic_category_flow:
+                pass
+            else:
+                _apply_explicit_filter_extraction(
                     state=state,
-                    latest_message="",
+                    category=category,
                     slots=slots,
                     metadata_filters=metadata_filters,
-                    reset_active_request=category_changed or make_changed,
-                ),
-                "make_category_options": make_category_options,
-                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-                "pending_questions": [],
-                "assistant_text": assistant_text,
-                "mind_decision": decision,
-            }
+                    latest_message=latest_message,
+                    awaiting_slot=None,
+                    apply_slot_updates=False,
+                )
+                make_resolution = resolve_make_from_text(latest_message, use_llm_fallback=False)
+                if make_resolution.make:
+                    metadata_filters["make"] = make_resolution.make
+                assistant_text = _GENERIC_CATEGORY_QUESTION
+                if question_turn.reply_to_user:
+                    assistant_text = f"{question_turn.reply_to_user}\n\n{assistant_text}"
+                decision["action"] = "respond"
+                return {
+                    **state,
+                    "trailer_category": category,
+                    "category_needs_clarification": category_needs_clarification,
+                    "category_clarification_key": category_clarification_key,
+                    "slots_collected": slots,
+                    "slots_skipped": sorted(slots_skipped),
+                    "metadata_filters_collected": metadata_filters,
+                    "requested_non_metadata_features": requested_non_metadata_features,
+                    "active_search_request_text": _updated_active_search_request_text(
+                        state=state,
+                        latest_message="",
+                        slots=slots,
+                        metadata_filters=metadata_filters,
+                        reset_active_request=category_changed or make_changed,
+                    ),
+                    "make_category_options": make_category_options,
+                    "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+                    "pending_questions": [],
+                    "assistant_text": assistant_text,
+                    "mind_decision": decision,
+                }
 
     category, category_options, make_question = _apply_make_resolution(
         latest_message=latest_message,
