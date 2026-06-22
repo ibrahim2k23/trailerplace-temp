@@ -76,10 +76,6 @@ _ESCALATION_SENT_REPLY = (
     "I've sent your query to our team, and they'll reach out to you soon. "
     "In the meantime, I can keep helping you narrow down the right trailer."
 )
-_ESCALATION_CONTACT_REQUEST = (
-    "I can send that request to our team so they can follow up. Could you please share your phone number "
-    "or email address?"
-)
 _INTEREST_GENERIC_FALLBACK = (
     'Your interest in "{item_name}" has been logged. Our team will reach out to you soon. '
     f"In the meantime, feel free to visit {_SITE_URL} or call us at 979-532-1486."
@@ -144,6 +140,19 @@ def _active_question_followup(state: ChatbotState) -> str:
     pending = state.get("pending_questions") or []
     if pending:
         return str(pending[0].get("question") or "").strip()
+    pending_change = state.get("pending_category_change") or {}
+    if awaiting == "category_filter_confirmation" and pending_change:
+        return str(pending_change.get("question") or "").strip()
+    pending_suggestion = state.get("pending_category_suggestion") or {}
+    if awaiting == "category_suggestion_confirmation" and pending_suggestion:
+        suggested = str(pending_suggestion.get("category") or "").strip()
+        return f"A {suggested} trailer may suit your needs. Would you like to explore {suggested} trailers?"
+    if awaiting:
+        try:
+            definition = _slot_definition(awaiting, category=state.get("trailer_category"))
+            return str(definition.get("question") or "").strip()
+        except Exception:
+            logger.debug("active_question_definition_unavailable | slot=%r", awaiting)
     return ""
 
 
@@ -174,6 +183,10 @@ class MindDecision(BaseModel):
     ] = "respond"
     assistant_text: str = ""
     trailer_category: Optional[str] = None
+    category_resolution_kind: Literal["explicit", "recommendation", "none"] = "none"
+    category_confidence: Literal["low", "medium", "high"] = "low"
+    category_reasoning: str = ""
+    category_suggestion_response: Literal["accept", "reject", "none"] = "none"
     slots_collected_update: dict[str, Any] = Field(default_factory=dict)
     metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
     optional_question_slots_to_queue: list[str] = Field(default_factory=list)
@@ -241,6 +254,10 @@ class NonRecommendationTurnDecision(BaseModel):
 
 
 class QuestionTurnDecision(BaseModel):
+    counter_question_topic: Literal[
+        "trailer_categories", "hitch_types", "makes", "dimensions",
+        "payload", "faq", "other", "none",
+    ] = "none"
     answered_active_question: bool = False
     no_preference_for_active_question: bool = False
     active_slot_value: Optional[str] = None
@@ -259,6 +276,15 @@ class QuestionTurnDecision(BaseModel):
     reply_to_user: str = ""
     confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
+
+
+class CategoryFilterConfirmationDecision(BaseModel):
+    keep_fields: list[str] = Field(default_factory=list)
+    discard_fields: list[str] = Field(default_factory=list)
+    updates: dict[str, Any] = Field(default_factory=dict)
+    resolved: bool = False
+    reasoning: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
 
 
 class OfficeTrailerClarificationDecision(BaseModel):
@@ -304,6 +330,15 @@ def _mind_llm():
     model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         MindDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _category_filter_confirmation_llm():
+    model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        CategoryFilterConfirmationDecision,
         method="function_calling",
     )
 
@@ -1487,11 +1522,18 @@ def _has_contact(state: ChatbotState) -> bool:
     )
 
 
-def _optional_contact_request(reason: str) -> str:
+def _missing_contact_request(state: ChatbotState, reason: str) -> str:
     clean_reason = str(reason or "this request").strip()
+    if state.get("customer_full_name"):
+        return (
+            "Could you please share your email address and phone number so our team can "
+            f"contact you? Either one is enough to continue."
+        )
+    if state.get("customer_phone") or state.get("customer_email"):
+        return f"Could you please share your name so our team can contact you?"
     return (
-        "Could you please share your phone number or email address so our team can "
-        f"contact you regarding {clean_reason}?"
+        "Could you please share your name and either your phone number or email address so our team can "
+        f"contact you?"
     )
 
 
@@ -1515,6 +1557,9 @@ _DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "alumi
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
 _CATEGORY_CLARIFICATION_SLOT = "category_clarification"
 _GENERIC_CATEGORY_CHOICE_SLOT = "generic_category_choice"
+_CATEGORY_FILTER_CONFIRMATION_SLOT = "category_filter_confirmation"
+_CATEGORY_SUGGESTION_SLOT = "category_suggestion_confirmation"
+_COMMON_CATEGORY_FILTERS = ("length_ft", "width_ft", "height_ft", "payload_lbs", "hitch_type")
 _GENERIC_CATEGORY_QUESTION = "What type of trailer are you looking for?"
 _GENERIC_HAUL_USE_SLOT = "generic_haul_use"
 _MAKE_CATEGORY_CHOICE_SLOT = "make_category_choice"
@@ -1589,12 +1634,19 @@ def _has_width_requirement(slots: dict[str, Any], metadata_filters: dict[str, An
     return any(bool(slots.get(slot)) for slot in width_slots)
 
 
-def _apply_flatbed_default_width(category: str | None, slots: dict[str, Any], metadata_filters: dict[str, Any]) -> None:
+def _apply_flatbed_default_width(
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    defaulted_fields: set[str] | None = None,
+) -> None:
     if str(category or "").strip().lower() != "flatbed":
         return
     if _has_width_requirement(slots, metadata_filters):
         return
     metadata_filters["width_ft"] = _FLATBED_DEFAULT_WIDTH_FT
+    if defaulted_fields is not None:
+        defaulted_fields.add("width_ft")
     logger.info("flatbed_default_width_applied | width_ft=%r", _FLATBED_DEFAULT_WIDTH_FT)
 
 
@@ -1996,7 +2048,14 @@ def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecisi
         "send_escalation_alert_email",
     }:
         email_action = "none"
+    counter_topic = str(data.get("counter_question_topic") or "none").strip()
+    if counter_topic not in {
+        "trailer_categories", "hitch_types", "makes", "dimensions",
+        "payload", "faq", "other", "none",
+    }:
+        counter_topic = "none"
     return QuestionTurnDecision(
+        counter_question_topic=counter_topic,  # type: ignore[arg-type]
         answered_active_question=bool(data.get("answered_active_question")),
         no_preference_for_active_question=bool(data.get("no_preference_for_active_question")),
         active_slot_value=str(data.get("active_slot_value") or "").strip() or None,
@@ -2324,6 +2383,7 @@ def _adjudicate_active_question_turn(
         "existing_slots_collected": state.get("slots_collected") or {},
         "existing_metadata_filters_collected": state.get("metadata_filters_collected") or {},
         "make_category_options": make_category_options,
+        "supported_hitch_types": ["Bumper Pull", "Gooseneck"],
     }
     try:
         decision = _question_turn_adjudicator_llm().invoke(
@@ -2340,12 +2400,21 @@ def _adjudicate_active_question_turn(
                         "If the active question was answered, set answered_active_question=true and provide active_slot_value.\n"
                         "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
                         "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
+                        "Classify counter_question_topic by the noun being asked about. Trailer/category types, hitch types, and makes are different topics. The word 'type' alone does not mean trailer category. Never answer a hitch-type question with trailer categories.\n"
+                        "Supported hitch types are exactly Bumper Pull and Gooseneck.\n"
+                        "Examples while 'What type of trailer are you looking for?' is active:\n"
+                        "- 'Which trailer types do you carry?' -> counter_question_topic=trailer_categories; list canonical trailer categories.\n"
+                        "- 'Which hitch types do you carry?' -> counter_question_topic=hitch_types; reply that TrailerPlace offers Bumper Pull and Gooseneck configurations.\n"
+                        "- 'Which makes do you carry?' -> counter_question_topic=makes; list canonical inventory makes.\n"
                         "Use the TrailerPlace knowledge, canonical category, and canonical make blocks above when answering counter-questions.\n"
                         "If the user asks which trailer types, categories, or makes are available, directly list the relevant available values from those blocks in reply_to_user. "
                         "Do not merely say you can help, and do not ask the active qualification question inside reply_to_user because the application appends that question afterward.\n"
                         "You may also extract other valid metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same latest user message.\n"
                         "During active qualification, you may set email_action to send_non_sales_faq_email for financing, trade-in, service/parts, store/location, or supported human/contact help.\n"
                         "During active qualification, you may set email_action to send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported business action, such as call them, email them, send a quote, send an invoice, prepare paperwork, provide future-arrival timing, reserve/hold a trailer, schedule something, or make a custom arrangement.\n"
+                        "Examples: 'How can I contact you guys?' -> email_action=send_non_sales_faq_email, faq_category=contact_human. "
+                        "'Where are you located?' -> email_action=send_non_sales_faq_email, faq_category=store_info. "
+                        "'Can you call me tomorrow?' -> email_action=send_escalation_alert_email, not a contact FAQ. Tool intent has priority even though the active question remains unanswered.\n"
                         "Do not set an email action for broad catalogue browsing; that should be answered with the website link elsewhere.\n"
                         "Never set send_interested_listing_email during active qualification.\n"
                         "Do not invent updates. Do not use listing evidence. Do not rewrite the active question. "
@@ -3127,6 +3196,7 @@ def _apply_haul_classification_effects(
     slots: dict[str, Any],
     metadata_filters: dict[str, Any],
     classification: HaulClassificationDecision,
+    defaulted_fields: set[str] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     if not category:
         return [], {}
@@ -3160,6 +3230,8 @@ def _apply_haul_classification_effects(
         required_slots = [slot for slot in required_slots if slot != "haul_weight_lbs"]
         if not metadata_filters.get("payload_lbs") and not slots.get("haul_weight_lbs"):
             metadata_filters["payload_lbs"] = "1500 lbs"
+            if defaulted_fields is not None:
+                defaulted_fields.add("payload_lbs")
             logger.info(
                 "utility_lightweight_payload_default_applied | matched_item=%r | reason=%r",
                 classification.matched_item,
@@ -3503,17 +3575,7 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             },
         }
 
-    category_locked_pre_results = bool(state.get("trailer_category")) and not bool(
-        state.get("has_shown_search_results")
-    )
-    deterministic_hint = None if category_locked_pre_results else resolution.category
-    if category_locked_pre_results:
-        logger.info(
-            "category_lock_active | phase=mind_node | category=%r | has_shown_search_results=%s | proposed_category=%r",
-            state.get("trailer_category"),
-            state.get("has_shown_search_results"),
-            resolution.category,
-        )
+    deterministic_hint = resolution.category
 
     context = {
         "user_message": state.get("user_message"),
@@ -3530,6 +3592,8 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         "metadata_filters_collected": state.get("metadata_filters_collected") or {},
         "awaiting_slot": state.get("awaiting_slot"),
         "pending_questions": state.get("pending_questions") or [],
+        "pending_category_change": state.get("pending_category_change"),
+        "pending_category_suggestion": state.get("pending_category_suggestion"),
         "asked_questions": state.get("asked_questions") or [],
         "last_listings": state.get("last_listings") or [],
         "already_shown_listing_urls": state.get("already_shown_listing_urls") or [],
@@ -3560,7 +3624,44 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             state.get("user_message"),
         )
         decision.trailer_category = None
+    pending_suggestion = dict(state.get("pending_category_suggestion") or {})
+    if pending_suggestion:
+        suggested = str(pending_suggestion.get("category") or "").strip()
+        if decision.category_suggestion_response == "accept" and suggested in CANONICAL_CATEGORIES:
+            decision.trailer_category = suggested
+            decision.category_resolution_kind = "explicit"
+            return {**state, "pending_category_suggestion": None, "awaiting_slot": None, "mind_decision": _model_dump(decision)}
+        if decision.category_suggestion_response == "reject":
+            decision.trailer_category = None
+            decision.action = "respond"
+            decision.assistant_text = "No problem. What type of trailer would you like to explore instead?"
+            return {**state, "pending_category_suggestion": None, "awaiting_slot": None, "mind_decision": _model_dump(decision)}
+        if resolution.category and decision.trailer_category == resolution.category:
+            return {**state, "pending_category_suggestion": None, "awaiting_slot": None, "mind_decision": _model_dump(decision)}
+        decision.trailer_category = None
+        decision.action = "respond"
+        decision.assistant_text = f"A {suggested} trailer may suit your needs. Would you like to explore {suggested} trailers?"
+        return {**state, "mind_decision": _model_dump(decision)}
 
+    if decision.trailer_category and resolution.category != decision.trailer_category:
+        recommended = decision.trailer_category
+        if decision.category_resolution_kind == "recommendation" and decision.category_confidence == "high":
+            decision.trailer_category = None
+            decision.action = "respond"
+            decision.assistant_text = f"A {recommended} trailer may suit your needs. Would you like to explore {recommended} trailers?"
+            return {
+                **state,
+                "pending_category_suggestion": {
+                    "category": recommended,
+                    "reasoning": decision.category_reasoning,
+                    "confidence": decision.category_confidence,
+                },
+                "mind_decision": _model_dump(decision),
+            }
+        logger.info("inferred_category_not_applied | proposed=%r | kind=%r | confidence=%r", recommended, decision.category_resolution_kind, decision.category_confidence)
+        decision.trailer_category = None
+        decision.action = "respond"
+        decision.assistant_text = "What type of trailer are you looking for?"
     return {**state, "mind_decision": _model_dump(decision)}
 
 
@@ -3812,6 +3913,9 @@ def _classify_non_recommendation_turn(
                         "Choose send_non_sales_faq_email when the customer asks how to contact TrailerPlace, asks for the phone number, "
                         "location, store info, sales contact, financing, trade-in, service, or parts. Use faq_category contact_human for "
                         "general contact/sales-contact questions and store_info for location/store visit questions.\n\n"
+                        "Examples: 'How can I contact you guys?' means send_non_sales_faq_email/contact_human; "
+                        "'Where are you located?' means send_non_sales_faq_email/store_info; "
+                        "'Can you call me tomorrow?' means send_escalation_alert_email, not contact_human.\n\n"
                         "Choose send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported "
                         "business action such as contacting them, emailing them, sending a quote/invoice/paperwork, scheduling, "
                         "holding/reserving a trailer, future-arrival timing, buying trailers from the customer, or custom arrangements.\n\n"
@@ -3978,6 +4082,22 @@ def _apply_explicit_filter_extraction(
     )
     extracted_metadata = dict(extraction.metadata_filters_update or {})
     extracted_slots = dict(extraction.slots_collected_update or {})
+    bare_trailer_inches = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:\"|in|inch|inches)\s+(?:(?:\w+)\s+){0,3}trailer\b",
+        latest_message or "",
+        re.I,
+    )
+    if bare_trailer_inches and not re.search(
+        r"\b(?:wide|width|high|height|tall)\b", latest_message or "", re.I
+    ):
+        length_value = _normalize_length_or_width_value(
+            f"{bare_trailer_inches.group(1)} inches"
+        )
+        if extracted_metadata.get("width_ft") == length_value:
+            extracted_metadata.pop("width_ft", None)
+            metadata_filters.pop("width_ft", None)
+        extracted_metadata["length_ft"] = length_value
+        logger.info("bare_trailer_dimension_forced_to_length | value=%r", length_value)
     logger.info(
         "field_extraction_applied | category=%r | confidence=%r | extracted_metadata=%s | extracted_slots=%s | requested_non_metadata_features=%s",
         category,
@@ -4035,6 +4155,79 @@ def _legacy_apply_explicit_filter_extraction(
     return extracted_slots, extracted_metadata
 
 
+def _category_filter_confirmation_text(values: dict[str, Any], category: str) -> str:
+    labels = {
+        "length_ft": "length",
+        "width_ft": "width",
+        "height_ft": "height",
+        "payload_lbs": "payload capacity",
+        "hitch_type": "hitch type",
+    }
+    def display_value(key: str, value: Any) -> str:
+        text = str(value or "").strip()
+        number = re.search(r"\d+(?:\.\d+)?", text)
+        if key in {"length_ft", "width_ft", "height_ft"}:
+            normalized = str(_normalize_length_or_width_value(text)).strip()
+            normalized_number = re.search(r"\d+(?:\.\d+)?", normalized)
+            return f"{normalized_number.group(0)} ft" if normalized_number else normalized
+        if key == "payload_lbs":
+            normalized = str(_normalize_payload_value(text)).strip()
+            if re.search(r"\b(?:lb|lbs|pound|pounds)\b", normalized, re.I):
+                return normalized
+            return f"{number.group(0)} lbs" if number else normalized
+        return text.replace("_", " ") if key == "hitch_type" else text
+
+    details = ", ".join(
+        f"{labels[key]} {display_value(key, value)}" for key, value in values.items()
+    )
+    return f"Should I keep your previous {details} for the {category} trailer?"
+
+
+def _yes_no_answer(text: str) -> bool | None:
+    normalized = re.sub(r"[^a-z ]", " ", str(text or "").lower()).strip()
+    positive = bool(re.search(r"\b(?:yes|yeah|yep|sure|keep|same|carry|retain|continue)\b", normalized))
+    negative = bool(re.search(r"\b(?:no|nope|reset|clear|remove|discard|different|start over)\b", normalized))
+    selective = bool(re.search(r"\b(?:length|width|height|payload|capacity|weight|hitch)\b", normalized))
+    if positive and not negative and not selective:
+        return True
+    if negative and not positive and not selective:
+        return False
+    return None
+
+
+def _adjudicate_category_filter_confirmation(
+    message: str, carry_filters: dict[str, Any]
+) -> CategoryFilterConfirmationDecision:
+    try:
+        return _category_filter_confirmation_llm().invoke(
+            [
+                SystemMessage(content=(
+                    "Interpret a customer's reply about carrying old trailer filters into a new category. "
+                    "Allowed fields are length_ft, width_ft, height_ft, payload_lbs, hitch_type. "
+                    "Put explicitly retained fields in keep_fields, explicitly rejected fields in discard_fields, "
+                    "and explicitly changed values in updates. A changed field is also resolved. "
+                    "Resolve pronouns from the supplied pending fields: when only length_ft is pending, "
+                    "'change it to 20 ft' updates length_ft. Do not decide unspecified fields. "
+                    "Set resolved=true when at least one field is addressed. Explain the interpretation in reasoning "
+                    "and set confidence to low, medium, or high.\n"
+                    "Example 1: pending={length_ft: 15 ft}, reply='change it to 20ft' -> "
+                    "updates={length_ft: 20 ft}, resolved=true, confidence=high.\n"
+                    "Example 2: pending={length_ft: 15 ft, width_ft: 7 ft, hitch_type: bumper pull}, "
+                    "reply='keep the width, drop the length, and make it gooseneck' -> "
+                    "keep_fields=[width_ft], discard_fields=[length_ft], updates={hitch_type: gooseneck}, "
+                    "resolved=true, confidence=high."
+                )),
+                HumanMessage(content=_safe_json({
+                    "reply": message,
+                    "filters_awaiting_confirmation": carry_filters,
+                })),
+            ]
+        )
+    except Exception:
+        logger.exception("category_filter_confirmation_llm_failed")
+        return CategoryFilterConfirmationDecision()
+
+
 def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     decision = dict(state.get("mind_decision") or {})
     slots_before = dict(state.get("slots_collected") or {})
@@ -4043,11 +4236,97 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     slots_skipped = set(slots_skipped_before)
     metadata_filters_before = dict(state.get("metadata_filters_collected") or {})
     metadata_filters = dict(metadata_filters_before)
+    defaulted_metadata_filters = set(state.get("defaulted_metadata_filters") or [])
     requested_non_metadata_features = list(state.get("requested_non_metadata_features") or [])
     invalid_required_slot: str | None = None
     awaiting_slot = state.get("awaiting_slot")
     category_before = state.get("trailer_category")
     latest_message = state.get("user_message") or ""
+    for field in tuple(defaulted_metadata_filters):
+        if _message_has_filter_evidence(field, latest_message, awaiting_slot):
+            defaulted_metadata_filters.discard(field)
+    pending_category_change = dict(state.get("pending_category_change") or {})
+    pending_category_suggestion = dict(state.get("pending_category_suggestion") or {})
+    if pending_category_suggestion and not decision.get("trailer_category"):
+        suggestion_text = str(decision.get("assistant_text") or "").strip()
+        if not suggestion_text:
+            suggested = str(pending_category_suggestion.get("category") or "").strip()
+            suggestion_text = f"A {suggested} trailer may suit your needs. Would you like to explore {suggested} trailers?"
+        decision["action"] = "respond"
+        return {
+            **state,
+            "assistant_text": suggestion_text,
+            "awaiting_slot": _CATEGORY_SUGGESTION_SLOT,
+            "pending_questions": [],
+            "mind_decision": decision,
+        }
+    if pending_category_change:
+        carry_filters = dict(pending_category_change.get("carry_filters") or {})
+        confirmation = _yes_no_answer(latest_message)
+        question = str(pending_category_change.get("question") or "Should I keep the previous filters?")
+        if confirmation is None:
+            field_decision = _adjudicate_category_filter_confirmation(
+                latest_message, carry_filters
+            )
+            logger.info(
+                "category_filter_confirmation_adjudicated | resolved=%s | confidence=%r | keep=%s | discard=%s | updates=%s | reasoning=%r",
+                field_decision.resolved,
+                field_decision.confidence,
+                field_decision.keep_fields,
+                field_decision.discard_fields,
+                field_decision.updates,
+                field_decision.reasoning,
+            )
+            if field_decision.resolved and field_decision.confidence in {"medium", "high"}:
+                keep = set(field_decision.keep_fields) & set(carry_filters)
+                discard = set(field_decision.discard_fields) & set(carry_filters)
+                for key in keep:
+                    metadata_filters[key] = carry_filters[key]
+                for key, value in field_decision.updates.items():
+                    if key not in _COMMON_CATEGORY_FILTERS:
+                        continue
+                    sanitized = _canonicalize_adjudicated_metadata(
+                        key=key, value=value, category=None
+                    )
+                    if sanitized:
+                        clean_key, clean_value = sanitized
+                        metadata_filters[clean_key] = clean_value
+                addressed = keep | discard | (set(field_decision.updates) & set(carry_filters))
+                remaining = {
+                    key: value for key, value in carry_filters.items() if key not in addressed
+                }
+                if remaining:
+                    question = _category_filter_confirmation_text(
+                        remaining, str(pending_category_change.get("new_category") or category_before)
+                    )
+                    pending_category_change["carry_filters"] = remaining
+                    pending_category_change["question"] = question
+                    return {
+                        **state,
+                        "metadata_filters_collected": metadata_filters,
+                        "pending_category_change": pending_category_change,
+                        "assistant_text": question,
+                        "awaiting_slot": _CATEGORY_FILTER_CONFIRMATION_SLOT,
+                        "pending_questions": [],
+                        "mind_decision": {**decision, "action": "respond"},
+                    }
+                confirmation = False
+            else:
+                reply = _question_turn_fallback_reply(question, latest_message)
+                return {
+                    **state,
+                    "assistant_text": f"{reply}\n\n{question}" if reply else question,
+                    "awaiting_slot": _CATEGORY_FILTER_CONFIRMATION_SLOT,
+                    "pending_questions": [],
+                    "mind_decision": {**decision, "action": "respond"},
+                }
+        if confirmation:
+            for key, value in carry_filters.items():
+                if key not in metadata_filters:
+                    metadata_filters[key] = value
+        state = {**state, "pending_category_change": None}
+        awaiting_slot = None
+        decision["action"] = "ask_next_question"
     latest_message_resolution = resolve_category_from_text(latest_message)
     category_needs_clarification = bool(state.get("category_needs_clarification"))
     category_clarification_key = str(state.get("category_clarification_key") or "").strip() or None
@@ -4071,19 +4350,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             or category_clarification_key
         )
     category_proposed = decision.get("trailer_category") or category_before
-    category_locked_pre_results = bool(category_before) and not bool(
-        state.get("has_shown_search_results")
-    )
-    if category_locked_pre_results and category_proposed and category_proposed != category_before:
-        logger.info(
-            "category_change_blocked_pre_results | current_category=%r | proposed_category=%r | has_shown_search_results=%s",
-            category_before,
-            category_proposed,
-            state.get("has_shown_search_results"),
-        )
-        category = category_before
-    else:
-        category = category_proposed
+    category = category_proposed
 
     category_changed = bool(category_before and category and category != category_before)
     make_changed = False
@@ -4094,12 +4361,59 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             category_before,
             category,
         )
+        old_common_filters = {
+            key: metadata_filters_before[key]
+            for key in _COMMON_CATEGORY_FILTERS
+            if metadata_filters_before.get(key) not in (None, "")
+            and key not in defaulted_metadata_filters
+        }
         slots = {}
         slots_skipped = set()
         metadata_filters = {}
+        defaulted_metadata_filters = set()
         requested_non_metadata_features = []
         awaiting_slot = None
         reset_result_state = True
+        explicit_slots, explicit_metadata, _explicit_features = _apply_explicit_filter_extraction(
+            state=state,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=None,
+            apply_slot_updates=True,
+        )
+        slots.update(explicit_slots)
+        carry_filters = {
+            key: value for key, value in old_common_filters.items() if key not in explicit_metadata
+        }
+        if carry_filters:
+            question = _category_filter_confirmation_text(carry_filters, category)
+            decision["action"] = "respond"
+            return {
+                **state,
+                "trailer_category": category,
+                "pending_category_change": {
+                    "old_category": category_before,
+                    "new_category": category,
+                    "carry_filters": carry_filters,
+                    "question": question,
+                },
+                "slots_collected": slots,
+                "slots_skipped": [],
+                "metadata_filters_collected": metadata_filters,
+                "defaulted_metadata_filters": [],
+                "requested_non_metadata_features": [],
+                "active_search_request_text": latest_message,
+                "make_category_options": [],
+                "awaiting_slot": _CATEGORY_FILTER_CONFIRMATION_SLOT,
+                "pending_questions": [],
+                "asked_questions": [],
+                "already_shown_listing_urls": [],
+                "last_listings": [],
+                "assistant_text": question,
+                "mind_decision": decision,
+            }
 
     make_category_options = list(state.get("make_category_options") or [])
     if _catalogue_redirect_allowed(
@@ -4353,6 +4667,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     active_qna_question = str(active_qna_definition.get("question") or "").strip()
     active_qna_unanswered = False
     active_qna_reply = ""
+    active_qna_counter_topic = "none"
     active_qna_email_action = "none"
     active_qna_faq_category: str | None = None
     active_qna_faq_summary: str | None = None
@@ -4375,14 +4690,17 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             make_category_options=make_category_options,
         )
         logger.info(
-            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | email_action=%r | confidence=%r | reason=%r",
+            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | counter_topic=%r | reply=%r | email_action=%r | confidence=%r | reason=%r",
             active_qna_slot,
             question_turn.answered_active_question,
             question_turn.no_preference_for_active_question,
+            question_turn.counter_question_topic,
+            question_turn.reply_to_user,
             question_turn.email_action,
             question_turn.confidence,
             question_turn.reason,
         )
+        active_qna_counter_topic = question_turn.counter_question_topic
         active_qna_email_action = question_turn.email_action
         active_qna_faq_category = question_turn.faq_category
         active_qna_faq_summary = question_turn.faq_summary
@@ -4637,6 +4955,26 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         if pre_generic_tool_state is not None:
             return pre_generic_tool_state
 
+    product_counter_topics = {"trailer_categories", "hitch_types", "makes", "dimensions", "payload"}
+    if (
+        decision.get("action") == "send_non_sales_faq_email"
+        and active_qna_counter_topic in product_counter_topics
+    ):
+        logger.info(
+            "product_counter_question_overrides_faq | topic=%r | faq_category=%r",
+            active_qna_counter_topic,
+            decision.get("faq_category"),
+        )
+        decision["action"] = "respond"
+        if active_qna_reply:
+            decision["assistant_text"] = active_qna_reply
+    if decision.get("action") == "send_non_sales_faq_email" and decision.get("faq_category") not in FAQ_CATEGORY_LABELS:
+        logger.info(
+            "faq_action_rejected_missing_category | faq_category=%r | user_message=%r",
+            decision.get("faq_category"),
+            latest_message,
+        )
+        decision["action"] = "respond"
     current_action = decision.get("action") or "respond"
     tool_action_requested = current_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}
 
@@ -4698,7 +5036,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         }
 
     _apply_aluminum_base_category_filter(category, slots, metadata_filters)
-    _apply_flatbed_default_width(category, slots, metadata_filters)
+    _apply_flatbed_default_width(category, slots, metadata_filters, defaulted_metadata_filters)
 
     haul_classification = classify_haul_requirements(
         category=category,
@@ -4712,6 +5050,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         slots=slots,
         metadata_filters=metadata_filters,
         classification=haul_classification,
+        defaulted_fields=defaulted_metadata_filters,
     )
     if awaiting_slot and awaiting_slot in slots:
         awaiting_slot = None
@@ -4810,6 +5149,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     elif active_qna_slot and action == "send_interested_listing_email":
         action = "respond"
         decision["action"] = action
+    if action == "send_non_sales_faq_email" and decision.get("faq_category") not in FAQ_CATEGORY_LABELS:
+        logger.info(
+            "faq_action_rejected_after_qna | faq_category=%r | counter_topic=%r",
+            decision.get("faq_category"),
+            active_qna_counter_topic,
+        )
+        action = "respond"
+        decision["action"] = action
+        if active_qna_reply:
+            decision["assistant_text"] = active_qna_reply
     make_only_complete = bool(metadata_filters.get("make")) and not category and not make_only_missing
     generic_no_category_complete = (
         _generic_category_no_preference_active(slots_skipped)
@@ -4934,6 +5283,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "slots_collected": slots,
         "slots_skipped": sorted(slots_skipped),
         "metadata_filters_collected": metadata_filters,
+        "defaulted_metadata_filters": sorted(defaulted_metadata_filters),
         "requested_non_metadata_features": requested_non_metadata_features,
         "active_search_request_text": active_search_request_text,
         "make_category_options": make_category_options,
@@ -4959,7 +5309,11 @@ def _route_after_mind(state: ChatbotState) -> str:
         return "send_non_sales_faq_email"
     if action == "send_escalation_alert_email":
         return "send_escalation_alert_email"
-    return END
+    return "finalize_active_question"
+
+
+def _finalize_active_question_node(state: ChatbotState) -> ChatbotState:
+    return {**state, "active_question_text": _active_question_followup(state) or None}
 
 
 def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
@@ -5057,8 +5411,7 @@ def _interest_email_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "assistant_text": (
-                "Would you like to share your phone number or email address so our team can "
-                f"follow up with you about your interest in {title}?"
+                _missing_contact_request(state, f"your interest in {title}")
             ),
             "pending_contact_action": {
                 "type": "interest",
@@ -5097,23 +5450,28 @@ def _interest_email_node(state: ChatbotState) -> ChatbotState:
     events.append({"tool": "send_interested_listing_email", "result": result})
     return {
         **state,
-        "assistant_text": assistant_text,
+        "assistant_text": _append_active_question_if_present(state, assistant_text),
         "tool_events": events,
     }
 
 
 def _faq_email_node(state: ChatbotState) -> ChatbotState:
     decision = state.get("mind_decision") or {}
-    category = (decision.get("faq_category") or "contact_human").strip().lower()
+    category = str(decision.get("faq_category") or "").strip().lower()
     if category not in FAQ_CATEGORY_LABELS:
-        category = "contact_human"
+        logger.warning("faq_email_blocked_invalid_category | category=%r", category)
+        return {
+            **state,
+            "assistant_text": str(decision.get("assistant_text") or "").strip()
+            or "I can help with that here. Could you clarify what information you need?",
+        }
     summary = FAQ_CATEGORY_LABELS[category]
     if not _has_contact(state):
         events = list(state.get("tool_events") or [])
         events.append({"tool": "send_non_sales_faq_email", "result": {"status": "deferred_missing_contact"}})
         return {
             **state,
-            "assistant_text": _append_active_question_if_present(state, _optional_contact_request(summary.lower())),
+            "assistant_text": _missing_contact_request(state, summary.lower()),
             "pending_contact_action": {
                 "type": "faq",
                 "faq_category": category,
@@ -5174,7 +5532,7 @@ def _escalation_email_node(state: ChatbotState) -> ChatbotState:
         events.append({"tool": "send_escalation_alert_email", "result": {"status": "deferred_missing_contact"}})
         return {
             **state,
-            "assistant_text": _append_active_question_if_present(state, _ESCALATION_CONTACT_REQUEST),
+            "assistant_text": _missing_contact_request(state, "this request"),
             "pending_contact_action": {
                 "type": "escalation_alert",
                 "summary": summary,
@@ -5211,11 +5569,13 @@ def build_chatbot_graph():
     graph.add_node("send_interested_listing_email", _interest_email_node)
     graph.add_node("send_non_sales_faq_email", _faq_email_node)
     graph.add_node("send_escalation_alert_email", _escalation_email_node)
+    graph.add_node("finalize_active_question", _finalize_active_question_node)
     graph.set_entry_point("mind")
     graph.add_edge("mind", "apply_mind")
     graph.add_conditional_edges("apply_mind", _route_after_mind)
-    graph.add_edge("pinecone_search", END)
-    graph.add_edge("send_interested_listing_email", END)
-    graph.add_edge("send_non_sales_faq_email", END)
-    graph.add_edge("send_escalation_alert_email", END)
+    graph.add_edge("pinecone_search", "finalize_active_question")
+    graph.add_edge("send_interested_listing_email", "finalize_active_question")
+    graph.add_edge("send_non_sales_faq_email", "finalize_active_question")
+    graph.add_edge("send_escalation_alert_email", "finalize_active_question")
+    graph.add_edge("finalize_active_question", END)
     return graph.compile()

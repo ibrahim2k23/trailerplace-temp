@@ -776,6 +776,42 @@ def test_category_change_clears_old_filters_and_slots(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_category_change_confirms_only_old_common_filters(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I am looking for a 20 ft livestock trailer", category="Livestock")
+    state["trailer_category"] = "Utility"
+    state["slots_collected"] = {"haul_item": "mower"}
+    state["metadata_filters_collected"] = {
+        "length_ft": "12 ft",
+        "width_ft": "7 ft",
+        "payload_lbs": "5000 lbs",
+        "hitch_type": "gooseneck",
+        "color": "black",
+    }
+
+    changed = graph._apply_mind_node(state)
+
+    assert changed["trailer_category"] == "Livestock"
+    assert changed["metadata_filters_collected"] == {"length_ft": "20 ft"}
+    assert changed["pending_category_change"]["carry_filters"] == {
+        "width_ft": "7 ft",
+        "payload_lbs": "5000 lbs",
+        "hitch_type": "gooseneck",
+    }
+    assert "length" not in changed["assistant_text"].split("previous", 1)[-1]
+
+    changed["user_message"] = "yes"
+    changed["mind_decision"] = {"action": "respond", "trailer_category": "Livestock"}
+    kept = graph._apply_mind_node(changed)
+
+    assert kept["pending_category_change"] is None
+    assert kept["metadata_filters_collected"]["length_ft"] == "20 ft"
+    assert kept["metadata_filters_collected"]["width_ft"] == "7 ft"
+    assert kept["metadata_filters_collected"]["payload_lbs"] == "5000 lbs"
+    assert kept["metadata_filters_collected"]["hitch_type"] == "gooseneck"
+    assert "color" not in kept["metadata_filters_collected"]
+
+
 def test_llm_field_updates_accept_24_ft_cattle_with_requested_feature(monkeypatch):
     _mock_field_updates(
         monkeypatch,

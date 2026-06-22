@@ -22,11 +22,14 @@ class ChatbotState(TypedDict, total=False):
     contact_status: str
     sales_phase: str
     trailer_category: Optional[str]
+    pending_category_change: Optional[dict[str, Any]]
+    pending_category_suggestion: Optional[dict[str, Any]]
     category_needs_clarification: bool
     category_clarification_key: Optional[str]
     slots_collected: dict[str, Any]
     slots_skipped: list[str]
     metadata_filters_collected: dict[str, Any]
+    defaulted_metadata_filters: list[str]
     requested_non_metadata_features: list[str]
     make_category_options: list[str]
     awaiting_slot: Optional[str]
@@ -42,4 +45,7 @@ class ChatbotState(TypedDict, total=False):
     active_category_cycle_id: int
     initial_contact_request_asked: bool
     pending_contact_action: Optional[dict[str, Any]]
+    pending_contact_actions: list[dict[str, Any]]
+    active_question_text: Optional[str]
+    active_question_tracker: Optional[dict[str, Any]]
     pending_initial_user_message: Optional[str]

@@ -58,6 +58,7 @@ _SYNONYMS: dict[str, list[str]] = {
     ],
     "Livestock": [
         "livestock",
+        "live stock",
         "galyean",
         "star trailer",
         "calico trailer",
@@ -139,7 +140,7 @@ def resolve_category_clarification_answer(text: str, clarification_key: str | No
 
 
 def category_prompt_block() -> str:
-    lines = ["Canonical trailer categories and disambiguation terms:"]
+    lines = ["The following are the trailer categories and the terms/synonyms which map to the respective category if a user mentions them partially or makes a mistake while typing the name, you should still correctly identify the category:"]
     for category in CANONICAL_CATEGORIES:
         terms = ", ".join(_SYNONYMS.get(category, []))
         lines.append(f"- {category}: {terms}")

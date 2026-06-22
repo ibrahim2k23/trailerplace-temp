@@ -75,9 +75,10 @@ _RESULT_NAV_CONFUSION_REPEAT_THRESHOLD = 3
 _CONFUSION_HISTORY_WINDOW = 6
 _CONFUSION_SCORE_THRESHOLD = 85
 _CONFUSION_SIMILARITY_THRESHOLD = 0.86
+_UNANSWERED_QUESTION_REPEAT_THRESHOLD = 2
 _CONTACT_ONLY_ACK = (
     "Thanks for sharing your contact details. I've saved them. "
-    "Let me know if you need help with anything else."
+    "How can I help you today?"
 )
 _INITIAL_CONTACT_REQUEST = (
     "Thank you for contacting TrailerPlace. Before we get started, could I get your name, "
@@ -103,6 +104,8 @@ class ConfusionDetectionDecision(BaseModel):
 class ContactPromptReplyDecision(BaseModel):
     action: Literal[
         "answer_contact_question",
+        "acknowledge_contact_details",
+        "decline_contact_details",
         "resume_saved_request",
         "route_latest_request",
     ] = "resume_saved_request"
@@ -178,11 +181,14 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "messages": [],
         "active_search_request_text": "",
         "trailer_category": None,
+        "pending_category_change": None,
+        "pending_category_suggestion": None,
         "category_needs_clarification": False,
         "category_clarification_key": None,
         "slots_collected": {},
         "slots_skipped": [],
         "metadata_filters_collected": {},
+        "defaulted_metadata_filters": [],
         "requested_non_metadata_features": [],
         "make_category_options": [],
         "awaiting_slot": None,
@@ -196,7 +202,11 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "confusion_escalated": False,
         "confusion_signal_count": 0,
         "initial_contact_request_asked": False,
+        "awaiting_initial_contact_reply": False,
         "pending_contact_action": None,
+        "pending_contact_actions": [],
+        "active_question_text": None,
+        "active_question_tracker": None,
         "pending_initial_user_message": None,
     }
 
@@ -371,16 +381,42 @@ def _extract_contact(message: str, current: dict[str, Any]) -> dict[str, Any]:
         result = _contact_llm().invoke(
             [
                 SystemMessage(
-                    content=(
-                        "Extract customer contact details from the message using natural language understanding. "
-                        "Return null for missing fields. Do not guess. "
-                        "Only extract a name when the user is clearly giving their personal name. "
-                        "Set name_confidence to high only for explicit self-identification such as "
-                        "'my name is Minahil', 'I am Minahil', 'Minahil here', or 'folks call me Tex'. "
-                        "Set name_confidence to none for sentence fragments, objections, questions, "
-                        "or trailer requests. "
-                        "Do not treat phrases like 'I'm looking for', 'I'm interested in', "
-                        "'I need', 'I want', 'I'm not comfortable', or 'why do you need them' as a name."
+                    content=("""
+                        Extract customer contact details from the current user message only.
+
+Return:
+
+* full_name: string or null
+* email: string or null
+* phone: string or null
+* name_confidence: "high", "medium", or "none"
+
+Rules:
+
+* Return null for missing fields.
+* Do not guess or use previous context.
+* Extract email and phone when clearly present.
+* Extract a name only if the user clearly gives a personal name or nickname.
+* Do not extract names from email usernames, greetings, trailer requests, trailer brands, product names, locations, objections, or questions.
+
+Name confidence:
+
+* Use "high" when the user explicitly identifies themselves.
+  Examples: "my name is Ibrahim", "I am Ibrahim", "I'm Ibrahim", "this is Ibrahim", "Ibrahim here", "call me Tex", "mera naam Ibrahim hai".
+* Use "medium" when a plausible standalone name or nickname appears with a phone/email.
+  Examples: "Ibrahim 03304388550", "Ibrahim, [ibrahim@example.com](mailto:ibrahim@example.com)", "Ali Khan - 03304388550", "Tex 03304388550"."Jon 1234567890".
+* Use "none" when no clear name is given.
+
+Examples:
+
+* "Ibrahim 03304388550" → full_name="Ibrahim", phone="03304388550", name_confidence="medium"
+* "My name is Ibrahim, 03304388550" → full_name="Ibrahim", phone="03304388550", name_confidence="high"
+* "I need a trailer, 03304388550" → full_name=null, phone="03304388550", name_confidence="none"
+* "I'm looking for car haulers, [ibrahim@example.com](mailto:ibrahim@example.com)" → full_name=null, email="[ibrahim@example.com](mailto:ibrahim@example.com)", name_confidence="none"
+* "Do you have Big Tex trailers? 03304388550" → full_name=null, phone="03304388550", name_confidence="none"
+
+When unsure, do not extract a name.
+"""
                     )
                 ),
                 HumanMessage(
@@ -544,7 +580,7 @@ def _initial_contact_request_text(session: dict[str, Any]) -> str:
     elif len(missing) == 2:
         fields = f"your {missing[0]} and {missing[1]}"
     else:
-        fields = f"your {missing[0]}"
+        fields = "your email and phone number (either one is enough)" if missing[0] == "email or phone number" else f"your {missing[0]}"
     return (
         "Thank you for contacting TrailerPlace. Before we get started, could I get "
         f"{fields}? Sharing contact details is optional, and I can still help with your trailer search."
@@ -584,20 +620,22 @@ def _contact_explanation_text() -> str:
 
 def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str) -> ContactPromptReplyDecision:
     pending = str(session.get("pending_initial_user_message") or "").strip()
-    if not pending:
-        return ContactPromptReplyDecision(action="route_latest_request", reason="No saved request.")
     try:
         result = _contact_prompt_reply_llm().invoke(
             [
                 SystemMessage(
                     content=(
-                        "The assistant previously asked for optional contact details after saving "
-                        "the customer's original request. Decide the next action.\n"
+                        "The customer has just replied to an optional contact request or supplied contact details "
+                        "for the first time. Decide the next action.\n"
                         "Return action=answer_contact_question when the latest reply asks why contact "
                         "details are needed, how they will be used, or whether they are required.\n"
+                        "Return action=acknowledge_contact_details when the latest reply primarily supplies "
+                        "the requested name plus phone number or email and there is no saved original request. "
+                        "Never acknowledge name-only or phone/email-only details as complete; those are partial contact replies.\n"
+                        "Return action=decline_contact_details when the user declines or skips contact details "
+                        "and does not make another actionable request.\n"
                         "Return action=resume_saved_request when the latest reply is only providing "
-                        "contact details, declining/skipping contact details, or is unclear/ambiguous "
-                        "after the contact prompt.\n"
+                        "or declining contact details and a saved original request should now resume.\n"
                         "Return action=route_latest_request only when the latest reply contains a "
                         "clear new actionable trailer, store, financing, service, parts, trade-in, "
                         "human-contact, or inventory request that should replace the saved request.\n"
@@ -607,6 +645,7 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
                 HumanMessage(
                     content=(
                         f"Saved original request: {pending!r}\n"
+                        f"Contact now stored: {_has_contact(session)!r}\n"
                         f"Latest user reply after optional contact prompt: {latest_message!r}"
                     )
                 ),
@@ -614,8 +653,12 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
         )
         decision = _model_dump(result)
         action = str(decision.get("action") or "resume_saved_request")
-        if action not in {"answer_contact_question", "resume_saved_request", "route_latest_request"}:
-            action = "resume_saved_request"
+        allowed = {
+            "answer_contact_question", "acknowledge_contact_details", "decline_contact_details",
+            "resume_saved_request", "route_latest_request",
+        }
+        if action not in allowed:
+            action = "route_latest_request"
         logger.info(
             "contact_prompt_reply_decision | action=%s | reason=%r",
             action,
@@ -623,12 +666,8 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
         )
         return ContactPromptReplyDecision(action=action, reason=str(decision.get("reason") or ""))
     except Exception:
-        logger.exception("Contact prompt reply LLM failed; using regex fallback")
-        if _is_contact_explanation_question(latest_message):
-            return ContactPromptReplyDecision(action="answer_contact_question", reason="Regex fallback contact question.")
-        if _has_actionable_intent(latest_message) and not _is_contact_refusal(latest_message):
-            return ContactPromptReplyDecision(action="route_latest_request", reason="Regex fallback actionable request.")
-        return ContactPromptReplyDecision(action="resume_saved_request", reason="Regex fallback resume saved request.")
+        logger.exception("Contact prompt reply LLM failed; routing latest message")
+        return ContactPromptReplyDecision(action="route_latest_request", reason="LLM unavailable.")
 
 
 def _should_resume_pending_after_contact_ask(session: dict[str, Any], latest_message: str) -> bool:
@@ -725,7 +764,7 @@ def _append_active_question_if_present(session: dict[str, Any], text: str) -> st
     return base
 
 
-def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None:
+def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None:
     action = session.get("pending_contact_action")
     if not action or not _has_contact(session):
         return None
@@ -762,10 +801,7 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
         )
         logger.info("deferred_contact_action_sent | type=faq | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return _append_active_question_if_present(
-            session,
-            "Thanks, I saved your contact information and sent that request to our team so they can help.",
-        )
+        return "Thanks, I saved your contact information and sent that request to our team so they can help."
     if action_type == "escalation_alert":
         _persist_email_transcript_snapshot(session)
         result = send_escalation_alert_email(
@@ -779,9 +815,33 @@ def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None
         )
         logger.info("deferred_contact_action_sent | type=escalation_alert | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return _append_active_question_if_present(session, _ESCALATION_SENT_REPLY)
+        return _ESCALATION_SENT_REPLY
     session["pending_contact_action"] = None
     return None
+
+
+def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None:
+    actions = list(session.get("pending_contact_actions") or [])
+    legacy = session.get("pending_contact_action")
+    if legacy and legacy not in actions:
+        actions.append(legacy)
+    if not actions or not _has_contact(session):
+        return None
+    session["pending_contact_actions"] = []
+    session["pending_contact_action"] = None
+    replies: list[str] = []
+    for action in actions:
+        session["pending_contact_action"] = action
+        reply = _send_one_pending_contact_action_if_ready(session)
+        if reply and reply not in replies:
+            replies.append(reply)
+    combined = "\n\n".join(replies) if replies else None
+    if combined:
+        combined = _append_active_question_if_present(session, combined)
+    tracker = dict(session.get("active_question_tracker") or {})
+    if combined and tracker.get("confusion_sent"):
+        combined = _strip_repeated_question(combined, str(tracker.get("question") or ""))
+    return combined
 
 
 def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
@@ -970,7 +1030,7 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     LLM-first routing for the main phase.
     This prevents regex misses (for example "I like the 4th one") from falling into smalltalk.
     """
-    if _is_contact_only_message(user_message):
+    if not _has_contact(session) and _is_contact_only_message(user_message):
         return False
 
     if session.get("awaiting_slot") or session.get("pending_questions"):
@@ -1261,8 +1321,8 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
             "context_summary": _email_context_summary(session),
         }
         assistant_text = (
-            "I can have our sales team help with this. Could you please share your phone number "
-            "or email address so they can contact you?"
+            "I can have our sales team help with this. Could you please share your name and either "
+            "your phone number or email address so they can contact you?"
         )
     elif not session.get("confusion_escalated"):
         _persist_email_transcript_snapshot(session)
@@ -1298,6 +1358,41 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
         main_prior_messages=session.get("messages") or [],
         listings=[],
     )
+
+
+def _update_active_question_tracker(session: dict[str, Any], result: dict[str, Any]) -> bool:
+    question = str(result.get("active_question_text") or "").strip()
+    slot = str(result.get("awaiting_slot") or "").strip()
+    displayed = bool(question and question in str(result.get("assistant_text") or ""))
+    previous = dict(session.get("active_question_tracker") or {})
+    same_question = bool(
+        question and slot and previous.get("slot") == slot and previous.get("question") == question
+    )
+    if not question or not slot:
+        session["active_question_tracker"] = None
+        return False
+    previous_count = int(previous.get("ask_count") or 0) if same_question else 0
+    already_escalated = bool(previous.get("confusion_sent")) if same_question else False
+    should_escalate = bool(
+        displayed
+        and same_question
+        and previous_count >= _UNANSWERED_QUESTION_REPEAT_THRESHOLD
+        and not already_escalated
+    )
+    session["active_question_tracker"] = {
+        "slot": slot,
+        "question": question,
+        "ask_count": previous_count + (1 if displayed else 0),
+        "confusion_sent": already_escalated or should_escalate,
+    }
+    return should_escalate
+
+
+def _strip_repeated_question(text: str, question: str) -> str:
+    value = str(text or "").strip()
+    if not question:
+        return value
+    return value.replace(f"\n\n{question}", "").replace(question, "").strip()
 
 
 def _conversation_payload(session: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1431,11 +1526,14 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "sales_phase": "main",
         "active_search_request_text": session.get("active_search_request_text") or "",
         "trailer_category": session.get("trailer_category"),
+        "pending_category_change": deepcopy(session.get("pending_category_change")),
+        "pending_category_suggestion": deepcopy(session.get("pending_category_suggestion")),
         "category_needs_clarification": bool(session.get("category_needs_clarification")),
         "category_clarification_key": session.get("category_clarification_key"),
         "slots_collected": deepcopy(session.get("slots_collected") or {}),
         "slots_skipped": list(session.get("slots_skipped") or []),
         "metadata_filters_collected": deepcopy(session.get("metadata_filters_collected") or {}),
+        "defaulted_metadata_filters": list(session.get("defaulted_metadata_filters") or []),
         "requested_non_metadata_features": list(session.get("requested_non_metadata_features") or []),
         "make_category_options": list(session.get("make_category_options") or []),
         "awaiting_slot": session.get("awaiting_slot"),
@@ -1450,6 +1548,9 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "active_category_cycle_id": int(session.get("active_category_cycle_id") or 1),
         "initial_contact_request_asked": bool(session.get("initial_contact_request_asked")),
         "pending_contact_action": deepcopy(session.get("pending_contact_action")),
+        "pending_contact_actions": deepcopy(session.get("pending_contact_actions") or []),
+        "active_question_text": session.get("active_question_text"),
+        "active_question_tracker": deepcopy(session.get("active_question_tracker")),
         "pending_initial_user_message": session.get("pending_initial_user_message"),
     }
     return build_chatbot_graph().invoke(graph_state)
@@ -1457,11 +1558,13 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
 
 def _reset_search_state_for_category_switch(session: dict[str, Any], old_category: str, new_category: str) -> None:
     session["trailer_category"] = None
+    session["pending_category_change"] = None
     session["category_needs_clarification"] = False
     session["category_clarification_key"] = None
     session["slots_collected"] = {}
     session["slots_skipped"] = []
     session["metadata_filters_collected"] = {}
+    session["defaulted_metadata_filters"] = []
     session["requested_non_metadata_features"] = []
     session["active_search_request_text"] = ""
     session["make_category_options"] = []
@@ -1490,14 +1593,27 @@ def _reset_search_state_for_category_switch(session: dict[str, Any], old_categor
 def handle_chat(request: ChatRequest) -> ChatResponse:
     session = _get_session(request.session_id)
     _ensure_lead(session)
+    had_contact_before_turn = _has_contact(session)
     session["messages"].append({"role": "user", "content": request.message})
-    had_pending_contact_action = bool(session.get("pending_contact_action"))
-    _apply_contact_from_request_and_message(session, request)
+    was_awaiting_initial_contact = bool(session.get("awaiting_initial_contact_reply"))
+    had_pending_contact_action = bool(
+        session.get("pending_contact_action") or session.get("pending_contact_actions")
+    )
+    contact_changed_this_turn = _apply_contact_from_request_and_message(session, request)
+    contact_became_available = not had_contact_before_turn and _has_contact(session)
     session["sales_phase"] = "main"
 
     deferred_text = _send_pending_contact_action_if_ready(session)
     if deferred_text:
         assistant_text = deferred_text
+        _update_active_question_tracker(
+            session,
+            {
+                "active_question_text": session.get("active_question_text"),
+                "awaiting_slot": session.get("awaiting_slot"),
+                "assistant_text": assistant_text,
+            },
+        )
         session["messages"].append({"role": "assistant", "content": assistant_text})
         _persist(session)
         _log_chat_turn(request.session_id, request.message, assistant_text)
@@ -1522,6 +1638,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         and not _has_full_initial_details(session)
     ):
         session["initial_contact_request_asked"] = True
+        session["awaiting_initial_contact_reply"] = True
         if _should_save_initial_message_for_resume(request.message):
             session["pending_initial_user_message"] = request.message
         assistant_text = _initial_contact_request_text(session)
@@ -1539,17 +1656,63 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             main_prior_messages=session.get("messages") or [],
             listings=[],
         )
-    if had_pending_contact_action and not _has_contact(session):
-        session["pending_contact_action"] = None
-
     pending_initial = str(session.get("pending_initial_user_message") or "").strip()
     contact_reply_action: str | None = None
     contact_reply_latest_message = ""
     contact_reply_saved_request = ""
-    if pending_initial:
+    if was_awaiting_initial_contact or contact_became_available:
+        session["awaiting_initial_contact_reply"] = False
         contact_reply_decision = _classify_contact_prompt_reply(session, request.message)
+        if contact_changed_this_turn and not _has_contact(session):
+            session["awaiting_initial_contact_reply"] = True
+            assistant_text = _initial_contact_request_text(session)
+            session["messages"].append({"role": "assistant", "content": assistant_text})
+            _persist(session)
+            _log_chat_turn(request.session_id, request.message, assistant_text)
+            return ChatResponse(
+                assistant_text=assistant_text,
+                sales_phase="main",
+                onboarding_api_messages=request.onboarding_api_messages,
+                customer_full_name=session.get("customer_full_name"),
+                customer_email=session.get("customer_email") or "",
+                customer_phone=session.get("customer_phone"),
+                contact_status=session.get("contact_status"),
+                main_prior_messages=session.get("messages") or [],
+                listings=[],
+            )
+        if pending_initial and contact_reply_decision.action in {
+            "acknowledge_contact_details", "decline_contact_details"
+        }:
+            contact_reply_decision.action = "resume_saved_request"
         session["pending_initial_user_message"] = None
-        if contact_reply_decision.action in {"answer_contact_question", "resume_saved_request"}:
+        if not pending_initial and contact_reply_decision.action in {
+            "acknowledge_contact_details", "decline_contact_details", "answer_contact_question"
+        }:
+            if contact_reply_decision.action == "acknowledge_contact_details":
+                assistant_text = (
+                    _CONTACT_ONLY_ACK
+                    if _has_contact(session)
+                    else _initial_contact_request_text(session)
+                )
+            elif contact_reply_decision.action == "answer_contact_question":
+                assistant_text = _contact_explanation_text()
+            else:
+                assistant_text = "No problem—you do not have to share contact details. How can I help?"
+            session["messages"].append({"role": "assistant", "content": assistant_text})
+            _persist(session)
+            _log_chat_turn(request.session_id, request.message, assistant_text)
+            return ChatResponse(
+                assistant_text=assistant_text,
+                sales_phase="main",
+                onboarding_api_messages=request.onboarding_api_messages,
+                customer_full_name=session.get("customer_full_name"),
+                customer_email=session.get("customer_email") or "",
+                customer_phone=session.get("customer_phone"),
+                contact_status=session.get("contact_status"),
+                main_prior_messages=session.get("messages") or [],
+                listings=[],
+            )
+        if pending_initial and contact_reply_decision.action in {"answer_contact_question", "resume_saved_request"}:
             contact_reply_action = contact_reply_decision.action
             contact_reply_latest_message = request.message
             contact_reply_saved_request = pending_initial
@@ -1567,27 +1730,6 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 request.message,
             ),
         }
-    if (
-        not contact_reply_action
-        and not had_pending_contact_action
-        and _has_contact(session)
-        and _is_contact_only_message(request.message)
-    ):
-        assistant_text = _CONTACT_ONLY_ACK
-        session["messages"].append({"role": "assistant", "content": assistant_text})
-        _persist(session)
-        _log_chat_turn(request.session_id, request.message, assistant_text)
-        return ChatResponse(
-            assistant_text=assistant_text,
-            sales_phase="main",
-            onboarding_api_messages=request.onboarding_api_messages,
-            customer_full_name=session.get("customer_full_name"),
-            customer_email=session.get("customer_email") or "",
-            customer_phone=session.get("customer_phone"),
-            contact_status=session.get("contact_status"),
-            main_prior_messages=session.get("messages") or [],
-            listings=[],
-        )
     actionable_intent = _has_actionable_intent(effective_message)
 
     has_active_qualification_question = bool(session.get("awaiting_slot") or session.get("pending_questions"))
@@ -1631,38 +1773,6 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             listings=[],
         )
 
-    # Deterministic reset for explicit category switch, then let planner drive action.
-    resolution = resolve_category_from_text(effective_message)
-    new_category = resolution.category
-    current_category = session.get("trailer_category")
-    if new_category and current_category and new_category != current_category:
-        gate_open = bool(session.get("has_shown_search_results"))
-        logger.info(
-            "category_switch_candidate | session_id=%s | old_category=%r | new_category=%r | has_shown_search_results=%s | active_category_cycle_id=%s",
-            request.session_id,
-            current_category,
-            new_category,
-            gate_open,
-            session.get("active_category_cycle_id"),
-        )
-        if gate_open:
-            logger.info(
-                "category_switch_applied | session_id=%s | old_category=%r | new_category=%r | gate_before=true | active_category_cycle_id=%s",
-                request.session_id,
-                current_category,
-                new_category,
-                session.get("active_category_cycle_id"),
-            )
-            _reset_search_state_for_category_switch(session, current_category, new_category)
-        else:
-            logger.info(
-                "category_switch_ignored_pre_results | session_id=%s | old_category=%r | new_category=%r | active_category_cycle_id=%s",
-                request.session_id,
-                current_category,
-                new_category,
-                session.get("active_category_cycle_id"),
-            )
-
     result = _invoke_graph(
         context_session,
         effective_message,
@@ -1675,14 +1785,16 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         result.get("trailer_category"),
         json.dumps(result.get("tool_events") or [], default=str),
     )
-
     for key in (
         "trailer_category",
+        "pending_category_change",
+        "pending_category_suggestion",
         "category_needs_clarification",
         "category_clarification_key",
         "slots_collected",
         "slots_skipped",
         "metadata_filters_collected",
+        "defaulted_metadata_filters",
         "requested_non_metadata_features",
         "active_search_request_text",
         "make_category_options",
@@ -1692,9 +1804,18 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "already_shown_listing_urls",
         "last_listings",
         "pending_contact_action",
+        "pending_contact_actions",
+        "active_question_text",
     ):
         if key in result:
             session[key] = result[key]
+    pending_action = session.get("pending_contact_action")
+    if pending_action:
+        queued_actions = list(session.get("pending_contact_actions") or [])
+        if pending_action not in queued_actions:
+            queued_actions.append(pending_action)
+        session["pending_contact_actions"] = queued_actions
+    repeated_question_escalation = _update_active_question_tracker(session, result)
     tool_events = result.get("tool_events") or []
     if any(
         e.get("tool") == "pinecone_search" and int(e.get("result_count") or 0) > 0
@@ -1709,6 +1830,45 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             session.get("has_shown_search_results"),
         )
     assistant_text = (result.get("assistant_text") or "").strip() or " "
+    if repeated_question_escalation:
+        tracker = dict(session.get("active_question_tracker") or {})
+        question = str(tracker.get("question") or "")
+        assistant_text = _strip_repeated_question(assistant_text, question)
+        confusion_action = {
+            "type": "faq",
+            "faq_category": "contact_human",
+            "summary": "Customer did not answer the same qualification question after two follow-up attempts; sales follow-up requested.",
+            "user_message": request.message,
+            "context_summary": _email_context_summary(session),
+        }
+        if _has_contact(session):
+            _persist_email_transcript_snapshot(session)
+            send_non_sales_faq_email(
+                session_id=session.get("session_id") or "",
+                full_name=session.get("customer_full_name") or "",
+                email=session.get("customer_email"),
+                phone=session.get("customer_phone") or "",
+                faq_category="contact_human",
+                summary=confusion_action["summary"],
+                user_message=request.message,
+                context_summary=confusion_action["context_summary"],
+            )
+            notice = "I've also asked our sales team to follow up so they can help you move forward."
+        else:
+            queued_actions = list(session.get("pending_contact_actions") or [])
+            queued_actions.append(confusion_action)
+            session["pending_contact_actions"] = queued_actions
+            notice = "" if "share your name" in assistant_text.lower() else (
+                "To send these requests to our team, please share your name and either your phone number or email address."
+            )
+        if notice:
+            assistant_text = f"{assistant_text}\n\n{notice}" if assistant_text.strip() else notice
+        logger.info(
+            "repeated_unanswered_question_escalation | session_id=%s | awaiting_slot=%r | ask_count=%s",
+            request.session_id,
+            tracker.get("slot"),
+            tracker.get("ask_count"),
+        )
     if contact_reply_action:
         bridge = _contact_prompt_bridge_text(
             action=contact_reply_action,
