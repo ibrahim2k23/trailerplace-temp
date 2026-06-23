@@ -201,6 +201,7 @@ def _category_suggestion_prompt(payload: dict[str, Any], *, confirm_recommended:
 _SEARCH_PROMISE_RE = re.compile(
     r"\b(?:let me|i(?:'ll| will| can))\s+"
     r"(?:find|search|look|pull up|look up|show|recommend)\b[^.?!]*(?:trailers?|options?|listings?)?[^.?!]*(?:[.?!]|$)"
+    r"|\bi\s+can\s+help\s+you\s+(?:find|search|look|pull up|look up|show|recommend)\b[^.?!]*(?:trailers?|options?|listings?)?[^.?!]*(?:[.?!]|$)"
     r"|\bplease hold on\b[^.?!]*(?:[.?!]|$)",
     re.I,
 )
@@ -2459,8 +2460,6 @@ def _adjudicate_active_question_turn(
                 SystemMessage(
                     content=(
                         f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
-                        f"{category_prompt_block()}\n\n"
-                        f"{make_prompt_block()}\n\n"
                         "You evaluate the latest user turn while a trailer qualification question is active. "
                         "Return structured data only.\n"
                         "Determine whether the user answered the active question, explicitly said no preference, or did not answer it.\n"
@@ -2486,7 +2485,17 @@ def _adjudicate_active_question_turn(
                         "Do not set an email action for broad catalogue browsing; that should be answered with the website link elsewhere.\n"
                         "Never set send_interested_listing_email during active qualification.\n"
                         "Do not invent updates. Do not use listing evidence. Do not rewrite the active question. "
-                        "Use medium or high confidence only when clearly supported."
+                        "Use medium or high confidence only when clearly supported.\n\n"
+                        "TRAILER TYPES AND MAPPING TERMS:\n"
+                        "If a user mentions a synonym or term, map it to the canonical category even during the active QnA flow.\n"
+                        f"{category_prompt_block()}\n"
+                        "While mentioning a category, a user can make spelling mistakes. Infer the intended trailer type from the message when supported.\n\n"
+                        "EXTREMELY Important notes:\n"
+                        "1. When current_category is unknown and cannot be mapped with a trailer term/synonym, and the customer gives only an item/use case to haul, respond with 2 or 3 suitable canonical trailer types, each with a very short practical description, then ask which trailer type they prefer. Do not ask dimensions/features before trailer type is chosen.\n"
+                        "2. When current_category is unknown, the customer must ultimately choose or confirm the trailer type before inventory search.\n"
+                        "3. During active QnA, the user can change category preference. If they do, set category_update to the new canonical category and preserve any latest-message field updates that still apply.\n\n"
+                        "TRAILER BRANDS/MAKES: use only to educate the user when they ask what brands/makes are available; do not use them to infer category.\n"
+                        f"{make_prompt_block()}\n"
                     )
                 ),
                 HumanMessage(content=_safe_json(context)),
@@ -3762,7 +3771,7 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         return {**state, "mind_decision": _model_dump(decision)}
 
     recommended_candidate = decision.trailer_category or decision.recommended_category
-    if not recommended_candidate and decision.category_recommendations:
+    if not state.get("trailer_category") and not recommended_candidate and decision.category_recommendations:
         recommendations = [
             item for item in (decision.category_recommendations or [])
             if isinstance(item, dict) and str(item.get("category") or "").strip() in CANONICAL_CATEGORIES
@@ -3785,6 +3794,7 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             }
     if (
         recommended_candidate
+        and not state.get("trailer_category")
         and resolution.category != recommended_candidate
         and decision.category_resolution_kind != "explicit"
     ):

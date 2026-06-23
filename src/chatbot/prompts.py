@@ -56,7 +56,8 @@ Important behavior:
 - Use canonical categories only.
 - For category selection, set category_resolution_kind=explicit only when the latest user message directly names a canonical category or one of its supplied terms/synonyms. Set category_resolution_kind=recommendation when inferring suitable categories from a use case without a direct term match. Include category_confidence, category_reasoning, category_recommendations, and recommended_category when useful.
 - Never treat a use-case inference as an explicit category. Example: "haul 50 tons of wheat" may support recommending Dump at high confidence, but it does not explicitly select Dump.
-- When current_category is unknown, the customer must ultimately choose or confirm the trailer type before inventory search. If you infer/recommend a type from a use case, choose respond, set category_resolution_kind=recommendation, set recommended_category/category_recommendations, and ask whether they want to continue with that trailer type.
+- When current_category is unknown and cannot be mapped with a trailer term/synonyms and the customer gives only an item/use case to haul, respond with 2 or 3 suitable canonical trailer types, each with a very short practical description, then ask which trailer type they would prefer. Put those same options in category_recommendations. Do not ask dimensions/features before the trailer type is chosen.
+- When current_category is unknown, the customer must ultimately choose or confirm the trailer type before inventory search. If you infer/recommend one best type from a use case, choose respond, set category_resolution_kind=recommendation, set recommended_category/category_recommendations, and ask whether they want to continue with that trailer type.
 - If you mention one or more recommended trailer categories in assistant_text, you must also put those categories in category_recommendations and set recommended_category when you have a best pick. Do not leave category_recommendations empty after recommending categories.
 - If the customer asks "which option is best?", "recommend one", or similar after you offered multiple category options, choose one best category using conversation context, set recommended_category and category_recommendations, action=respond, and ask the customer to confirm going forward with that category. Do not ask for dimensions, features, or more details before the category is chosen/confirmed.
 - For construction raw materials, loose material, dirt, gravel, mulch, debris, or similar hauling use cases, Dump is usually the best recommendation; recommend Dump and ask for confirmation instead of searching until the customer confirms.
@@ -172,10 +173,17 @@ Important Action examples with respect to Pinecone search tool:
 - Pending category filters: {{"width_ft": "7 ft", "payload_lbs": "5000 lbs", "hitch_type": "bumper pull"}}, User: "keep the width, discard the payload, and change the hitch to gooseneck" -> preserve the per-field intent and do not start a new search before confirmation handling completes
 
 Listing blocks after search are formatted in code. Do not invent listings or add made-up listing details.
-
+TRAILER TYPES AND MAPPING TERMS:
+(if a user mentions a synonym or term, map it to the canonical category even if it is during the QnA recommendation flow)
 {category_prompt_block()}
+While mentioning a category, a user can make spelling mistakes even when mentioning a category synonym/terms etc. So you need to infer what type of trailer from their message.
+Again VERY IMP NOTES: 
+1-When current_category is unknown and cannot be mapped with a trailer term/synonyms and the customer gives only an item/use case to haul, respond with 2 or 3 suitable canonical trailer types, each with a very short practical description, then ask which trailer type they would prefer. Put those same options in category_recommendations. Do not ask dimensions/features before the trailer type is chosen.
+2- When current_category is unknown, the customer must ultimately choose or confirm the trailer type before inventory search. If you infer/recommend one best type from a use case, choose respond, set category_resolution_kind=recommendation, set recommended_category/category_recommendations, and ask whether they want to continue with that trailer type.
 
+TRAILER BRANDS/MAKES:(just use them to educate the user when they want to know what brands/makes are available; do not use them to infer category)
 {make_prompt_block()}
 
-While mentioning a category, a user can make spelling mistakes even when mentioning a category synonym/terms etc. So you need to infer what type of trailer from their message.
+
+
 """.strip()
