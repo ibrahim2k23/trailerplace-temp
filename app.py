@@ -771,6 +771,31 @@ components.html(
     [data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"]:active {{
       border: 0 !important; outline: 0 !important; box-shadow: none !important;
     }}
+    [data-testid="stChatInput"] textarea:disabled,
+    [data-testid="stChatInputTextArea"]:disabled,
+    [data-testid="stChatInputTextArea"] textarea:disabled,
+    [data-testid="stChatInput"]:has(textarea:disabled) textarea,
+    [data-testid="stChatInput"]:has(textarea:disabled) [data-testid="stChatInputTextArea"],
+    [data-testid="stChatInput"]:has(textarea:disabled) [data-baseweb="textarea"] {{
+      cursor: not-allowed !important;
+      opacity: 1 !important;
+      background: {_theme['surface']} !important;
+      background-color: {_theme['surface']} !important;
+      -webkit-text-fill-color: {_theme['muted']} !important;
+      color: {_theme['muted']} !important;
+    }}
+    [data-testid="stChatInput"]:has(textarea:disabled) > div {{
+      opacity: 1 !important;
+      background: {_theme['surface']} !important;
+      background-color: {_theme['surface']} !important;
+      cursor: not-allowed !important;
+      box-shadow: 0 12px 36px var(--tp-shadow) !important;
+    }}
+    [data-testid="stChatInput"]:has(textarea:disabled) [data-testid="stChatInputSubmitButton"] {{
+      opacity: 0.45 !important;
+      pointer-events: none !important;
+      cursor: not-allowed !important;
+    }}
     [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {{
       background: {_theme['surface_2']} !important;
       color: {_theme['text']} !important;
@@ -1074,6 +1099,8 @@ if "thinking_future" not in st.session_state:
     st.session_state.thinking_future = None
 if "last_thinking_payload" not in st.session_state:
     st.session_state.last_thinking_payload = None
+if "chat_awaiting_response" not in st.session_state:
+    st.session_state.chat_awaiting_response = False
 
 thinking_future = st.session_state.get("thinking_future")
 if isinstance(thinking_future, Future) and thinking_future.done():
@@ -1163,6 +1190,8 @@ with st.sidebar:
         st.session_state.thinking_status = "idle"
         st.session_state.thinking_future = None
         st.session_state.last_thinking_payload = None
+        st.session_state.chat_awaiting_response = False
+        _start_backend_initialization()
         st.rerun()
     if st.button("Log out", use_container_width=True):
         old_sid = st.session_state.get("chat_session_id")
@@ -1185,6 +1214,7 @@ with st.sidebar:
             "backend_ready_status",
             "backend_ready_error",
             "backend_ready_future",
+            "chat_awaiting_response",
         ):
             if k in st.session_state:
                 del st.session_state[k]
@@ -1325,39 +1355,11 @@ else:
 # ─────────────────────────────────────────────────────────────
 # CHAT INPUT
 # ─────────────────────────────────────────────────────────────
-placeholder = (
-    "Type a message…" if st.session_state.messages else "What kind of trailer are you looking for?"
-)
-
-backend_status = st.session_state.get("backend_ready_status", "initializing")
-backend_ready = backend_status == "ready"
-if backend_status == "initializing":
-    st.markdown(
-        '<div class="tp-init-status"><span class="tp-init-spinner"></span>'
-        '<span>Chatbot initializing…</span></div>',
-        unsafe_allow_html=True,
-    )
-    placeholder = "Chatbot initializing…"
-elif backend_status == "error":
-    st.error("The chatbot is taking longer than expected to initialize.")
-    if st.button("Retry initialization", type="primary"):
-        _start_backend_initialization()
-        st.rerun()
-    placeholder = "Chatbot unavailable"
-
-if prompt := st.chat_input(placeholder, disabled=not backend_ready):
-    # 1. Persist user message
-    st.session_state.messages.append({"role": "user", "content": prompt, "listings": None})
-
-    # 2. Render user bubble immediately (visible before agent responds)
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # 3. Chat via FastAPI backend
+def _process_assistant_reply(prompt: str) -> None:
+    """Call the chat API, append the assistant turn, and run optional thinking."""
     with st.chat_message("assistant"):
         with st.spinner(""):
             listings = []
-            product_fetch = []
             thinking_context = None
             payload = {
                 "session_id": st.session_state.chat_session_id,
@@ -1442,9 +1444,6 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
                     except Exception:
                         pass
 
-            # Commit the completed response before rendering or optional
-            # bookkeeping. Keeping this state update next to the HTTP result
-            # prevents a later rerun/error from dropping a successful reply.
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": response_text,
@@ -1462,8 +1461,6 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
         for i, listing in enumerate(listings or [], 1):
             render_card(listing, i)
 
-    # 4. Thinking flow generation (background by default)
-    _sync_thinking_result = None
     if thinking_agent_enabled() and thinking_context is not None:
         st.session_state.last_thinking_payload = thinking_context
         if thinking_agent_background():
@@ -1474,15 +1471,18 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
                 thinking_context,
             )
         else:
-            _sync_thinking_result = _run_thinking_job(st.session_state.chat_session_id, thinking_context)
+            _sync_thinking_result = _run_thinking_job(
+                st.session_state.chat_session_id, thinking_context
+            )
             st.session_state.last_thinking_result = _sync_thinking_result
-            st.session_state.thinking_status = "done" if _sync_thinking_result.get("status") == "ok" else "error"
+            st.session_state.thinking_status = (
+                "done" if _sync_thinking_result.get("status") == "ok" else "error"
+            )
             st.session_state.thinking_future = None
             st.session_state.messages[assistant_message_index][
                 "thinking_result"
             ] = _sync_thinking_result
 
-    # 5. Remember listing URLs shown this turn (Pinecone "show more" exclude list)
     sid = st.session_state.get("chat_session_id")
     if sid and listings:
         add_shown_urls(
@@ -1490,8 +1490,46 @@ if prompt := st.chat_input(placeholder, disabled=not backend_ready):
             [str(x.url or "") for x in listings if getattr(x, "url", None)],
         )
 
-    # 8. Rerun to reset widget state — prevents the "send twice" bug.
-    #    Content is already rendered above so the rerun re-draws from history seamlessly.
+
+placeholder = (
+    "Type a message…" if st.session_state.messages else "What kind of trailer are you looking for?"
+)
+
+backend_status = st.session_state.get("backend_ready_status", "initializing")
+backend_ready = backend_status == "ready"
+awaiting_response = st.session_state.get("chat_awaiting_response", False)
+chat_input_disabled = not backend_ready or awaiting_response
+
+if backend_status == "initializing":
+    st.markdown(
+        '<div class="tp-init-status"><span class="tp-init-spinner"></span>'
+        '<span>Chatbot initializing…</span></div>',
+        unsafe_allow_html=True,
+    )
+    placeholder = "Chatbot initializing…"
+elif backend_status == "error":
+    st.error("The chatbot is taking longer than expected to initialize.")
+    if st.button("Retry initialization", type="primary"):
+        _start_backend_initialization()
+        st.rerun()
+    placeholder = "Chatbot unavailable"
+elif awaiting_response:
+    placeholder = "Waiting for a response…"
+
+_pending_user_turn = (
+    awaiting_response
+    and st.session_state.messages
+    and st.session_state.messages[-1]["role"] == "user"
+)
+
+if _pending_user_turn:
+    st.chat_input(placeholder, disabled=True)
+    _process_assistant_reply(st.session_state.messages[-1]["content"])
+    st.session_state.chat_awaiting_response = False
+    st.rerun()
+elif prompt := st.chat_input(placeholder, disabled=chat_input_disabled):
+    st.session_state.messages.append({"role": "user", "content": prompt, "listings": None})
+    st.session_state.chat_awaiting_response = True
     st.rerun()
 
 if backend_status == "initializing":
