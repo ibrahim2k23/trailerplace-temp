@@ -76,6 +76,14 @@ def _mock_preference_classifier(monkeypatch, **values):
     )
 
 
+def _mock_pre_generic_classifier(monkeypatch, **values):
+    monkeypatch.setattr(
+        graph,
+        "_classify_non_recommendation_turn",
+        lambda **kwargs: graph.NonRecommendationTurnDecision(**values),
+    )
+
+
 def _mock_extractor(monkeypatch, **values):
     monkeypatch.setattr(
         graph,
@@ -1062,6 +1070,12 @@ def test_main_llm_resolves_category_without_inventing_make(monkeypatch):
 
 def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatch):
     _use_fallback_extractor(monkeypatch)
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="ask_trailer_category",
+        confidence="high",
+        reason="Generic size-only trailer request needs category.",
+    )
     state = _state("I am looking for a 6x12 trailer", category=None)
     state["mind_decision"]["action"] = "ask_next_question"
 
@@ -1075,11 +1089,84 @@ def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatc
     assert out["mind_decision"]["action"] == "respond"
 
 
+def test_generic_category_question_allows_medium_confidence_gate(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="ask_trailer_category",
+        confidence="medium",
+        reason="Medium confidence is enough to ask category.",
+    )
+    state = _state("I am looking for a 6x12 trailer", category=None)
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["assistant_text"] == "What type of trailer are you looking for?"
+    assert out.get("awaiting_slot") == "generic_category_choice"
+
+
+def test_recommendation_request_uses_structured_response_not_generic_category(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"generic_haul_use": "hauling heavy vehicles"},
+    )
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="respond",
+        assistant_text="For heavy vehicles, I would compare equipment and car hauler options.",
+        confidence="high",
+        reason="User asked for a recommendation, not a category clarification.",
+    )
+    state = _state(
+        "I am looking for a trailer to haul heavy vehicles. Can you recommend a type?",
+        category=None,
+    )
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["assistant_text"] == "For heavy vehicles, I would compare equipment and car hauler options."
+    assert out.get("awaiting_slot") != "generic_category_choice"
+
+
+def test_recommendation_stores_multiple_category_suggestions(monkeypatch):
+    class _FakeMindLLM:
+        def invoke(self, _messages):
+            return graph.MindDecision(
+                action="respond",
+                trailer_category="Equipment",
+                category_resolution_kind="recommendation",
+                category_confidence="high",
+                category_recommendations=[
+                    {"category": "Equipment", "confidence": "high", "reasoning": "Handles heavy loads."},
+                    {"category": "Car Hauler", "confidence": "medium", "reasoning": "Built for vehicles."},
+                ],
+                recommended_category="Equipment",
+            )
+
+    monkeypatch.setattr(graph, "_mind_llm", lambda: _FakeMindLLM())
+
+    out = graph._mind_node(_state("recommend a trailer for heavy vehicles", category=None))
+
+    pending = out["pending_category_suggestion"]
+    assert pending["recommended_category"] == "Equipment"
+    assert [item["category"] for item in pending["categories"]] == ["Equipment", "Car Hauler"]
+    assert out["awaiting_slot"] == "category_suggestion_confirmation"
+    assert "recommend one" in out["mind_decision"]["assistant_text"]
+
+
 def test_generic_haul_use_stores_when_category_unknown(monkeypatch):
     _mock_field_updates(
         monkeypatch,
         metadata_filters_update={"length_ft": "12 ft"},
         slots_collected_update={"generic_haul_use": "debris"},
+    )
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="ask_trailer_category",
+        confidence="high",
+        reason="Generic constrained request needs category.",
     )
     state = _state("I am looking for a 12ft trailer to haul some debris", category=None)
     state["mind_decision"]["action"] = "ask_next_question"
@@ -1511,6 +1598,12 @@ def test_generic_no_category_searches_when_length_and_payload_known(monkeypatch)
 
 def test_generic_category_followup_preserves_metadata_and_reasks_category(monkeypatch):
     _use_fallback_extractor(monkeypatch)
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="ask_trailer_category",
+        confidence="high",
+        reason="Still needs category after preserving metadata.",
+    )
     state = _state("it must be a bumper pull", category=None)
     state["awaiting_slot"] = "generic_category_choice"
 
@@ -1563,6 +1656,12 @@ def test_catalogue_word_redirects_to_website(monkeypatch):
 
 def test_broad_catalogue_request_with_budget_does_not_redirect(monkeypatch):
     _use_fallback_extractor(monkeypatch)
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="ask_trailer_category",
+        confidence="high",
+        reason="Budget narrows inventory but category is still needed.",
+    )
     state = _state("list all your products under 10000", category=None)
     state["mind_decision"]["action"] = "pinecone_search"
 

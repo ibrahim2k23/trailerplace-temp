@@ -48,6 +48,7 @@ _GREETING_RE = re.compile(r"^\s*(hi|hello|hey|good\s+(morning|afternoon|evening)
 _GENERAL_INTENT_RE = re.compile(
     r"\b("
     r"trailer|haul|hauling|buy|looking|want|need|search|show|more|"
+    r"recommend|recommendation|option|options|best|proceed|continue|"
     r"gooseneck|bumper\s*[- ]?\s*pull|hitch|payload|capacity|"
     r"financ(?:e|ing)|trade(?:-|\s)?in|service|parts|human|contact|"
     r"store|hours|location|interested"
@@ -917,6 +918,12 @@ def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> b
     text = (user_message or "").strip()
     if not text:
         return False
+    if _has_actionable_intent(text) and re.search(
+        r"\b(?:haul|hauling|carry|carrying|load|transport|tow|vehicle|equipment|mower|tractor|skid\s*steer)\b",
+        text,
+        re.I,
+    ):
+        return False
     try:
         decision = _catalogue_overview_llm().invoke(
             [
@@ -930,14 +937,16 @@ def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> b
                         "and the user has not provided enough specific shopping constraints to search inventory.\n\n"
                         "Set is_catalogue_overview=true even if the chat currently has an active qualification "
                         "question, when the latest message is asking about available types/options generally.\n\n"
-                        "Set is_catalogue_overview=false when the user wants recommendations, asks to show/search "
+                        "Set is_catalogue_overview=false when the user wants recommendations, asks what options fit "
+                        "a use case, asks to show/search "
                         "trailers, gives constraints like category/length/make/budget/payload/hitch/features, "
                         "answers a qualification question with a preference, expresses purchase interest, asks "
                         "about a specific listing, or asks for more/next options after listing results were shown.\n\n"
                         "Examples of true: 'what trailers do you offer?', 'what are the options?', "
                         "'which type of trailers do you have?', 'what do you guys carry?'.\n"
                         "Examples of false: 'show me utility trailers', 'I need a 12 ft livestock trailer', "
-                        "'more options' after listings, 'I want an enclosed trailer', 'what is the price of stock 123'."
+                        "'what are my options for hauling heavy vehicles?', 'more options' after listings, "
+                        "'I want an enclosed trailer', 'what is the price of stock 123'."
                     )
                 ),
                 HumanMessage(
@@ -993,6 +1002,8 @@ def _is_unsupported_business_action_turn(session: dict[str, Any], user_message: 
                         "Set should_route_graph=false for broad catalogue browsing, ordinary trailer information, "
                         "recommendations/search requests, supported FAQ topics like financing/trade-in/service/"
                         "store info, simple smalltalk, and direct questions the assistant can answer without a tool.\n\n"
+                        "Examples that must be false: 'I want one to haul raw materials for construction', "
+                        "'what trailer should I use for heavy items', and other normal trailer recommendation turns.\n\n"
                         "Do not decide which tool to call. Only decide whether this turn must be routed into the graph."
                     )
                 ),
@@ -1036,18 +1047,21 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     if session.get("awaiting_slot") or session.get("pending_questions"):
         return True
 
+    if session.get("pending_category_suggestion"):
+        return True
+
     if _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
         return True
 
     if _is_unsupported_business_action_turn(session, user_message):
         return True
 
-    if _is_catalogue_overview_turn(session, user_message):
-        return False
-
     # Keep deterministic fast-paths for obvious intent.
     if _has_actionable_intent(user_message):
         return True
+
+    if _is_catalogue_overview_turn(session, user_message):
+        return False
 
     # If we have shown listings before, let the model decide whether this turn is
     # a listings follow-up (interest, comparison, ordinal reference, show more, etc.).

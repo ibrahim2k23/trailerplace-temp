@@ -145,8 +145,7 @@ def _active_question_followup(state: ChatbotState) -> str:
         return str(pending_change.get("question") or "").strip()
     pending_suggestion = state.get("pending_category_suggestion") or {}
     if awaiting == "category_suggestion_confirmation" and pending_suggestion:
-        suggested = str(pending_suggestion.get("category") or "").strip()
-        return f"A {suggested} trailer may suit your needs. Would you like to explore {suggested} trailers?"
+        return _category_suggestion_prompt(pending_suggestion)
     if awaiting:
         try:
             definition = _slot_definition(awaiting, category=state.get("trailer_category"))
@@ -172,6 +171,73 @@ def _append_active_question_if_present(state: ChatbotState, text: str) -> str:
     return base
 
 
+def _category_suggestion_options(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("categories") or []
+    options: list[str] = []
+    for item in raw:
+        category = str((item or {}).get("category") if isinstance(item, dict) else item).strip()
+        if category in CANONICAL_CATEGORIES and category not in options:
+            options.append(category)
+    for key in ("category", "recommended_category"):
+        category = str(payload.get(key) or "").strip()
+        if category in CANONICAL_CATEGORIES and category not in options:
+            options.append(category)
+    return options
+
+
+def _category_suggestion_prompt(payload: dict[str, Any], *, confirm_recommended: bool = False) -> str:
+    recommended = str(payload.get("recommended_category") or payload.get("category") or "").strip()
+    if (confirm_recommended or payload.get("status") == "awaiting_recommended_confirmation") and recommended:
+        return f"I recommend {recommended}. Would you like to continue with {recommended} trailers?"
+    options = _category_suggestion_options(payload)
+    if options:
+        return (
+            f"A few trailer types could fit: {', '.join(options)}. "
+            'You can choose one, or say "recommend one" and I will pick the best fit.'
+        )
+    return "I can recommend a trailer type for that use case. Would you like me to recommend one?"
+
+
+_SEARCH_PROMISE_RE = re.compile(
+    r"\b(?:let me|i(?:'ll| will| can))\s+"
+    r"(?:find|search|look|pull up|look up|show|recommend)\b[^.?!]*(?:trailers?|options?|listings?)?[^.?!]*(?:[.?!]|$)"
+    r"|\bplease hold on\b[^.?!]*(?:[.?!]|$)",
+    re.I,
+)
+
+
+def _strip_search_promises(text: Any) -> str:
+    clean = _SEARCH_PROMISE_RE.sub("", str(text or "")).strip()
+    return re.sub(r"\s{2,}", " ", clean).strip()
+
+
+def _has_categoryless_spec_update(message: str) -> bool:
+    return bool(
+        _explicit_length_requested(message)
+        or _explicit_width_requested(message)
+        or _explicit_payload_requested(message)
+        or _explicit_price_requested(message)
+        or _explicit_color_requested(message)
+        or _explicit_hitch_requested(message)
+    )
+
+
+def _has_categoryless_trailer_features(
+    *,
+    metadata_filters: dict[str, Any],
+    slots: dict[str, Any],
+    requested_features: list[str],
+) -> bool:
+    return bool(
+        metadata_filters
+        or requested_features
+        or any(
+            key not in {_GENERIC_CATEGORY_CHOICE_SLOT, _GENERIC_HAUL_USE_SLOT}
+            for key in slots
+        )
+    )
+
+
 class MindDecision(BaseModel):
     action: Literal[
         "ask_next_question",
@@ -186,7 +252,9 @@ class MindDecision(BaseModel):
     category_resolution_kind: Literal["explicit", "recommendation", "none"] = "none"
     category_confidence: Literal["low", "medium", "high"] = "low"
     category_reasoning: str = ""
-    category_suggestion_response: Literal["accept", "reject", "none"] = "none"
+    category_suggestion_response: Literal["accept", "reject", "recommend_one", "none"] = "none"
+    category_recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_category: Optional[str] = None
     slots_collected_update: dict[str, Any] = Field(default_factory=dict)
     metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
     optional_question_slots_to_queue: list[str] = Field(default_factory=list)
@@ -2215,7 +2283,7 @@ def _fallback_question_turn_decision(
     pending_questions: list[QuestionItem],
     make_category_options: list[str],
 ) -> QuestionTurnDecision:
-    del active_definition, active_question
+    del active_definition
     text = str(latest_message or "").strip()
     if not text:
         return QuestionTurnDecision(reason="empty_latest_message", confidence="low")
@@ -3616,6 +3684,8 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         decision = _fallback_decision(state)
         if deterministic_hint and not decision.trailer_category:
             decision.trailer_category = deterministic_hint
+    logger.info("mind_structured_output | %s", _safe_json(_model_dump(decision)))
+    decision.assistant_text = _strip_search_promises(decision.assistant_text)
 
     if decision.trailer_category and decision.trailer_category not in CANONICAL_CATEGORIES:
         logger.info(
@@ -3626,42 +3696,153 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         decision.trailer_category = None
     pending_suggestion = dict(state.get("pending_category_suggestion") or {})
     if pending_suggestion:
-        suggested = str(pending_suggestion.get("category") or "").strip()
+        suggested = str(
+            decision.trailer_category
+            or pending_suggestion.get("recommended_category")
+            or pending_suggestion.get("category")
+            or ""
+        ).strip()
+        options = _category_suggestion_options(pending_suggestion)
+        if (
+            decision.trailer_category in CANONICAL_CATEGORIES
+            and decision.category_resolution_kind == "explicit"
+            and decision.action == "pinecone_search"
+        ):
+            logger.info("category_suggestion_decision | %s", _safe_json(_model_dump(decision)))
+            return {
+                **state,
+                "pending_category_suggestion": None,
+                "awaiting_slot": None,
+                "mind_decision": _model_dump(decision),
+            }
+        if decision.category_suggestion_response == "recommend_one":
+            recommended = str(pending_suggestion.get("recommended_category") or suggested or "").strip()
+            if recommended in CANONICAL_CATEGORIES:
+                pending_suggestion["recommended_category"] = recommended
+                pending_suggestion["status"] = "awaiting_recommended_confirmation"
+                decision.trailer_category = None
+                decision.action = "respond"
+                decision.assistant_text = _category_suggestion_prompt(
+                    pending_suggestion,
+                    confirm_recommended=True,
+                )
+                logger.info("category_suggestion_decision | %s", _safe_json(_model_dump(decision)))
+                return {
+                    **state,
+                    "pending_category_suggestion": pending_suggestion,
+                    "awaiting_slot": _CATEGORY_SUGGESTION_SLOT,
+                    "mind_decision": _model_dump(decision),
+                }
         if decision.category_suggestion_response == "accept" and suggested in CANONICAL_CATEGORIES:
             decision.trailer_category = suggested
             decision.category_resolution_kind = "explicit"
+            decision.action = "pinecone_search"
+            logger.info("category_suggestion_decision | %s", _safe_json(_model_dump(decision)))
             return {**state, "pending_category_suggestion": None, "awaiting_slot": None, "mind_decision": _model_dump(decision)}
         if decision.category_suggestion_response == "reject":
             decision.trailer_category = None
             decision.action = "respond"
-            decision.assistant_text = "No problem. What type of trailer would you like to explore instead?"
+            decision.assistant_text = "No problem. Which trailer type would you like to explore instead?"
+            logger.info("category_suggestion_decision | %s", _safe_json(_model_dump(decision)))
             return {**state, "pending_category_suggestion": None, "awaiting_slot": None, "mind_decision": _model_dump(decision)}
-        if resolution.category and decision.trailer_category == resolution.category:
+        if resolution.category and (decision.trailer_category == resolution.category or resolution.category in options):
+            decision.trailer_category = resolution.category
+            decision.action = "pinecone_search"
+            logger.info("category_suggestion_decision | %s", _safe_json(_model_dump(decision)))
             return {**state, "pending_category_suggestion": None, "awaiting_slot": None, "mind_decision": _model_dump(decision)}
-        decision.trailer_category = None
-        decision.action = "respond"
-        decision.assistant_text = f"A {suggested} trailer may suit your needs. Would you like to explore {suggested} trailers?"
-        return {**state, "mind_decision": _model_dump(decision)}
-
-    if decision.trailer_category and resolution.category != decision.trailer_category:
-        recommended = decision.trailer_category
-        if decision.category_resolution_kind == "recommendation" and decision.category_confidence == "high":
+        if _has_categoryless_spec_update(state.get("user_message") or ""):
             decision.trailer_category = None
             decision.action = "respond"
-            decision.assistant_text = f"A {recommended} trailer may suit your needs. Would you like to explore {recommended} trailers?"
+            logger.info("category_suggestion_specs_deferred | %s", _safe_json(_model_dump(decision)))
+            return {**state, "mind_decision": _model_dump(decision)}
+        decision.trailer_category = None
+        decision.action = "respond"
+        decision.assistant_text = decision.assistant_text or _category_suggestion_prompt(pending_suggestion)
+        logger.info("category_suggestion_decision | %s", _safe_json(_model_dump(decision)))
+        return {**state, "mind_decision": _model_dump(decision)}
+
+    recommended_candidate = decision.trailer_category or decision.recommended_category
+    if not recommended_candidate and decision.category_recommendations:
+        recommendations = [
+            item for item in (decision.category_recommendations or [])
+            if isinstance(item, dict) and str(item.get("category") or "").strip() in CANONICAL_CATEGORIES
+        ]
+        if recommendations:
+            pending_payload = {
+                "categories": recommendations,
+                "reasoning": decision.category_reasoning,
+                "confidence": decision.category_confidence,
+                "status": "awaiting_choice_or_recommendation",
+            }
+            decision.action = "respond"
+            decision.assistant_text = decision.assistant_text or _category_suggestion_prompt(pending_payload)
+            logger.info("category_recommendation_decision | %s", _safe_json(_model_dump(decision)))
             return {
                 **state,
-                "pending_category_suggestion": {
+                "pending_category_suggestion": pending_payload,
+                "awaiting_slot": _CATEGORY_SUGGESTION_SLOT,
+                "mind_decision": _model_dump(decision),
+            }
+    if (
+        recommended_candidate
+        and resolution.category != recommended_candidate
+        and decision.category_resolution_kind != "explicit"
+    ):
+        recommended = recommended_candidate
+        if recommended in CANONICAL_CATEGORIES and (
+            decision.category_resolution_kind == "recommendation"
+            or decision.category_resolution_kind == "none"
+        ):
+            confidence = (
+                decision.category_confidence
+                if decision.category_confidence in {"medium", "high"}
+                else "medium"
+            )
+            recommendations = [
+                item for item in (decision.category_recommendations or [])
+                if isinstance(item, dict) and str(item.get("category") or "").strip() in CANONICAL_CATEGORIES
+            ]
+            if not recommendations:
+                recommendations = [{
                     "category": recommended,
+                    "confidence": confidence,
                     "reasoning": decision.category_reasoning,
-                    "confidence": decision.category_confidence,
-                },
+                }]
+            pending_payload = {
+                "categories": recommendations,
+                "recommended_category": (
+                    decision.recommended_category
+                    if decision.recommended_category in CANONICAL_CATEGORIES
+                    else recommended
+                ),
+                "category": recommended,
+                "reasoning": decision.category_reasoning,
+                "confidence": confidence,
+                "status": "awaiting_recommended_confirmation",
+            }
+            decision.trailer_category = None
+            decision.category_resolution_kind = "recommendation"
+            decision.category_confidence = confidence
+            decision.action = "respond"
+            confirm_text = _category_suggestion_prompt(pending_payload, confirm_recommended=True)
+            base_text = _strip_search_promises(decision.assistant_text)
+            decision.assistant_text = (
+                base_text
+                if "?" in base_text and recommended.lower() in base_text.lower()
+                else f"{base_text} {confirm_text}".strip()
+            )
+            logger.info("category_recommendation_decision | %s", _safe_json(_model_dump(decision)))
+            return {
+                **state,
+                "pending_category_suggestion": pending_payload,
+                "awaiting_slot": _CATEGORY_SUGGESTION_SLOT,
                 "mind_decision": _model_dump(decision),
             }
         logger.info("inferred_category_not_applied | proposed=%r | kind=%r | confidence=%r", recommended, decision.category_resolution_kind, decision.category_confidence)
         decision.trailer_category = None
         decision.action = "respond"
-        decision.assistant_text = "What type of trailer are you looking for?"
+        if not decision.assistant_text:
+            decision.assistant_text = "Could you share a little more detail so I can narrow this down?"
     return {**state, "mind_decision": _model_dump(decision)}
 
 
@@ -3919,8 +4100,11 @@ def _classify_non_recommendation_turn(
                         "Choose send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported "
                         "business action such as contacting them, emailing them, sending a quote/invoice/paperwork, scheduling, "
                         "holding/reserving a trailer, future-arrival timing, buying trailers from the customer, or custom arrangements.\n\n"
-                        "Choose ask_trailer_category only when the customer is genuinely shopping for a trailer, no category is known, "
-                        "and there is no higher-priority FAQ/escalation/catalogue intent.\n\n"
+                        "Choose ask_trailer_category only with medium or high confidence, when the customer is clearly shopping "
+                        "for inventory, no category is known, and asking for trailer type is the best next step. "
+                        "Do not choose ask_trailer_category for recommendation or use-case questions such as "
+                        "'I need a trailer to haul heavy vehicles; can you recommend a type?'; choose respond or "
+                        "continue_recommendation_flow for those.\n\n"
                         "Choose continue_recommendation_flow when normal trailer QnA/search should continue and existing field extraction "
                         "should handle freeform details. Set should_store_freeform_fields=true only for clear trailer-shopping constraints "
                         "or active question answers. Do not infer inventory details from listings."
@@ -3929,7 +4113,9 @@ def _classify_non_recommendation_turn(
                 HumanMessage(content=_safe_json(context)),
             ]
         )
-        return decision if isinstance(decision, NonRecommendationTurnDecision) else NonRecommendationTurnDecision()
+        result = decision if isinstance(decision, NonRecommendationTurnDecision) else NonRecommendationTurnDecision()
+        logger.info("pre_generic_structured_output | %s", _safe_json(_model_dump(result)))
+        return result
     except Exception:
         logger.exception("Non-recommendation turn classifier failed; continuing existing flow")
         return NonRecommendationTurnDecision(reason="classifier_failed", confidence="low")
@@ -4007,6 +4193,14 @@ def _non_recommendation_tool_state(
         "assistant_text": assistant_text,
         "mind_decision": decision,
     }
+
+
+def _allows_generic_category_question(decision: NonRecommendationTurnDecision | None) -> bool:
+    return bool(
+        decision
+        and decision.action == "ask_trailer_category"
+        and decision.confidence in {"medium", "high"}
+    )
 
 
 def _apply_make_resolution(
@@ -4240,6 +4434,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     requested_non_metadata_features = list(state.get("requested_non_metadata_features") or [])
     invalid_required_slot: str | None = None
     awaiting_slot = state.get("awaiting_slot")
+    generic_category_was_active = awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT
     category_before = state.get("trailer_category")
     latest_message = state.get("user_message") or ""
     for field in tuple(defaulted_metadata_filters):
@@ -4247,11 +4442,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             defaulted_metadata_filters.discard(field)
     pending_category_change = dict(state.get("pending_category_change") or {})
     pending_category_suggestion = dict(state.get("pending_category_suggestion") or {})
-    if pending_category_suggestion and not decision.get("trailer_category"):
+    if (
+        pending_category_suggestion
+        and not decision.get("trailer_category")
+        and not _has_categoryless_spec_update(latest_message)
+    ):
         suggestion_text = str(decision.get("assistant_text") or "").strip()
         if not suggestion_text:
-            suggested = str(pending_category_suggestion.get("category") or "").strip()
-            suggestion_text = f"A {suggested} trailer may suit your needs. Would you like to explore {suggested} trailers?"
+            suggestion_text = _category_suggestion_prompt(pending_category_suggestion)
         decision["action"] = "respond"
         return {
             **state,
@@ -4922,10 +5120,11 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         awaiting_slot = None
 
     should_check_pre_generic_turn = (
-        (decision.get("action") or "respond") in {"respond", "ask_next_question"}
+        (decision.get("action") or "respond") in {"respond", "ask_next_question", "pinecone_search"}
         and not bool(state.get("has_shown_search_results"))
         and bool(str(latest_message or "").strip())
     )
+    pre_generic_turn_decision: NonRecommendationTurnDecision | None = None
     if should_check_pre_generic_turn:
         pre_generic_turn_decision = _classify_non_recommendation_turn(
             state=state,
@@ -4978,30 +5177,40 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     current_action = decision.get("action") or "respond"
     tool_action_requested = current_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}
 
-    if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT and not category and not tool_action_requested:
-        decision["action"] = "respond"
-        return {
-            **state,
-            "trailer_category": category,
-            "category_needs_clarification": category_needs_clarification,
-            "category_clarification_key": category_clarification_key,
-            "slots_collected": slots,
-            "slots_skipped": sorted(slots_skipped),
-            "metadata_filters_collected": metadata_filters,
-            "requested_non_metadata_features": requested_non_metadata_features,
-            "active_search_request_text": _updated_active_search_request_text(
-                state=state,
-                latest_message=latest_message,
-                slots=slots,
-                metadata_filters=metadata_filters,
-                reset_active_request=category_changed or make_changed,
-            ),
-            "make_category_options": make_category_options,
-            "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-            "pending_questions": [],
-            "assistant_text": _GENERIC_CATEGORY_QUESTION,
-            "mind_decision": decision,
-        }
+    if (
+        (awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT or generic_category_was_active)
+        and not category
+        and not tool_action_requested
+        and not _generic_category_no_preference_active(slots_skipped)
+    ):
+        if _allows_generic_category_question(pre_generic_turn_decision):
+            decision["action"] = "respond"
+            return {
+                **state,
+                "trailer_category": category,
+                "category_needs_clarification": category_needs_clarification,
+                "category_clarification_key": category_clarification_key,
+                "slots_collected": slots,
+                "slots_skipped": sorted(slots_skipped),
+                "metadata_filters_collected": metadata_filters,
+                "requested_non_metadata_features": requested_non_metadata_features,
+                "active_search_request_text": _updated_active_search_request_text(
+                    state=state,
+                    latest_message=latest_message,
+                    slots=slots,
+                    metadata_filters=metadata_filters,
+                    reset_active_request=category_changed or make_changed,
+                ),
+                "make_category_options": make_category_options,
+                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+                "pending_questions": [],
+                "assistant_text": _GENERIC_CATEGORY_QUESTION,
+                "mind_decision": decision,
+            }
+        awaiting_slot = None
+        if pre_generic_turn_decision and pre_generic_turn_decision.action == "respond" and pre_generic_turn_decision.assistant_text:
+            decision["action"] = "respond"
+            decision["assistant_text"] = pre_generic_turn_decision.assistant_text
 
     if (
         not category
@@ -5009,31 +5218,46 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         and not tool_action_requested
         and not _generic_category_no_preference_active(slots_skipped)
         and not (metadata_filters.get("make") and _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped)
-        and _has_generic_trailer_request(latest_message)
-    ):
-        decision["action"] = "respond"
-        return {
-            **state,
-            "trailer_category": category,
-            "category_needs_clarification": category_needs_clarification,
-            "category_clarification_key": category_clarification_key,
-            "slots_collected": slots,
-            "slots_skipped": sorted(slots_skipped),
-            "metadata_filters_collected": metadata_filters,
-            "requested_non_metadata_features": requested_non_metadata_features,
-            "active_search_request_text": _updated_active_search_request_text(
-                state=state,
-                latest_message=latest_message,
-                slots=slots,
+        and (
+            _has_generic_trailer_request(latest_message)
+            or _has_categoryless_trailer_features(
                 metadata_filters=metadata_filters,
-                reset_active_request=category_changed or make_changed,
-            ),
-            "make_category_options": make_category_options,
-            "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-            "pending_questions": [],
-            "assistant_text": _GENERIC_CATEGORY_QUESTION,
-            "mind_decision": decision,
-        }
+                slots=slots,
+                requested_features=requested_non_metadata_features,
+            )
+        )
+    ):
+        if _allows_generic_category_question(pre_generic_turn_decision) or _has_categoryless_trailer_features(
+            metadata_filters=metadata_filters,
+            slots=slots,
+            requested_features=requested_non_metadata_features,
+        ):
+            decision["action"] = "respond"
+            return {
+                **state,
+                "trailer_category": category,
+                "category_needs_clarification": category_needs_clarification,
+                "category_clarification_key": category_clarification_key,
+                "slots_collected": slots,
+                "slots_skipped": sorted(slots_skipped),
+                "metadata_filters_collected": metadata_filters,
+                "requested_non_metadata_features": requested_non_metadata_features,
+                "active_search_request_text": _updated_active_search_request_text(
+                    state=state,
+                    latest_message=latest_message,
+                    slots=slots,
+                    metadata_filters=metadata_filters,
+                    reset_active_request=category_changed or make_changed,
+                ),
+                "make_category_options": make_category_options,
+                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+                "pending_questions": [],
+                "assistant_text": _GENERIC_CATEGORY_QUESTION,
+                "mind_decision": decision,
+            }
+        if pre_generic_turn_decision and pre_generic_turn_decision.action == "respond" and pre_generic_turn_decision.assistant_text:
+            decision["action"] = "respond"
+            decision["assistant_text"] = pre_generic_turn_decision.assistant_text
 
     _apply_aluminum_base_category_filter(category, slots, metadata_filters)
     _apply_flatbed_default_width(category, slots, metadata_filters, defaulted_metadata_filters)
@@ -5226,8 +5450,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             elif not assistant_text.strip():
                 assistant_text = "Could you share a little more detail so I can narrow this down?"
     elif action == "pinecone_search" and not category and not make_only_complete and not generic_no_category_complete:
-        assistant_text = _GENERIC_CATEGORY_QUESTION
-        awaiting_slot = _GENERIC_CATEGORY_CHOICE_SLOT
+        if _allows_generic_category_question(pre_generic_turn_decision) or _has_categoryless_trailer_features(
+            metadata_filters=metadata_filters,
+            slots=slots,
+            requested_features=requested_non_metadata_features,
+        ):
+            assistant_text = _GENERIC_CATEGORY_QUESTION
+            awaiting_slot = _GENERIC_CATEGORY_CHOICE_SLOT
+        elif not assistant_text.strip():
+            assistant_text = "Could you share a little more detail so I can narrow this down?"
+            awaiting_slot = None
         action = "respond"
     elif invalid_required_slot and action != "pinecone_search":
         action = "respond"
