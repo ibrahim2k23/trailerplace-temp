@@ -72,6 +72,7 @@ def classify_no_preference(
                         "- Return has_no_preference=true for answers like any, whatever, no fixed size, no specific preference, not sure, I don't know, flexible, or doesn't matter.\n"
                         "- For a category/type/kind choice question, answers like no idea, no type in mind, any type, no category preference, category doesn't matter, type doesn't matter, I don't care about category, any <make> trailer, or just show me <make> also mean no preference.\n"
                         "- If a category/type/kind question is active, a retained make or brand name is not a category choice by itself; for example, 'any Iron Bull trailer' means no category preference while preserving the make.\n"
+                        "- Gooseneck and Bumper Pull are strictly hitch types, not categories or makes. When a category question is active, either term is a hitch constraint and does not answer the category question.\n"
                         "- Return has_no_preference=false when the answer provides a concrete value, constraint, item, category, color, hitch, length, width, weight, or price.\n"
                         "- If true, target_slots should contain only active_slot when active_slot is present.\n"
                         "- target_metadata_filters may include the corresponding search filter for that active_slot when relevant.\n"

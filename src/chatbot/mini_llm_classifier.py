@@ -145,6 +145,8 @@ def classify_haul_requirements(
         "- Never return is_lightweight_utility_load=true or needs_width_question=true with "
         "matched_item=null when an item is stated in the latest message or context.\n"
         "- Do not use a trailer category, trailer description, size, make, or model as matched_item.\n"
+        "- Gooseneck and Bumper Pull are strictly hitch types. Never return either as matched_item and do not use "
+        "either to infer a trailer category or haul item.\n"
         "- For Utility only, mark is_lightweight_utility_load when the haul item is likely 1500 lbs or less.\n"
         "- For categories except Utility, Enclosed, and Flatbed, mark needs_width_question when "
         "the item is very large, wide, heavy-duty, or a vehicle such as a car or tractor.\n"

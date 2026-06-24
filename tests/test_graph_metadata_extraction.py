@@ -1416,6 +1416,21 @@ def test_generic_haul_use_maps_to_utility_haul_item(monkeypatch):
     assert out["awaiting_slot"] == "haul_weight_lbs"
 
 
+def test_generic_heavy_items_maps_to_flatbed_haul_item(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    state = _state("a flatbed trailer", category=None)
+    state["awaiting_slot"] = "generic_category_choice"
+    state["slots_collected"] = {"generic_haul_use": "some heavy items"}
+    state["mind_decision"]["action"] = "ask_next_question"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Flatbed"
+    assert out["slots_collected"]["haul_item"] == "some heavy items"
+    assert "generic_haul_use" not in out["slots_collected"]
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+
+
 def test_generic_haul_use_duplicate_feature_removed(monkeypatch):
     _mock_field_updates(
         monkeypatch,
@@ -2203,6 +2218,84 @@ def test_aluminum_base_category_maps_to_subcategory_filter(monkeypatch):
     assert out["slots_collected"]["base_category"] == "utility"
     assert out["metadata_filters_collected"]["subcategory"] == "Utility"
     assert out["awaiting_slot"] == "payload_need"
+
+
+def test_aluminum_category_and_base_category_guardrails():
+    implicit = {
+        "trailer_category": "Utility",
+        "category_resolution_kind": "explicit",
+        "slots_collected_update": {},
+    }
+    graph._apply_aluminum_category_guardrail(
+        latest_message="I need a utility aluminum trailer",
+        current_category=None,
+        awaiting_slot=None,
+        decision=implicit,
+    )
+    assert implicit["trailer_category"] == "Aluminum"
+    assert implicit["slots_collected_update"]["base_category"] == "Utility"
+
+    qna = {"trailer_category": "Utility"}
+    graph._apply_aluminum_category_guardrail(
+        latest_message="utility",
+        current_category="Aluminum",
+        awaiting_slot="base_category",
+        decision=qna,
+    )
+    assert qna["trailer_category"] == "Aluminum"
+
+    slots = {"base_category": "Utility"}
+    filters = {}
+    graph._apply_aluminum_base_category_filter("Aluminum", slots, filters)
+    assert filters["subcategory"] == "Utility"
+
+    explicit_switch = {"trailer_category": "Utility"}
+    graph._apply_aluminum_category_guardrail(
+        latest_message="not aluminum, I want utility",
+        current_category="Aluminum",
+        awaiting_slot="base_category",
+        decision=explicit_switch,
+    )
+    assert explicit_switch["trailer_category"] == "Utility"
+
+
+def test_llm_field_mapping_normalizes_aluminum_payload_alias():
+    normalized = graph._normalize_llm_field_mappings(
+        {
+            "slots_collected_update": {
+                "base_category": "Utility",
+                "payload_lbs": "5000 pounds",
+            },
+            "metadata_filters_update": {},
+        },
+        "Aluminum",
+    )
+
+    assert normalized["slots_collected_update"] == {
+        "base_category": "Utility",
+        "payload_need": "5000 pounds",
+    }
+    assert normalized["metadata_filters_update"] == {
+        "payload_lbs": "5000 pounds",
+    }
+
+    capacity_alias = graph._normalize_llm_field_mappings(
+        {
+            "slots_collected_update": {
+                "base_category": "Utility",
+                "payload_capacity": "5000 pounds",
+            },
+            "metadata_filters_update": {},
+        },
+        "Aluminum",
+    )
+    assert capacity_alias["slots_collected_update"] == {
+        "base_category": "Utility",
+        "payload_need": "5000 pounds",
+    }
+    assert capacity_alias["metadata_filters_update"] == {
+        "payload_lbs": "5000 pounds",
+    }
 
 
 def test_aluminum_base_category_none_leaves_subcategory_unset(monkeypatch):

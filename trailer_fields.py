@@ -274,7 +274,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
             "payload_need": "Store the rough total load weight or payload requirement using weight units only.",
             "sleeping_need": "Store whether the customer needs sleeping accommodations.",
         },
-        notes="Aluminum is a modifier, not a standalone category. Resolve base_category first.",
+        notes="Aluminum is the primary inventory category. Store the underlying trailer type in base_category and map it to the subcategory filter.",
     ),
 }
 

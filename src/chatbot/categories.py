@@ -105,6 +105,15 @@ def _direct_category_from_text(text: str) -> Optional[str]:
     return None
 
 
+def resolve_categories_from_text(text: str) -> list[str]:
+    low = (text or "").lower()
+    return [
+        category
+        for category, terms in _SYNONYMS.items()
+        if any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", low) for term in terms)
+    ]
+
+
 def _clarification_rule(key: str) -> dict[str, object] | None:
     return _CATEGORY_CLARIFICATION_RULES.get(str(key or "").strip())
 
@@ -140,8 +149,14 @@ def resolve_category_clarification_answer(text: str, clarification_key: str | No
 
 
 def category_prompt_block() -> str:
-    lines = ["The following are the trailer categories and the terms/synonyms which map to the respective category if a user mentions them partially or makes a mistake while typing the name, you should still correctly identify the category:"]
+    lines = [
+        "The following are trailer categories and their mapping terms.",
+        "Gooseneck and Bumper Pull are strictly hitch types, never trailer categories. "
+        "Do not infer, recommend, or return either one as a category.",
+    ]
     for category in CANONICAL_CATEGORIES:
+        if category in {"Gooseneck", "Bumper Pull"}:
+            continue
         terms = ", ".join(_SYNONYMS.get(category, []))
         lines.append(f"- {category}: {terms}")
     for rule in _CATEGORY_CLARIFICATION_RULES.values():

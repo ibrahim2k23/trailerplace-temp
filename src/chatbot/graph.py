@@ -18,6 +18,7 @@ from src.chatbot.categories import (
     CANONICAL_CATEGORIES,
     category_prompt_block,
     category_clarification_question,
+    resolve_categories_from_text,
     resolve_category_clarification_answer,
     resolve_category_from_text,
 )
@@ -1656,7 +1657,8 @@ _PSEUDO_SLOT_DEFINITIONS: dict[str, dict[str, Any]] = {
         "question": "What will you be hauling or using the trailer for?",
         "answer_guidance": (
             "When current_category is unknown, store the free-form cargo, material, equipment, "
-            "or use case the customer gives, such as debris, construction debris, a mower, "
+            "or use case the customer gives, including broad phrases after haul/carry/move such as "
+            "'some heavy items', 'a car', 'equipment', or 'tools', as well as debris, a mower, "
             "a skid steer, hay, or furniture. Do not store trailer category names here."
         ),
         "mapped_metadata_fields": [],
@@ -1680,6 +1682,7 @@ _SLOT_METADATA_FILTER_MAP = {
     "haul_weight_lbs": ("payload_lbs",),
     "item_or_trailer_width_ft": ("width_ft",),
     "max_price": ("max_price",),
+    "payload_capacity": ("payload_lbs",),
     "payload_need": ("payload_lbs",),
     "total_weight": ("payload_lbs",),
     "trailer_length_ft": ("length_ft",),
@@ -2468,7 +2471,10 @@ def _adjudicate_active_question_turn(
                         "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
                         "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
                         "Classify counter_question_topic by the noun being asked about. Trailer/category types, hitch types, and makes are different topics. The word 'type' alone does not mean trailer category. Never answer a hitch-type question with trailer categories.\n"
-                        "Supported hitch types are exactly Bumper Pull and Gooseneck.\n"
+                        "Supported hitch types are exactly Bumper Pull and Gooseneck. They are strictly hitch types, "
+                        "never trailer categories, base categories, subcategories, makes, or manufacturers. "
+                        "If the user says 'gooseneck trailer' or 'bumper pull trailer', extract/update hitch_type only; "
+                        "do not treat that phrase as answering a trailer-category question.\n"
                         "Examples while 'What type of trailer are you looking for?' is active:\n"
                         "- 'Which trailer types do you carry?' -> counter_question_topic=trailer_categories; list canonical trailer categories.\n"
                         "- 'Which hitch types do you carry?' -> counter_question_topic=hitch_types; reply that TrailerPlace offers Bumper Pull and Gooseneck configurations.\n"
@@ -2494,6 +2500,29 @@ def _adjudicate_active_question_turn(
                         "1. When current_category is unknown and cannot be mapped with a trailer term/synonym, and the customer gives only an item/use case to haul, respond with 2 or 3 suitable canonical trailer types, each with a very short practical description, then ask which trailer type they prefer. Do not ask dimensions/features before trailer type is chosen.\n"
                         "2. When current_category is unknown, the customer must ultimately choose or confirm the trailer type before inventory search.\n"
                         "3. During active QnA, the user can change category preference. If they do, set category_update to the new canonical category and preserve any latest-message field updates that still apply.\n\n"
+                        "Hitch-only guardrail: Gooseneck and Bumper Pull must only populate hitch_type. Never use either "
+                        "as active_slot_value for a category/base-category question, and never treat either as a make. "
+                        "If one is stated while another qualification question is active, preserve it in "
+                        "metadata_filters_update.hitch_type but leave the active question unanswered unless the same "
+                        "message also gives a valid answer to that question.\n\n"
+                        "Aluminum active-question rules:\n"
+                        "- Aluminum is the current main category; base_category asks for the underlying trailer type.\n"
+                        "- When current_category=Aluminum and active_slot=base_category, a plain canonical category "
+                        "reply such as 'utility', 'equipment', 'enclosed', 'dump', 'livestock', or 'car hauler' answers "
+                        "the active question. Set answered_active_question=true and active_slot_value to the canonical "
+                        "category. Do not interpret it as a main-category change.\n"
+                        "- Examples: reply='utility' -> active_slot_value='Utility'; reply='an enclosed one' -> "
+                        "active_slot_value='Enclosed'; reply='I need it for equipment' -> active_slot_value='Equipment'.\n"
+                        "- Keep the active answer focused on the underlying type. Do not return Aluminum as "
+                        "active_slot_value and do not put the answer in requested_non_metadata_features.\n"
+                        "- Only treat the reply as switching away from Aluminum when the customer explicitly rejects "
+                        "or replaces Aluminum, such as 'not aluminum, I want utility', 'I do not want aluminum anymore', "
+                        "or 'instead of aluminum, make it enclosed'. A mere category name is never enough to switch.\n"
+                        "- If the reply contains multiple possible base categories and no clear preference, set "
+                        "answered_active_question=false, leave active_slot_value empty, and ask the customer to choose "
+                        "one underlying trailer type in reply_to_user.\n"
+                        "- If the reply is not a recognizable canonical base category, do not invent the closest type. "
+                        "Leave it unanswered so the application can repeat or clarify the base_category question.\n\n"
                         "TRAILER BRANDS/MAKES: use only to educate the user when they ask what brands/makes are available; do not use them to infer category.\n"
                         f"{make_prompt_block()}\n"
                     )
@@ -2705,10 +2734,19 @@ def _extract_field_updates(
                         "Return structured data only.\n"
                         "The metadata field definitions and category slot definitions are authoritative. "
                         "Do not extract make/manufacturer; make is handled by a separate resolver. "
+                        "Gooseneck and Bumper Pull are strictly hitch types. Extract either only into "
+                        "metadata_filters_update.hitch_type and, when allowed, the hitch_type category slot. "
+                        "Never put either into category slots such as base_category, generic_haul_use, haul_item, "
+                        "subcategory, requested_non_metadata_features, make, or manufacturer. "
                         "Do not extract subcategory unless current_category is Aluminum. "
                         "Use recent messages and the previous assistant question only as context for interpreting the latest user message, not as new updates. "
-                        "When current_category is unknown and the user volunteers cargo/material/equipment/use-case details such as hauling debris, carrying hay, or using the trailer for a mower, store that detail in generic_haul_use. "
-                        "generic_haul_use is a temporary category-unknown slot; do not put haul/use/cargo/material phrases into requested_non_metadata_features. "
+                        "When current_category is unknown, extract any stated item, cargo, material, equipment, or use case into slots_collected_update.generic_haul_use. "
+                        "This includes specific nouns and broad natural phrases such as 'a car', 'equipment', 'tools', 'some heavy items', 'construction materials', or 'landscaping equipment'. "
+                        "Preserve the meaningful phrase the customer used; do not require a precise named object. "
+                        "Example: 'I need a 32ft trailer to haul some heavy items' must produce metadata_filters_update.length_ft='32ft' and slots_collected_update.generic_haul_use='some heavy items'. "
+                        "Example: 'Need something for a car and tools' with no resolved category must produce slots_collected_update.generic_haul_use='a car and tools'. "
+                        "generic_haul_use is a temporary category-unknown slot that will be mapped to the selected category's haul field later. "
+                        "Do not put haul/use/cargo/material phrases into requested_non_metadata_features, and do not leave generic_haul_use empty merely because the phrase is broad. "
                         "Extract requested_non_metadata_features for user-requested equipment/configuration/features not represented by metadata filters or category slots. "
                         "Do not infer requested_non_metadata_features from inventory/listing text. "
                         "Accept equivalent units such as inches when they clearly answer a length or width field. "
@@ -2739,6 +2777,7 @@ def _extract_field_updates(
         )
 
     data = _model_dump(decision)
+    data = _normalize_llm_field_mappings(data, category)
     confidence = str(data.get("confidence") or "low").lower()
     if confidence not in _CONFIDENT_FIELD_EXTRACTION:
         return FieldExtractionAdjudicationDecision(
@@ -2959,8 +2998,9 @@ def _extract_filter_decision(state: ChatbotState, category: str | None) -> Filte
                         "- Length phrases must mention length, long, deck length, trailer length, size, trailer size, or an ambiguous 'make it 14 ft' update.\n"
                         "- Trailer shorthand like '6x12' means width_ft=6 and length_ft=12; '6x12x5' means width_ft=6, length_ft=12, height=5. Do not store height unless there is an allowed slot/filter for it.\n"
                         "- Payload/load/haul weight maps to payload_lbs, not GVWR.\n"
-                        "- hitch_type can only be gooseneck or bumper pull and must be explicitly named in the latest message; return null otherwise.\n"
-                        "- make is the trailer manufacturer only; never use Gooseneck as make unless the user explicitly says it is the brand/manufacturer.\n"
+                        "- hitch_type can only be Gooseneck or Bumper Pull and must be explicitly named in the latest message; return null otherwise.\n"
+                        "- Gooseneck and Bumper Pull are strictly hitch types. Never return either as make, category, subcategory, base_category, haul item, use case, or another slot value.\n"
+                        "- make is the trailer manufacturer only; never use Gooseneck or Bumper Pull as make.\n"
                         "- subcategory must only be returned when the latest message explicitly asks for a subcategory filter.\n"
                         "- Do not infer subcategory from category words like Tilt, Utility, Dump, Aluminum, or Enclosed.\n"
                         "- Preserve existing values by returning null unless the latest message updates that exact field.\n"
@@ -3054,6 +3094,91 @@ def _slot_updates_from_decision(
     return updates
 
 
+_HAUL_ITEM_SLOT_ALIASES = {
+    "generic_haul_use",
+    "haul_item",
+    "haul_material",
+    "cargo_type",
+    "cargo_item",
+    "use_case",
+    "vehicle_type",
+    "equipment_list",
+}
+_HAUL_ITEM_SLOT_TARGETS = (
+    "haul_material",
+    "haul_item",
+    "vehicle_type",
+    "equipment_list",
+    "cargo_type",
+    "cargo_item",
+    "use_case",
+    "fiber_use_case",
+)
+
+
+def _normalize_llm_field_mappings(
+    decision: dict[str, Any],
+    category: str | None,
+) -> dict[str, Any]:
+    normalized = dict(decision)
+    raw_slots = dict(normalized.get("slots_collected_update") or {})
+    raw_metadata = dict(normalized.get("metadata_filters_update") or {})
+    allowed = _category_slots(category)
+
+    # Rescue searchable fields and category-slot aliases returned in the wrong slot dictionary.
+    for key in tuple(raw_slots):
+        metadata_key = key if key in _METADATA_FILTER_KEYS else None
+        if metadata_key is None and key not in allowed:
+            mapped_fields = _SLOT_METADATA_FILTER_MAP.get(key, ())
+            if len(mapped_fields) == 1:
+                metadata_key = mapped_fields[0]
+        if metadata_key is None:
+            continue
+        sanitized = _canonicalize_adjudicated_metadata(
+            key=metadata_key,
+            value=raw_slots.pop(key),
+            category=category,
+        )
+        if sanitized:
+            clean_key, clean_value = sanitized
+            raw_metadata.setdefault(clean_key, clean_value)
+
+    # Map generic/incorrect haul-field aliases to the selected category's haul field.
+    haul_value = next(
+        (
+            value
+            for key, value in raw_slots.items()
+            if key in _HAUL_ITEM_SLOT_ALIASES and value not in (None, "")
+        ),
+        None,
+    )
+    if haul_value is not None:
+        target = next((slot for slot in _HAUL_ITEM_SLOT_TARGETS if slot in allowed), None)
+        if target:
+            raw_slots.setdefault(target, haul_value)
+            for key in tuple(raw_slots):
+                if key in _HAUL_ITEM_SLOT_ALIASES and key != target and key not in allowed:
+                    raw_slots.pop(key, None)
+
+    # Normalize metadata values, then mirror each concept into the category slot.
+    clean_metadata: dict[str, Any] = {}
+    for key, value in raw_metadata.items():
+        sanitized = _canonicalize_adjudicated_metadata(
+            key=str(key),
+            value=value,
+            category=category,
+        )
+        if sanitized:
+            clean_key, clean_value = sanitized
+            clean_metadata[clean_key] = clean_value
+    for slot, value in _slot_updates_from_metadata(category, clean_metadata).items():
+        raw_slots.setdefault(slot, value)
+
+    normalized["slots_collected_update"] = raw_slots
+    normalized["metadata_filters_update"] = clean_metadata
+    return normalized
+
+
 def _slot_updates_from_metadata(category: str | None, metadata_filters: dict[str, Any]) -> dict[str, Any]:
     allowed = _category_slots(category)
     if not allowed:
@@ -3068,7 +3193,7 @@ def _slot_updates_from_metadata(category: str | None, metadata_filters: dict[str
 
     length_slot = pick(("trailer_length_ft", "haul_length_ft", "vehicle_length_ft", "trailer_size", "cargo_size"))
     width_slot = pick(("item_or_trailer_width_ft", "trailer_width_ft", "width_ft", "trailer_size", "cargo_size"))
-    payload_slot = pick(("haul_weight_lbs", "payload_need", "total_weight"))
+    payload_slot = pick(("haul_weight_lbs", "payload_need", "payload_capacity", "total_weight"))
 
     if length_slot and metadata_filters.get("length_ft"):
         updates[length_slot] = metadata_filters["length_ft"]
@@ -3154,6 +3279,65 @@ def _aluminum_base_category_subcategory(value: Any) -> str | None:
     if category in allowed:
         return category
     return None
+
+
+def _explicitly_rejects_aluminum(message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:not|no)\s+aluminum\b"
+            r"|\b(?:do\s+not|don't|dont)\s+want\s+(?:an?\s+)?aluminum\b"
+            r"|\binstead\s+of\s+(?:an?\s+)?aluminum\b",
+            str(message or ""),
+            re.I,
+        )
+    )
+
+
+def _apply_aluminum_category_guardrail(
+    *,
+    latest_message: str,
+    current_category: str | None,
+    awaiting_slot: str | None,
+    decision: dict[str, Any],
+) -> None:
+    mentioned = resolve_categories_from_text(latest_message)
+    non_aluminum = [category for category in mentioned if category != "Aluminum"]
+    answering_base_category = current_category == "Aluminum" and awaiting_slot == "base_category"
+    rejects_aluminum = _explicitly_rejects_aluminum(latest_message)
+
+    if answering_base_category and not rejects_aluminum:
+        if decision.get("trailer_category") != "Aluminum":
+            logger.info(
+                "aluminum_base_category_prevents_category_switch | proposed=%r | message=%r",
+                decision.get("trailer_category"),
+                latest_message,
+            )
+        decision["trailer_category"] = "Aluminum"
+        return
+
+    if rejects_aluminum:
+        return
+
+    if "Aluminum" not in mentioned or not non_aluminum:
+        return
+
+    selected = _aluminum_base_category_subcategory(
+        (decision.get("slots_collected_update") or {}).get("base_category")
+    )
+    if selected not in non_aluminum:
+        selected = non_aluminum[0] if len(non_aluminum) == 1 else None
+
+    decision["trailer_category"] = "Aluminum"
+    decision["category_resolution_kind"] = "explicit"
+    if selected:
+        updates = dict(decision.get("slots_collected_update") or {})
+        updates["base_category"] = selected
+        decision["slots_collected_update"] = updates
+    logger.info(
+        "aluminum_category_guardrail_applied | mentioned=%s | base_category=%r",
+        mentioned,
+        selected,
+    )
 
 
 def _apply_aluminum_base_category_filter(
@@ -4117,7 +4301,11 @@ def _classify_non_recommendation_turn(
                         "continue_recommendation_flow for those.\n\n"
                         "Choose continue_recommendation_flow when normal trailer QnA/search should continue and existing field extraction "
                         "should handle freeform details. Set should_store_freeform_fields=true only for clear trailer-shopping constraints "
-                        "or active question answers. Do not infer inventory details from listings."
+                        "or active question answers. Do not infer inventory details from listings.\n\n"
+                        "Gooseneck and Bumper Pull are strictly hitch types, never trailer categories, makes, haul items, "
+                        "or use cases. A message containing only one of these still contains trailer-shopping filter data; "
+                        "continue the recommendation flow so field extraction can store it as hitch_type. Do not treat "
+                        "'gooseneck trailer' or 'bumper pull trailer' as a resolved trailer category."
                     )
                 ),
                 HumanMessage(content=_safe_json(context)),
@@ -4408,6 +4596,8 @@ def _adjudicate_category_filter_confirmation(
                 SystemMessage(content=(
                     "Interpret a customer's reply about carrying old trailer filters into a new category. "
                     "Allowed fields are length_ft, width_ft, height_ft, payload_lbs, hitch_type. "
+                    "Gooseneck and Bumper Pull are strictly hitch_type values and must never be interpreted as "
+                    "categories, makes, subcategories, or other fields. "
                     "Put explicitly retained fields in keep_fields, explicitly rejected fields in discard_fields, "
                     "and explicitly changed values in updates. A changed field is also resolved. "
                     "Resolve pronouns from the supplied pending fields: when only length_ft is pending, "
@@ -4447,6 +4637,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     generic_category_was_active = awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT
     category_before = state.get("trailer_category")
     latest_message = state.get("user_message") or ""
+    _apply_aluminum_category_guardrail(
+        latest_message=latest_message,
+        current_category=category_before,
+        awaiting_slot=awaiting_slot,
+        decision=decision,
+    )
     for field in tuple(defaulted_metadata_filters):
         if _message_has_filter_evidence(field, latest_message, awaiting_slot):
             defaulted_metadata_filters.discard(field)
@@ -4559,6 +4755,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         )
     category_proposed = decision.get("trailer_category") or category_before
     category = category_proposed
+    decision = _normalize_llm_field_mappings(decision, category)
 
     category_changed = bool(category_before and category and category != category_before)
     make_changed = False
@@ -4896,6 +5093,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             latest_message=latest_message,
             pending_questions=pending_source_for_turn,
             make_category_options=make_category_options,
+        )
+        normalized_question_turn = _normalize_llm_field_mappings(
+            _model_dump(question_turn),
+            category,
+        )
+        question_turn.slots_collected_update = dict(
+            normalized_question_turn.get("slots_collected_update") or {}
+        )
+        question_turn.metadata_filters_update = dict(
+            normalized_question_turn.get("metadata_filters_update") or {}
         )
         logger.info(
             "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | counter_topic=%r | reply=%r | email_action=%r | confidence=%r | reason=%r",

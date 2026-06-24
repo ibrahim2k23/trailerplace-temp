@@ -95,13 +95,25 @@ def known_makes() -> tuple[str, ...]:
 
 def make_prompt_block() -> str:
     inventory = load_make_inventory()
-    lines = ["Canonical trailer makes/brands available in the current inventory:"]
-    if not inventory.canonical_makes:
+    prompt_makes = tuple(
+        make for make in inventory.canonical_makes
+        if make not in {"Gooseneck", "Bumper Pull"}
+    )
+    lines = [
+        "Canonical trailer makes/brands available in the current inventory:",
+        "Gooseneck and Bumper Pull are strictly hitch types, never trailer makes/brands. "
+        "Do not infer, recommend, or return either one as a make.",
+    ]
+    if not prompt_makes:
         lines.append("- No makes are currently available from the inventory workbook.")
         return "\n".join(lines)
 
-    for make in inventory.canonical_makes:
-        categories = inventory.categories_by_make.get(make, ())
+    for make in prompt_makes:
+        categories = tuple(
+            category
+            for category in inventory.categories_by_make.get(make, ())
+            if category not in {"Gooseneck", "Bumper Pull"}
+        )
         category_text = ", ".join(categories) if categories else "category unavailable"
         lines.append(f"- {make}: {category_text}")
     return "\n".join(lines)
