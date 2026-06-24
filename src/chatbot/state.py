@@ -48,4 +48,9 @@ class ChatbotState(TypedDict, total=False):
     pending_contact_actions: list[dict[str, Any]]
     active_question_text: Optional[str]
     active_question_tracker: Optional[dict[str, Any]]
+    active_question_unanswered_count: int
+    active_question_attempts: dict[str, int]
+    active_question_slot: Optional[str]
+    repeated_unanswered_question_escalation: bool
+    skipped_unanswered_slot: Optional[str]
     pending_initial_user_message: Optional[str]

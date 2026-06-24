@@ -23,6 +23,7 @@ from src.chatbot.categories import (
     resolve_category_from_text,
 )
 from src.chatbot.formatting import format_listing_results
+from src.chatbot.email_reply import compose_email_tool_reply
 from src.chatbot.mini_llm_classifier import (
     HaulClassificationDecision,
     classify_haul_requirements,
@@ -138,9 +139,6 @@ def _active_question_followup(state: ChatbotState) -> str:
         queued = _queued_question_for_slot(state.get("pending_questions") or [], awaiting)
         if queued:
             return queued
-    pending = state.get("pending_questions") or []
-    if pending:
-        return str(pending[0].get("question") or "").strip()
     pending_change = state.get("pending_category_change") or {}
     if awaiting == "category_filter_confirmation" and pending_change:
         return str(pending_change.get("question") or "").strip()
@@ -153,6 +151,9 @@ def _active_question_followup(state: ChatbotState) -> str:
             return str(definition.get("question") or "").strip()
         except Exception:
             logger.debug("active_question_definition_unavailable | slot=%r", awaiting)
+    pending = state.get("pending_questions") or []
+    if pending:
+        return str(pending[0].get("question") or "").strip()
     return ""
 
 
@@ -344,6 +345,8 @@ class QuestionTurnDecision(BaseModel):
     escalation_summary: Optional[str] = None
     unsupported_request: Optional[str] = None
     reply_to_user: str = ""
+    rephrased_question: str = ""
+    retry_slot: Optional[str] = None
     confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
 
@@ -2056,11 +2059,17 @@ def _active_question_context(
     if not active_slot:
         return None, {}
     queued_question = _queued_question_for_slot(pending_questions, active_slot)
+    displayed_question = ""
+    for item in reversed(messages or []):
+        if str(item.get("role") or "") == "assistant":
+            displayed_question = str(item.get("qualification_question") or "").strip()
+            if displayed_question:
+                break
     definition = _slot_definition(
         active_slot,
         category=category,
         questions_override=questions_override,
-        queued_question=queued_question or _last_assistant_question(messages or []),
+        queued_question=displayed_question or queued_question or _last_assistant_question(messages or []),
         make_category_options=make_category_options,
     )
     return active_slot, definition
@@ -2144,6 +2153,8 @@ def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecisi
         escalation_summary=str(data.get("escalation_summary") or "").strip() or None,
         unsupported_request=str(data.get("unsupported_request") or "").strip() or None,
         reply_to_user=str(data.get("reply_to_user") or "").strip(),
+        rephrased_question=str(data.get("rephrased_question") or "").strip(),
+        retry_slot=str(data.get("retry_slot") or "").strip() or None,
         confidence=confidence,
         reason=str(data.get("reason") or ""),
     )
@@ -2456,6 +2467,11 @@ def _adjudicate_active_question_turn(
         "existing_metadata_filters_collected": state.get("metadata_filters_collected") or {},
         "make_category_options": make_category_options,
         "supported_hitch_types": ["Bumper Pull", "Gooseneck"],
+        "unanswered_count_before_this_turn": int(
+            (state.get("active_question_attempts") or {}).get(active_slot)
+            or state.get("active_question_unanswered_count")
+            or 0
+        ),
     }
     try:
         decision = _question_turn_adjudicator_llm().invoke(
@@ -2470,6 +2486,19 @@ def _adjudicate_active_question_turn(
                         "If the active question was answered, set answered_active_question=true and provide active_slot_value.\n"
                         "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
                         "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
+                        "On the first unanswered reply, also provide rephrased_question: a natural rewording that asks for exactly the same active slot."
+                        "Do not add requirements or change meaning. The retry must sound like one natural conversational response, "
+                        "not a pasted answer followed by the original fixed question word-for-word. Use a smooth transition from "
+                        "the customer's counter-question or comment into the missing detail. Rephrase the canonical question rather "
+                        "than copying it verbatim. Put the complete customer-facing response, including the naturally rephrased retry, "
+                        "in reply_to_user. Set retry_slot exactly to active_slot. The rephrased_question must appear "
+                        "exactly once in reply_to_user, as its final question. Answer the counter-question with a "
+                        "statement and never ask a follow-up about the counter-question topic. The only question in "
+                        "reply_to_user must be the rephrased active qualification question. "
+                        "Always answer the counter-question first, then use a brief contextual bridge and naturally "
+                        "rephrase the still-unanswered active question. The result must read as one cohesive response, "
+                        "not an answer followed by a mechanically pasted question. "
+                        "When unanswered_count_before_this_turn is 1 or more, leave rephrased_question empty because the application will skip the question.\n"
                         "Classify counter_question_topic by the noun being asked about. Trailer/category types, hitch types, and makes are different topics. The word 'type' alone does not mean trailer category. Never answer a hitch-type question with trailer categories.\n"
                         "Supported hitch types are exactly Bumper Pull and Gooseneck. They are strictly hitch types, "
                         "never trailer categories, base categories, subcategories, makes, or manufacturers. "
@@ -2479,6 +2508,8 @@ def _adjudicate_active_question_turn(
                         "- 'Which trailer types do you carry?' -> counter_question_topic=trailer_categories; list canonical trailer categories.\n"
                         "- 'Which hitch types do you carry?' -> counter_question_topic=hitch_types; reply that TrailerPlace offers Bumper Pull and Gooseneck configurations.\n"
                         "- 'Which makes do you carry?' -> counter_question_topic=makes; list canonical inventory makes.\n"
+                        "While a weight question is active, 'What hitch types do you have?' must be answered with "
+                        "Bumper Pull and Gooseneck and then naturally return to asking for weight. Never ask which hitch they prefer.\n"
                         "Use the TrailerPlace knowledge, canonical category, and canonical make blocks above when answering counter-questions.\n"
                         "If the user asks which trailer types, categories, or makes are available, directly list the relevant available values from those blocks in reply_to_user. "
                         "Do not merely say you can help, and do not ask the active qualification question inside reply_to_user because the application appends that question afterward.\n"
@@ -2525,6 +2556,7 @@ def _adjudicate_active_question_turn(
                         "Leave it unanswered so the application can repeat or clarify the base_category question.\n\n"
                         "TRAILER BRANDS/MAKES: use only to educate the user when they ask what brands/makes are available; do not use them to infer category.\n"
                         f"{make_prompt_block()}\n"
+                        "EXTREMELY IMPORTANT: On the first unanswered reply, also provide rephrased_question: a natural rewording that asks for exactly the same active slot."
                     )
                 ),
                 HumanMessage(content=_safe_json(context)),
@@ -2546,6 +2578,133 @@ def _adjudicate_active_question_turn(
             make_category_options=make_category_options,
         )
         return fallback
+
+
+def _valid_question_retry(decision: QuestionTurnDecision, active_slot: str) -> bool:
+    reply = str(decision.reply_to_user or "").strip()
+    questions = re.findall(r"[^?]*\?", reply)
+    return bool(
+        decision.retry_slot == active_slot
+        and len(questions) == 1
+        and reply.endswith("?")
+        and str(decision.rephrased_question or "").strip().endswith("?")
+    )
+
+
+def _question_retry_validation_errors(
+    decision: QuestionTurnDecision,
+    active_slot: str,
+) -> list[str]:
+    question = str(decision.rephrased_question or "").strip()
+    reply = str(decision.reply_to_user or "").strip()
+    errors: list[str] = []
+    if not question:
+        errors.append("missing_rephrased_question")
+    if decision.retry_slot != active_slot:
+        errors.append(f"retry_slot_mismatch:{decision.retry_slot!r}")
+    question_count = len(re.findall(r"[^?]*\?", reply))
+    if question_count != 1:
+        errors.append(f"reply_question_count:{question_count}")
+    if reply and not reply.endswith("?"):
+        errors.append("reply_does_not_end_with_question")
+    if question and not question.endswith("?"):
+        errors.append("rephrased_question_not_question")
+    return errors
+
+
+def _repair_question_retry(
+    *,
+    state: ChatbotState,
+    decision: QuestionTurnDecision,
+    active_slot: str,
+    active_question: str,
+    latest_message: str,
+    direct_answer_fallback: str = "",
+) -> QuestionTurnDecision:
+    if _valid_question_retry(decision, active_slot):
+        logger.info(
+            "question_retry_source | source=initial_adjudicator | slot=%r | output=%s",
+            active_slot,
+            _safe_json(_model_dump(decision)),
+        )
+        return decision
+    logger.warning(
+        "question_retry_validation_failed | source=initial_adjudicator | slot=%r | errors=%s | output=%s",
+        active_slot,
+        _safe_json(_question_retry_validation_errors(decision, active_slot)),
+        _safe_json(_model_dump(decision)),
+    )
+    try:
+        repaired = _question_turn_adjudicator_llm().invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Repair this unanswered qualification response. Answer the customer's counter-question "
+                        "with a statement, then naturally rephrase the exact active qualification question. "
+                        "Do not ask about the counter-question topic. The only question in reply_to_user must be "
+                        "rephrased_question, exactly once at the end. Set retry_slot exactly to active_slot."
+                    )
+                ),
+                HumanMessage(
+                    content=_safe_json(
+                        {
+                            "active_slot": active_slot,
+                            "exact_active_question": active_question,
+                            "latest_user_message": latest_message,
+                            "prior_decision": _model_dump(decision),
+                            "recent_messages": (state.get("messages") or [])[-6:],
+                        }
+                    )
+                ),
+            ]
+        )
+        candidate = _sanitize_question_turn_decision(
+            _model_dump(repaired) if isinstance(repaired, BaseModel) else {}
+        )
+        logger.info(
+            "question_retry_repair_output | slot=%r | output=%s",
+            active_slot,
+            _safe_json(_model_dump(candidate)),
+        )
+        if _valid_question_retry(candidate, active_slot):
+            logger.info(
+                "question_retry_source | source=repair_llm | slot=%r | output=%s",
+                active_slot,
+                _safe_json(_model_dump(candidate)),
+            )
+            return candidate
+        logger.warning(
+            "question_retry_validation_failed | source=repair_llm | slot=%r | errors=%s | output=%s",
+            active_slot,
+            _safe_json(_question_retry_validation_errors(candidate, active_slot)),
+            _safe_json(_model_dump(candidate)),
+        )
+    except Exception:
+        logger.exception("Question retry repair failed")
+    source = str(decision.reply_to_user or "").strip()
+    if not source or source == active_question or not re.search(r"[.!](?:\s|$)", source):
+        source = str(direct_answer_fallback or "").strip()
+    statements = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", source)
+        if part.strip() and not part.strip().endswith("?")
+    ]
+    direct_answer = " ".join(statements).strip()
+    reply = f"{direct_answer} {active_question}".strip()
+    fallback = decision.model_copy(
+        update={
+            "reply_to_user": reply,
+            "rephrased_question": active_question,
+            "retry_slot": active_slot,
+        }
+    )
+    logger.warning(
+        "question_retry_source | source=deterministic_fallback | slot=%r | direct_answer_source=%r | output=%s",
+        active_slot,
+        "adjudicator" if source == str(decision.reply_to_user or "").strip() else "mind",
+        _safe_json(_model_dump(fallback)),
+    )
+    return fallback
 
 
 def _normalize_length_or_width_value(value: Any) -> Any:
@@ -2738,6 +2897,12 @@ def _extract_field_updates(
                         "metadata_filters_update.hitch_type and, when allowed, the hitch_type category slot. "
                         "Never put either into category slots such as base_category, generic_haul_use, haul_item, "
                         "subcategory, requested_non_metadata_features, make, or manufacturer. "
+                        "Set hitch_type only when the latest user message explicitly selects, requests, prefers, or "
+                        "states that hitch configuration for their trailer. Informational questions do not select a "
+                        "hitch type. Messages such as 'what hitch types do you offer?', 'do you have gooseneck "
+                        "trailers?', 'what is a bumper pull?', or 'which hitch is better?' must return no hitch_type "
+                        "update unless the same message separately expresses a clear choice. Never copy a hitch type "
+                        "from the assistant's previous answer or other conversation context. "
                         "Do not extract subcategory unless current_category is Aluminum. "
                         "Use recent messages and the previous assistant question only as context for interpreting the latest user message, not as new updates. "
                         "When current_category is unknown, extract any stated item, cargo, material, equipment, or use case into slots_collected_update.generic_haul_use. "
@@ -3889,8 +4054,19 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         decision.trailer_category = None
     pending_suggestion = dict(state.get("pending_category_suggestion") or {})
     if pending_suggestion:
+        latest_choice_text = _normalize_choice_text(state.get("user_message") or "")
+        explicit_recommend_request = bool(
+            re.search(
+                r"\b(?:recommend|suggest|pick|choose)\s+(?:me\s+)?(?:one|the\s+best|best)\b"
+                r"|\bwhich\s+(?:one|option)\s+(?:is|would\s+be)\s+best\b",
+                latest_choice_text,
+            )
+        )
+        if explicit_recommend_request:
+            decision.category_suggestion_response = "recommend_one"
         suggested = str(
             decision.trailer_category
+            or decision.recommended_category
             or pending_suggestion.get("recommended_category")
             or pending_suggestion.get("category")
             or ""
@@ -3909,7 +4085,12 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
                 "mind_decision": _model_dump(decision),
             }
         if decision.category_suggestion_response == "recommend_one":
-            recommended = str(pending_suggestion.get("recommended_category") or suggested or "").strip()
+            recommended = str(
+                decision.recommended_category
+                or pending_suggestion.get("recommended_category")
+                or suggested
+                or ""
+            ).strip()
             if recommended in CANONICAL_CATEGORIES:
                 pending_suggestion["recommended_category"] = recommended
                 pending_suggestion["status"] = "awaiting_recommended_confirmation"
@@ -5070,8 +5251,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         messages=state.get("messages") or [],
     )
     active_qna_question = str(active_qna_definition.get("question") or "").strip()
+    active_question_attempts = dict(state.get("active_question_attempts") or {})
     active_qna_unanswered = False
     active_qna_reply = ""
+    active_qna_retry_question = ""
+    active_question_was_unanswered = False
+    active_question_was_resolved = False
+    repeated_unanswered_escalation = False
+    skipped_unanswered_slot: str | None = None
     active_qna_counter_topic = "none"
     active_qna_email_action = "none"
     active_qna_faq_category: str | None = None
@@ -5104,6 +5291,23 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         question_turn.metadata_filters_update = dict(
             normalized_question_turn.get("metadata_filters_update") or {}
         )
+        if (
+            not question_turn.answered_active_question
+            and not question_turn.no_preference_for_active_question
+            and int(
+                (state.get("active_question_attempts") or {}).get(active_qna_slot)
+                or state.get("active_question_unanswered_count")
+                or 0
+            ) == 0
+        ):
+            question_turn = _repair_question_retry(
+                state=state,
+                decision=question_turn,
+                active_slot=active_qna_slot,
+                active_question=active_qna_question,
+                latest_message=latest_message,
+                direct_answer_fallback=str(decision.get("assistant_text") or ""),
+            )
         logger.info(
             "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | counter_topic=%r | reply=%r | email_action=%r | confidence=%r | reason=%r",
             active_qna_slot,
@@ -5121,7 +5325,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         active_qna_faq_summary = question_turn.faq_summary
         active_qna_escalation_summary = question_turn.escalation_summary
         active_qna_unsupported_request = question_turn.unsupported_request
+        active_qna_retry_question = question_turn.rephrased_question
         if question_turn.no_preference_for_active_question:
+            active_question_was_resolved = True
             slots_skipped.add(str(active_qna_slot))
             awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
             for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
@@ -5131,6 +5337,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             and question_turn.answered_active_question
             and question_turn.active_slot_value in {"Fiber", "Enclosed"}
         ):
+            active_question_was_resolved = True
             category = str(question_turn.active_slot_value)
             category_needs_clarification = False
             category_clarification_key = None
@@ -5141,6 +5348,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             active_slot_value = _preserve_latest_haul_item_phrase(active_qna_slot, active_slot_value, latest_message)
             is_valid, reason = _validate_slot_value(active_qna_slot, active_slot_value)
             if is_valid:
+                active_question_was_resolved = True
                 slots[active_qna_slot] = active_slot_value
                 slots_skipped.discard(str(active_qna_slot))
                 awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
@@ -5163,6 +5371,24 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         else:
             active_qna_unanswered = True
             active_qna_reply = question_turn.reply_to_user
+        active_question_was_unanswered = active_qna_unanswered
+        previous_unanswered_count = int(active_question_attempts.get(active_qna_slot) or 0)
+        if active_question_was_resolved:
+            active_question_attempts.pop(active_qna_slot, None)
+        elif active_qna_unanswered:
+            active_question_attempts[active_qna_slot] = previous_unanswered_count + 1
+
+        if (
+            active_qna_unanswered
+            and active_question_attempts.get(active_qna_slot, 0) >= 2
+        ):
+            repeated_unanswered_escalation = True
+            skipped_unanswered_slot = str(active_qna_slot)
+            slots_skipped.add(skipped_unanswered_slot)
+            active_question_attempts.pop(active_qna_slot, None)
+            awaiting_slot = None
+            active_qna_unanswered = False
+            active_qna_email_action = "none"
 
         for key, value in _slot_updates_from_decision(
             {"slots_collected_update": question_turn.slots_collected_update},
@@ -5631,21 +5857,22 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
 
     asked = [] if reset_result_state else list(state.get("asked_questions") or [])
     assistant_text = decision.get("assistant_text") or ""
+    displayed_active_question = ""
     if active_qna_unanswered and active_qna_slot and action not in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
         action = "respond"
         awaiting_slot = active_qna_slot
-        replay_question = active_qna_question or _queued_question_for_slot(pending, active_qna_slot)
-        if active_qna_reply and replay_question:
-            assistant_text = f"{active_qna_reply}\n\n{replay_question}"
-        elif replay_question:
-            assistant_text = replay_question
-        elif active_qna_reply:
-            assistant_text = active_qna_reply
-        elif not assistant_text.strip():
-            assistant_text = "Could you please confirm that requirement?"
+        assistant_text = active_qna_reply or active_qna_retry_question
+        displayed_active_question = active_qna_retry_question or active_qna_question
+        if not assistant_text.strip():
+            assistant_text = active_qna_question or "Could you please confirm that requirement?"
     elif should_ask and pending:
         next_question = pending.pop(0)
         assistant_text = next_question.get("question") or "Could you share a little more detail?"
+        displayed_active_question = str(next_question.get("question") or "").strip()
+        if repeated_unanswered_escalation and active_qna_reply:
+            bridge = active_qna_reply.replace(active_qna_retry_question, "").strip()
+            if bridge:
+                assistant_text = f"{bridge}\n\n{assistant_text}"
         if next_question.get("slot"):
             awaiting_slot = str(next_question["slot"])
             asked.append(awaiting_slot)
@@ -5745,6 +5972,15 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "selected_listing_title": decision.get("selected_listing_title"),
         "selected_listing_url": decision.get("selected_listing_url"),
         "mind_decision": decision,
+        "repeated_unanswered_question_escalation": repeated_unanswered_escalation,
+        "skipped_unanswered_slot": skipped_unanswered_slot,
+        "active_question_was_unanswered": active_question_was_unanswered,
+        "active_question_was_resolved": active_question_was_resolved,
+        "active_question_slot": active_qna_slot,
+        "active_question_attempts": active_question_attempts,
+        "active_question_text": (
+            displayed_active_question or None
+        ),
     }
 
 
@@ -5762,7 +5998,14 @@ def _route_after_mind(state: ChatbotState) -> str:
 
 
 def _finalize_active_question_node(state: ChatbotState) -> ChatbotState:
-    return {**state, "active_question_text": _active_question_followup(state) or None}
+    return {
+        **state,
+        "active_question_text": (
+            state.get("active_question_text")
+            or _active_question_followup(state)
+            or None
+        ),
+    }
 
 
 def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
@@ -5838,6 +6081,7 @@ def _pinecone_search_node(state: ChatbotState) -> ChatbotState:
     return {
         **state,
         "assistant_text": assistant_text,
+        "active_question_text": None,
         "last_listings": listings,
         "already_shown_listing_urls": sorted(set(shown)),
         "tool_events": events,
@@ -5878,18 +6122,20 @@ def _interest_email_node(state: ChatbotState) -> ChatbotState:
         item_name=str(title),
     )
     planner_reply = str(decision.get("assistant_text") or state.get("assistant_text") or "").strip()
-    if planner_reply:
-        assistant_text = planner_reply
-        reply_source = "planner_assistant_text"
-    elif title:
-        assistant_text = _INTEREST_GENERIC_FALLBACK.format(item_name=str(title).strip())
-        reply_source = "interest_fallback"
-    else:
-        assistant_text = _INTEREST_GENERIC_FALLBACK_NO_ITEM
-        reply_source = "generic_fallback"
-    if not assistant_text.strip():
-        assistant_text = _INTEREST_SAFE_FALLBACK
-        reply_source = "safe_fallback"
+    fallback = (
+        _INTEREST_GENERIC_FALLBACK.format(item_name=str(title).strip())
+        if title
+        else _INTEREST_GENERIC_FALLBACK_NO_ITEM
+    )
+    assistant_text = compose_email_tool_reply(
+        email_purpose=f"customer interest in {title or 'a trailer'}",
+        latest_message=state.get("user_message") or "",
+        conversation_context=_compact_recent_context(state),
+        base_reply=planner_reply,
+        next_question=str(state.get("active_question_text") or _active_question_followup(state)),
+        fallback=fallback or _INTEREST_SAFE_FALLBACK,
+    )
+    reply_source = "email_reply_llm"
     logger.debug(
         "interest_reply_source=%s title_present=%s",
         reply_source,
@@ -5899,7 +6145,7 @@ def _interest_email_node(state: ChatbotState) -> ChatbotState:
     events.append({"tool": "send_interested_listing_email", "result": result})
     return {
         **state,
-        "assistant_text": _append_active_question_if_present(state, assistant_text),
+        "assistant_text": assistant_text,
         "tool_events": events,
     }
 
@@ -5943,15 +6189,16 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
     )
     planner_reply = str(decision.get("assistant_text") or state.get("assistant_text") or "").strip()
     category_reply = _FAQ_REPLY_FALLBACKS.get(category, "").strip()
-    if planner_reply:
-        assistant_text = planner_reply
-        reply_source = "planner_assistant_text"
-    elif category_reply:
-        assistant_text = category_reply
-        reply_source = "category_fallback"
-    else:
-        assistant_text = _FAQ_GENERIC_FALLBACK
-        reply_source = "generic_fallback"
+    fallback = category_reply or _FAQ_GENERIC_FALLBACK
+    assistant_text = compose_email_tool_reply(
+        email_purpose=f"{category} customer request",
+        latest_message=state.get("user_message") or "",
+        conversation_context=_compact_recent_context(state),
+        base_reply=planner_reply,
+        next_question=str(state.get("active_question_text") or _active_question_followup(state)),
+        fallback=_append_active_question_if_present(state, fallback),
+    )
+    reply_source = "email_reply_llm"
     logger.debug(
         "faq_reply_source=%s category=%s summary=%r",
         reply_source,
@@ -5962,7 +6209,7 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
     events.append({"tool": "send_non_sales_faq_email", "result": result})
     return {
         **state,
-        "assistant_text": _append_active_question_if_present(state, assistant_text),
+        "assistant_text": assistant_text,
         "tool_events": events,
     }
 
@@ -6002,9 +6249,17 @@ def _escalation_email_node(state: ChatbotState) -> ChatbotState:
     )
     events = list(state.get("tool_events") or [])
     events.append({"tool": "send_escalation_alert_email", "result": result})
+    assistant_text = compose_email_tool_reply(
+        email_purpose=summary,
+        latest_message=state.get("user_message") or "",
+        conversation_context=_compact_recent_context(state),
+        base_reply=str(decision.get("assistant_text") or ""),
+        next_question=str(state.get("active_question_text") or _active_question_followup(state)),
+        fallback=_append_active_question_if_present(state, _ESCALATION_SENT_REPLY),
+    )
     return {
         **state,
-        "assistant_text": _append_active_question_if_present(state, _ESCALATION_SENT_REPLY),
+        "assistant_text": assistant_text,
         "tool_events": events,
     }
 

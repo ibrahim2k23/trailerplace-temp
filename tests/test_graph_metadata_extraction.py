@@ -2152,7 +2152,12 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
         lambda **kwargs: graph.QuestionTurnDecision(
             answered_active_question=False,
             no_preference_for_active_question=False,
-            reply_to_user="We do offer financing options.",
+            reply_to_user=(
+                "We do offer financing options. To narrow down the right dump trailer, "
+                "What kind of material do you expect to haul?"
+            ),
+            rephrased_question="What kind of material do you expect to haul?",
+            retry_slot="haul_material",
             confidence="high",
             reason="counter_question_not_answer",
         ),
@@ -2168,10 +2173,74 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
 
     assert out["awaiting_slot"] == "haul_material"
     assert out["assistant_text"] == (
-        "We do offer financing options.\n\n"
-        "What material will you be hauling (dirt, gravel, debris, etc.)?"
+        "We do offer financing options. To narrow down the right dump trailer, "
+        "What kind of material do you expect to haul?"
     )
     assert out["mind_decision"]["action"] == "respond"
+
+    state["active_question_unanswered_count"] = 1
+    out = graph._apply_mind_node(state)
+
+    assert out["repeated_unanswered_question_escalation"] is True
+    assert "haul_material" in out["slots_skipped"]
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert "What's the rough haul weight per load?" in out["assistant_text"]
+    assert "What kind of material do you expect to haul?" not in out["assistant_text"]
+
+
+def test_active_question_followup_prefers_awaiting_slot_over_next_pending_question():
+    state = {
+        "trailer_category": "Equipment",
+        "awaiting_slot": "haul_weight_lbs",
+        "pending_questions": [
+            {
+                "slot": "haul_length_ft",
+                "question": "About how long is the load (or what deck length do you need)?",
+            }
+        ],
+    }
+
+    assert graph._active_question_followup(state) == "What's the rough total weight of the load?"
+
+
+def test_retry_fallback_preserves_direct_counterquestion_answer(monkeypatch):
+    class _InvalidRepair:
+        def invoke(self, _messages):
+            return graph.QuestionTurnDecision()
+
+    monkeypatch.setattr(graph, "_question_turn_adjudicator_llm", lambda: _InvalidRepair())
+    result = graph._repair_question_retry(
+        state={"messages": []},
+        decision=graph.QuestionTurnDecision(
+            counter_question_topic="hitch_types",
+            reply_to_user="What's the rough total weight of the load?",
+        ),
+        active_slot="haul_weight_lbs",
+        active_question="What's the rough total weight of the load?",
+        latest_message="Which hitch types do you have?",
+        direct_answer_fallback=(
+            "Available hitch configurations include Bumper Pull and Gooseneck. "
+            "Do you have a preference?"
+        ),
+    )
+
+    assert result.reply_to_user == (
+        "Available hitch configurations include Bumper Pull and Gooseneck. "
+        "What's the rough total weight of the load?"
+    )
+
+
+def test_retry_validation_accepts_semantically_matching_different_wording():
+    decision = graph.QuestionTurnDecision(
+        reply_to_user=(
+            "TrailerPlace offers Bumper Pull and Gooseneck configurations. "
+            "Now, could you let me know the rough total weight of the load?"
+        ),
+        rephrased_question="What is the approximate weight of the load you plan to haul?",
+        retry_slot="haul_weight_lbs",
+    )
+
+    assert graph._valid_question_retry(decision, "haul_weight_lbs") is True
 
 
 def test_valid_hitch_metadata_filters_are_normalized(monkeypatch):

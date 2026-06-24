@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.graph import build_chatbot_graph
+from src.chatbot.email_reply import compose_email_tool_reply
 from src.chatbot.inventory_matcher import search_trailers
 from src.chatbot.inventory_matcher import should_attempt_chat_lookup
 from src.chatbot.make_resolver import resolve_make_from_text
@@ -208,6 +209,8 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "pending_contact_actions": [],
         "active_question_text": None,
         "active_question_tracker": None,
+        "active_question_unanswered_count": 0,
+        "active_question_attempts": {},
         "pending_initial_user_message": None,
     }
 
@@ -782,9 +785,15 @@ def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | 
         )
         logger.info("deferred_contact_action_sent | type=interest | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return (
+        fallback = (
             f"Thanks, I saved your contact information and sent your interest in \"{item_name}\" "
             "to our team so they can follow up."
+        )
+        return compose_email_tool_reply(
+            email_purpose=f"customer interest in {item_name}",
+            latest_message=str((session.get("messages") or [{}])[-1].get("content") or ""),
+            conversation_context=_email_context_summary(session),
+            fallback=fallback,
         )
     if action_type == "faq":
         category = str(action.get("faq_category") or "contact_human")
@@ -802,7 +811,12 @@ def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | 
         )
         logger.info("deferred_contact_action_sent | type=faq | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return "Thanks, I saved your contact information and sent that request to our team so they can help."
+        return compose_email_tool_reply(
+            email_purpose=summary or category,
+            latest_message=str((session.get("messages") or [{}])[-1].get("content") or ""),
+            conversation_context=_email_context_summary(session),
+            fallback="Thanks, I saved your contact information and sent that request to our team so they can help.",
+        )
     if action_type == "escalation_alert":
         _persist_email_transcript_snapshot(session)
         result = send_escalation_alert_email(
@@ -816,7 +830,12 @@ def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | 
         )
         logger.info("deferred_contact_action_sent | type=escalation_alert | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return _ESCALATION_SENT_REPLY
+        return compose_email_tool_reply(
+            email_purpose=str(action.get("summary") or "customer escalation request"),
+            latest_message=str((session.get("messages") or [{}])[-1].get("content") or ""),
+            conversation_context=_email_context_summary(session),
+            fallback=_ESCALATION_SENT_REPLY,
+        )
     session["pending_contact_action"] = None
     return None
 
@@ -1340,6 +1359,7 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
         )
     elif not session.get("confusion_escalated"):
         _persist_email_transcript_snapshot(session)
+        context_summary = _email_context_summary(session)
         send_non_sales_faq_email(
             session_id=session.get("session_id") or "",
             full_name=session.get("customer_full_name") or "",
@@ -1351,10 +1371,15 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
                 "please reach out from the sales department."
             ),
             user_message=request.message,
-            context_summary=_email_context_summary(session),
+            context_summary=context_summary,
         )
         session["confusion_escalated"] = True
-        assistant_text = _CONFUSION_ESCALATION_REPLY
+        assistant_text = compose_email_tool_reply(
+            email_purpose="sales follow-up for repeated customer confusion",
+            latest_message=request.message,
+            conversation_context=context_summary,
+            fallback=_CONFUSION_ESCALATION_REPLY,
+        )
     else:
         assistant_text = _CONFUSION_ESCALATION_REPLY
     session["confusion_signal_count"] = int(similar_repeat_count)
@@ -1374,32 +1399,40 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
     )
 
 
-def _update_active_question_tracker(session: dict[str, Any], result: dict[str, Any]) -> bool:
+def _update_active_question_tracker(session: dict[str, Any], result: dict[str, Any]) -> None:
     question = str(result.get("active_question_text") or "").strip()
-    slot = str(result.get("awaiting_slot") or "").strip()
-    displayed = bool(question and question in str(result.get("assistant_text") or ""))
-    previous = dict(session.get("active_question_tracker") or {})
-    same_question = bool(
-        question and slot and previous.get("slot") == slot and previous.get("question") == question
-    )
-    if not question or not slot:
+    slot = str(result.get("active_question_slot") or result.get("awaiting_slot") or "").strip()
+    if "active_question_attempts" in result:
+        attempts = dict(result.get("active_question_attempts") or {})
+        count = int(attempts.get(slot) or 0) if slot else 0
+        session["active_question_attempts"] = attempts
+        session["active_question_unanswered_count"] = count
+        session["active_question_tracker"] = (
+            {"slot": slot, "question": question, "unanswered_count": count}
+            if slot
+            else None
+        )
+        return
+    attempts = dict(session.get("active_question_attempts") or {})
+    if not slot:
         session["active_question_tracker"] = None
-        return False
-    previous_count = int(previous.get("ask_count") or 0) if same_question else 0
-    already_escalated = bool(previous.get("confusion_sent")) if same_question else False
-    should_escalate = bool(
-        displayed
-        and same_question
-        and previous_count >= _UNANSWERED_QUESTION_REPEAT_THRESHOLD
-        and not already_escalated
-    )
+        session["active_question_unanswered_count"] = 0
+        return
+    previous_count = int(attempts.get(slot) or 0)
+    unanswered = bool(result.get("active_question_was_unanswered"))
+    count = previous_count + (1 if unanswered else 0)
+    if result.get("active_question_was_resolved") or result.get("repeated_unanswered_question_escalation"):
+        attempts.pop(slot, None)
+        count = 0
+    else:
+        attempts[slot] = count
+    session["active_question_attempts"] = attempts
     session["active_question_tracker"] = {
         "slot": slot,
         "question": question,
-        "ask_count": previous_count + (1 if displayed else 0),
-        "confusion_sent": already_escalated or should_escalate,
+        "unanswered_count": count,
     }
-    return should_escalate
+    session["active_question_unanswered_count"] = count
 
 
 def _strip_repeated_question(text: str, question: str) -> str:
@@ -1565,6 +1598,8 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "pending_contact_actions": deepcopy(session.get("pending_contact_actions") or []),
         "active_question_text": session.get("active_question_text"),
         "active_question_tracker": deepcopy(session.get("active_question_tracker")),
+        "active_question_unanswered_count": int(session.get("active_question_unanswered_count") or 0),
+        "active_question_attempts": deepcopy(session.get("active_question_attempts") or {}),
         "pending_initial_user_message": session.get("pending_initial_user_message"),
     }
     return build_chatbot_graph().invoke(graph_state)
@@ -1588,6 +1623,9 @@ def _reset_search_state_for_category_switch(session: dict[str, Any], old_categor
     session["already_shown_listing_urls"] = []
     session["last_listings"] = []
     session["tool_events"] = []
+    session["active_question_tracker"] = None
+    session["active_question_unanswered_count"] = 0
+    session["active_question_attempts"] = {}
     session["has_shown_search_results"] = False
     session["active_category_cycle_id"] = int(session.get("active_category_cycle_id") or 1) + 1
     logger.info(
@@ -1613,12 +1651,21 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     had_pending_contact_action = bool(
         session.get("pending_contact_action") or session.get("pending_contact_actions")
     )
+    had_expiring_email = any(
+        bool(action.get("expires_after_next_turn"))
+        for action in (
+            list(session.get("pending_contact_actions") or [])
+            + ([session.get("pending_contact_action")] if session.get("pending_contact_action") else [])
+        )
+        if isinstance(action, dict)
+    )
     contact_changed_this_turn = _apply_contact_from_request_and_message(session, request)
     contact_became_available = not had_contact_before_turn and _has_contact(session)
     session["sales_phase"] = "main"
 
     deferred_text = _send_pending_contact_action_if_ready(session)
-    if deferred_text:
+    deferred_email_prefix = deferred_text if had_expiring_email else None
+    if deferred_text and not had_expiring_email:
         assistant_text = deferred_text
         _update_active_question_tracker(
             session,
@@ -1642,6 +1689,14 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             main_prior_messages=session.get("messages") or [],
             listings=[],
         )
+    if had_expiring_email and not _has_contact(session):
+        session["pending_contact_actions"] = [
+            action
+            for action in (session.get("pending_contact_actions") or [])
+            if not action.get("expires_after_next_turn")
+        ]
+        if (session.get("pending_contact_action") or {}).get("expires_after_next_turn"):
+            session["pending_contact_action"] = None
 
     inventory_response = _inventory_lookup_response(session, request, request.message)
     if inventory_response:
@@ -1820,6 +1875,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "pending_contact_action",
         "pending_contact_actions",
         "active_question_text",
+        "active_question_attempts",
     ):
         if key in result:
             session[key] = result[key]
@@ -1829,7 +1885,11 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         if pending_action not in queued_actions:
             queued_actions.append(pending_action)
         session["pending_contact_actions"] = queued_actions
-    repeated_question_escalation = _update_active_question_tracker(session, result)
+    repeated_question_escalation = bool(result.get("repeated_unanswered_question_escalation"))
+    _update_active_question_tracker(session, result)
+    if repeated_question_escalation:
+        session["active_question_tracker"] = None
+        session["active_question_unanswered_count"] = 0
     tool_events = result.get("tool_events") or []
     if any(
         e.get("tool") == "pinecone_search" and int(e.get("result_count") or 0) > 0
@@ -1845,15 +1905,13 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         )
     assistant_text = (result.get("assistant_text") or "").strip() or " "
     if repeated_question_escalation:
-        tracker = dict(session.get("active_question_tracker") or {})
-        question = str(tracker.get("question") or "")
-        assistant_text = _strip_repeated_question(assistant_text, question)
         confusion_action = {
             "type": "faq",
             "faq_category": "contact_human",
-            "summary": "Customer did not answer the same qualification question after two follow-up attempts; sales follow-up requested.",
+            "summary": "Customer did not answer the same qualification question after two attempts; sales follow-up requested.",
             "user_message": request.message,
             "context_summary": _email_context_summary(session),
+            "expires_after_next_turn": True,
         }
         if _has_contact(session):
             _persist_email_transcript_snapshot(session)
@@ -1867,22 +1925,32 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 user_message=request.message,
                 context_summary=confusion_action["context_summary"],
             )
-            notice = "I've also asked our sales team to follow up so they can help you move forward."
+            next_question = str(result.get("active_question_text") or "")
+            base_reply = _strip_repeated_question(assistant_text, next_question)
+            assistant_text = compose_email_tool_reply(
+                email_purpose=confusion_action["summary"],
+                latest_message=request.message,
+                conversation_context=confusion_action["context_summary"],
+                base_reply=base_reply,
+                next_question=next_question,
+                fallback=f"I've asked our sales team to follow up.\n\n{assistant_text}".strip(),
+            )
         else:
             queued_actions = list(session.get("pending_contact_actions") or [])
             queued_actions.append(confusion_action)
             session["pending_contact_actions"] = queued_actions
-            notice = "" if "share your name" in assistant_text.lower() else (
-                "To send these requests to our team, please share your name and either your phone number or email address."
+            contact_notice = (
+                "If you'd like me to send this to our team, please share your name and either "
+                "your phone number or email address."
             )
-        if notice:
-            assistant_text = f"{assistant_text}\n\n{notice}" if assistant_text.strip() else notice
+            assistant_text = f"{contact_notice}\n\n{assistant_text}".strip()
         logger.info(
-            "repeated_unanswered_question_escalation | session_id=%s | awaiting_slot=%r | ask_count=%s",
+            "repeated_unanswered_question_escalation | session_id=%s | skipped_slot=%r",
             request.session_id,
-            tracker.get("slot"),
-            tracker.get("ask_count"),
+            result.get("skipped_unanswered_slot"),
         )
+    if deferred_email_prefix:
+        assistant_text = f"{deferred_email_prefix}\n\n{assistant_text}".strip()
     if contact_reply_action:
         bridge = _contact_prompt_bridge_text(
             action=contact_reply_action,
@@ -1895,6 +1963,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     assistant_msg = {
         "role": "assistant",
         "content": assistant_text,
+        "qualification_question": result.get("active_question_text"),
         "tool_events": tool_events,
         "listings": result.get("last_listings") or [],
         "trailer_category": result.get("trailer_category"),
