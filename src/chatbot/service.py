@@ -29,6 +29,7 @@ from src.chatbot.tools.email_tools import (
     send_escalation_alert_email,
     send_interested_listing_email,
     send_non_sales_faq_email,
+    send_trailer_results_shown_email,
 )
 from src.conversation_store import (
     create_or_get_soft_lead,
@@ -212,6 +213,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "active_question_unanswered_count": 0,
         "active_question_attempts": {},
         "pending_initial_user_message": None,
+        "pending_results_notification": False,
     }
 
 
@@ -221,6 +223,37 @@ def _persist_email_transcript_snapshot(session: dict[str, Any]) -> None:
         lead_id=session.get("lead_id"),
         messages=session.get("messages") or [],
     )
+
+
+def _send_results_shown_notification(session: dict[str, Any]) -> None:
+    """Send the internal results notification without affecting the customer response."""
+    if not _has_contact(session):
+        session["pending_results_notification"] = True
+        return
+    session["pending_results_notification"] = False
+    try:
+        _persist_email_transcript_snapshot(session)
+        result = send_trailer_results_shown_email(
+            session_id=session.get("session_id") or "",
+            full_name=session.get("customer_full_name") or "",
+            email=session.get("customer_email"),
+            phone=session.get("customer_phone") or "",
+        )
+        logger.info(
+            "trailer_results_shown_email_sent | session_id=%s | result=%s",
+            session.get("session_id"),
+            json.dumps(result, default=str),
+        )
+    except Exception:
+        logger.exception(
+            "trailer_results_shown_email_failed | session_id=%s",
+            session.get("session_id"),
+        )
+
+
+def _send_pending_results_notification_if_ready(session: dict[str, Any]) -> None:
+    if session.get("pending_results_notification") and _has_contact(session):
+        _send_results_shown_notification(session)
 
 
 def _get_session(session_id: str) -> dict[str, Any]:
@@ -402,14 +435,25 @@ Rules:
 * Extract email and phone when clearly present.
 * Extract a name only if the user clearly gives a personal name or nickname.
 * Do not extract names from email usernames, greetings, trailer requests, trailer brands, product names, locations, objections, or questions.
+* Use the current known values to interpret a contact-only reply. If exactly one contact field is
+  missing and the message is a plausible standalone value for that field, extract it.
+* A standalone alphabetic personal name can answer a request for the missing name.
+* A standalone phone number can answer a request for the missing phone/contact method.
+* A standalone email address can answer a request for the missing email/contact method.
+* Do not treat "yes", "no", trailer categories, brands, stock numbers, weights, dimensions, or
+  ordinary shopping replies as contact details.
 
 Name confidence:
 
 * Use "high" when the user explicitly identifies themselves.
   Examples: "my name is Ibrahim", "I am Ibrahim", "I'm Ibrahim", "this is Ibrahim", "Ibrahim here", "call me Tex", "mera naam Ibrahim hai".
 * Use "medium" when a plausible standalone name or nickname appears with a phone/email.
-  Examples: "Ibrahim 03304388550", "Ibrahim, [ibrahim@example.com](mailto:ibrahim@example.com)", "Ali Khan - 03304388550", "Tex 03304388550"."Jon 1234567890".
+  Also use "medium" for a plausible standalone name when name is the missing requested field.
+  Examples: "Ibrahim", "Ibrahim 03304388550", "Ibrahim, ibrahim@example.com", "Ali Khan - 03304388550".
 * Use "none" when no clear name is given.
+* Known name=null, email="mk@gmail.com"; message "ibrahim" -> full_name="Ibrahim", name_confidence="medium".
+* Known phone=null; message "03304388550" -> phone="03304388550".
+* Known email=null; message "ibrahim@example.com" -> email="ibrahim@example.com".
 
 Examples:
 
@@ -629,22 +673,25 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
             [
                 SystemMessage(
                     content=(
-                        "The customer has just replied to an optional contact request or supplied contact details "
-                        "for the first time. Decide the next action.\n"
-                        "Return action=answer_contact_question when the latest reply asks why contact "
-                        "details are needed, how they will be used, or whether they are required.\n"
-                        "Return action=acknowledge_contact_details when the latest reply primarily supplies "
-                        "the requested name plus phone number or email and there is no saved original request. "
-                        "Never acknowledge name-only or phone/email-only details as complete; those are partial contact replies.\n"
-                        "Return action=decline_contact_details when the user declines or skips contact details "
-                        "and does not make another actionable request.\n"
-                        "Return action=resume_saved_request when the latest reply is only providing "
-                        "or declining contact details and a saved original request should now resume.\n"
-                        "Return action=route_latest_request only when the latest reply contains a "
-                        "clear new actionable trailer, store, financing, service, parts, trade-in, "
-                        "human-contact, or inventory request that should replace the saved request.\n"
-                        "Do not rely on fixed wording; judge the user's intent in context."
-                    )
+                            "The customer just replied to an optional contact request. Decide the next action.\n\n"
+
+                            "## CONTACT VALUE RECOGNITION\n"
+                            "Treat standalone names (e.g. 'ibrahim', 'john'), phone numbers (e.g. '03304388550', '033-438-8550'), "
+                            "or emails (e.g. 'ibrahim@example.com') as partial or complete contact replies — not new trailer requests. "
+                            "This applies whether the assistant asked for all fields or one specific missing field.\n\n"
+
+                            "## ACTION RULES (evaluate in order)\n"
+                            "1. `answer_contact_question` — reply asks why contact is needed, how it will be used, or if it's required.\n"
+                            "2. `acknowledge_contact_details` — reply supplies name + phone or name + email AND no saved request exists. "
+                            "   Never acknowledge name-only or phone/email-only as complete.\n"
+                            "3. `resume_saved_request` — reply only provides or declines contact details AND a saved original request exists. "
+                            "   Store any supplied field, then resume the saved request.\n"
+                            "4. `decline_contact_details` — user declines or skips contact and makes no other actionable request.\n"
+                            "5. `route_latest_request` — reply contains a clear new trailer, store, financing, service, parts, "
+                            "   trade-in, human-contact, or inventory request that should replace the saved request.\n\n"
+
+                            "Judge intent from context, not fixed wording."
+                        )
                 ),
                 HumanMessage(
                     content=(
@@ -1537,6 +1584,7 @@ def _inventory_lookup_response(
     session["already_shown_listing_urls"] = sorted(set(shown))
     if listings:
         session["has_shown_search_results"] = True
+        _send_results_shown_notification(session)
     session["sales_phase"] = "main"
     _persist(session)
     _log_chat_turn(request.session_id, request.message, assistant_text)
@@ -1663,6 +1711,7 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     contact_became_available = not had_contact_before_turn and _has_contact(session)
     session["sales_phase"] = "main"
 
+    _send_pending_results_notification_if_ready(session)
     deferred_text = _send_pending_contact_action_if_ready(session)
     deferred_email_prefix = deferred_text if had_expiring_email else None
     if deferred_text and not had_expiring_email:
@@ -1977,6 +2026,12 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         "metadata_filters_collected": result.get("metadata_filters_collected") or {},
     }
     session["messages"].append(assistant_msg)
+    if any(
+        e.get("tool") == "pinecone_search" and int(e.get("result_count") or 0) > 0
+        for e in tool_events
+        if isinstance(e, dict)
+    ):
+        _send_results_shown_notification(session)
     session["sales_phase"] = "main"
     _persist(session)
     _log_chat_turn(request.session_id, request.message, assistant_text)

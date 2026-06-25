@@ -23,6 +23,8 @@ FAQ_ITEM_OF_INTEREST_LABELS = {
     "service_parts": "Spare Parts Query",
     "store_info": "Store Information Query",
 }
+TRAILER_RESULTS_SHOWN_SUBJECT = "Trailer Results Shown to User"
+TRAILER_RESULTS_SHOWN_DESCRIPTION = "Trailer results were shown to the user."
 
 
 def _conversation_transcript_from_db(session_id: str) -> str:
@@ -147,6 +149,33 @@ def send_escalation_alert_email(
         email=email,
         phone=phone,
         subject="Escalation Alert",
+        summary_line=summary_line,
+    )
+    return {
+        "status": "sent",
+        "body_preview": (
+            f"Name: {full_name}\n"
+            f"Email: {(email or '').strip() or 'Not provided'}\n"
+            f"Phone Number: {phone}\n\n"
+            f"{summary_line}"
+        ),
+    }
+
+
+def send_trailer_results_shown_email(
+    *,
+    session_id: str,
+    full_name: str,
+    email: Optional[str],
+    phone: str,
+) -> dict:
+    """Silently notify the business after a non-empty trailer result batch is shown."""
+    summary_line = _append_conversation(TRAILER_RESULTS_SHOWN_DESCRIPTION, session_id)
+    send_faq_email_sync(
+        full_name=full_name,
+        email=email,
+        phone=phone,
+        subject=TRAILER_RESULTS_SHOWN_SUBJECT,
         summary_line=summary_line,
     )
     return {

@@ -117,3 +117,30 @@ def test_escalation_alert_email_uses_alert_subject_without_session_id(monkeypatc
     assert "[Escalation Alert] Customer asked for a quote." in send_call["summary_line"]
     assert "Context:\nCategory: Dump" in send_call["summary_line"]
     assert "session" not in result["body_preview"].lower()
+
+
+def test_trailer_results_shown_email_uses_fixed_subject_and_complete_format(monkeypatch):
+    calls = []
+    monkeypatch.setattr(email_tools, "send_faq_email_sync", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(
+        email_tools,
+        "_conversation_transcript_from_db",
+        lambda _session_id: "User:\nShow utility trailers\n\nChatbot:\nTrailer #1: Utility A",
+    )
+
+    result = email_tools.send_trailer_results_shown_email(
+        session_id="session-results",
+        full_name="Test User",
+        email="test@example.com",
+        phone="979-555-1111",
+    )
+
+    assert result["status"] == "sent"
+    assert calls[0]["subject"] == "Trailer Results Shown to User"
+    assert calls[0]["summary_line"] == (
+        "Trailer results were shown to the user.\n\n"
+        "Conversation:\nUser:\nShow utility trailers\n\nChatbot:\nTrailer #1: Utility A"
+    )
+    assert result["body_preview"].startswith(
+        "Name: Test User\nEmail: test@example.com\nPhone Number: 979-555-1111"
+    )

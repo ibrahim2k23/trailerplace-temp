@@ -409,7 +409,11 @@ def _mind_llm():
 
 @lru_cache(maxsize=1)
 def _category_filter_confirmation_llm():
-    model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    model = (
+        os.getenv("CATEGORY_FILTER_CONFIRMATION_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         CategoryFilterConfirmationDecision,
         method="function_calling",
@@ -1930,6 +1934,46 @@ def _message_has_slot_evidence(slot: str, value: Any, latest_message: str, await
     return _value_text_appears_in_message(value, latest_message)
 
 
+def _feature_has_message_evidence(feature: str, latest_message: str) -> bool:
+    def concepts(text: str) -> set[str]:
+        words = re.findall(r"[a-z0-9]+", str(text or "").lower())
+        aliases = {
+            "sliding": "slide",
+            "slider": "slide",
+            "slides": "slide",
+            "gates": "gate",
+            "doors": "door",
+            "ramps": "ramp",
+            "wheels": "wheel",
+            "tires": "wheel",
+            "tyres": "wheel",
+            "allterrain": "offroad",
+        }
+        normalized: set[str] = set()
+        for word in words:
+            compact = word.replace("-", "")
+            normalized.add(aliases.get(compact, compact))
+        compact_text = re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+        if "allterrain" in compact_text or "offroad" in compact_text:
+            normalized.add("offroad")
+        return normalized
+
+    ignored = {
+        "a",
+        "an",
+        "and",
+        "for",
+        "of",
+        "the",
+        "trailer",
+        "trailers",
+        "with",
+    }
+    feature_concepts = concepts(feature) - ignored
+    message_concepts = concepts(latest_message)
+    return bool(feature_concepts) and feature_concepts.issubset(message_concepts)
+
+
 def _explicit_subcategory_requested(message: str) -> bool:
     text = str(message or "").lower()
     return bool(
@@ -2956,6 +3000,13 @@ def _extract_field_updates(
     shorthand_updates = _dimension_shorthand_updates(latest)
     metadata_updates: dict[str, Any] = {}
     for key, value in (data.get("metadata_filters_update") or {}).items():
+        if not _message_has_filter_evidence(str(key), latest, awaiting_slot):
+            logger.info(
+                "metadata_filter_rejected | key=%s | value=%r | reason=not_in_latest_message",
+                key,
+                value,
+            )
+            continue
         sanitized = _canonicalize_adjudicated_metadata(key=str(key), value=value, category=category)
         if sanitized:
             clean_key, clean_value = sanitized
@@ -2971,16 +3022,42 @@ def _extract_field_updates(
                 clean_key, clean_value = sanitized
                 metadata_updates[clean_key] = clean_value
 
+    raw_slot_updates = {
+        str(key): value
+        for key, value in (data.get("slots_collected_update") or {}).items()
+        if _message_has_slot_evidence(str(key), value, latest, awaiting_slot)
+    }
+    for key, value in (data.get("slots_collected_update") or {}).items():
+        if str(key) not in raw_slot_updates:
+            logger.info(
+                "slot_update_rejected | slot=%s | value=%r | reason=not_in_latest_message",
+                key,
+                value,
+            )
     slot_updates = (
         _canonicalize_adjudicated_slots(
-            raw=data.get("slots_collected_update") or {},
+            raw=raw_slot_updates,
             allowed_category_slots=allowed_category_slots,
             metadata_updates=metadata_updates,
         )
         if apply_slot_updates
         else {}
     )
-    features = _normalize_requested_feature_list(data.get("requested_non_metadata_features") or [])
+    features = [
+        feature
+        for feature in _normalize_requested_feature_list(
+            data.get("requested_non_metadata_features") or []
+        )
+        if _feature_has_message_evidence(feature, latest)
+    ]
+    for feature in _normalize_requested_feature_list(
+        data.get("requested_non_metadata_features") or []
+    ):
+        if feature not in features:
+            logger.info(
+                "requested_feature_rejected | feature=%r | reason=not_in_latest_message",
+                feature,
+            )
     slot_updates, features = _remove_generic_haul_use_feature_duplicates(slot_updates, features)
     return FieldExtractionAdjudicationDecision(
         metadata_filters_update=metadata_updates,
@@ -4909,6 +4986,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             for key, value in carry_filters.items():
                 if key not in metadata_filters:
                     metadata_filters[key] = value
+        else:
+            for key in carry_filters:
+                metadata_filters.pop(key, None)
         state = {**state, "pending_category_change": None}
         awaiting_slot = None
         decision["action"] = "ask_next_question"
@@ -4997,6 +5077,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 "asked_questions": [],
                 "already_shown_listing_urls": [],
                 "last_listings": [],
+                "active_question_attempts": {},
+                "active_question_unanswered_count": 0,
+                "active_question_tracker": None,
                 "assistant_text": question,
                 "mind_decision": decision,
             }
@@ -5251,7 +5334,17 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         messages=state.get("messages") or [],
     )
     active_qna_question = str(active_qna_definition.get("question") or "").strip()
-    active_question_attempts = dict(state.get("active_question_attempts") or {})
+    active_question_attempts = (
+        {}
+        if category_changed
+        else dict(state.get("active_question_attempts") or {})
+    )
+    if category_changed:
+        logger.info(
+            "category_change_resets_question_attempts | old_category=%r | new_category=%r",
+            category_before,
+            category,
+        )
     active_qna_unanswered = False
     active_qna_reply = ""
     active_qna_retry_question = ""

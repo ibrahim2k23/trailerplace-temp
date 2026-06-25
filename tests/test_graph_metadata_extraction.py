@@ -784,6 +784,26 @@ def test_category_change_clears_old_filters_and_slots(monkeypatch):
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
+def test_category_change_resets_active_question_attempts(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("I am looking for a dump trailer", category="Dump")
+    state["trailer_category"] = "Equipment"
+    state["awaiting_slot"] = "haul_weight_lbs"
+    state["active_question_attempts"] = {"haul_weight_lbs": 1}
+    state["active_question_unanswered_count"] = 1
+    state["active_question_tracker"] = {
+        "slot": "haul_weight_lbs",
+        "question": "What's the rough total weight of the load?",
+        "unanswered_count": 1,
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Dump"
+    assert out["active_question_attempts"] == {}
+    assert out["repeated_unanswered_question_escalation"] is False
+
+
 def test_category_change_confirms_only_old_common_filters(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     state = _state("I am looking for a 20 ft livestock trailer", category="Livestock")

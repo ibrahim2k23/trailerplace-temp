@@ -369,6 +369,165 @@ def test_resumed_graph_does_not_receive_contact_reply_as_recent_context(monkeypa
     assert any("looking for a trailer" in str(msg.get("content") or "") for msg in graph_messages)
 
 
+def test_contact_resume_and_selective_category_filter_carryover(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001024"
+    service.reset_session(session_id)
+    resumed_messages = []
+    original_request = (
+        "I need a 20 ft livestock trailer with a 7 ft width, "
+        "7000 lbs payload, gooseneck hitch, and sliding gates"
+    )
+
+    monkeypatch.setattr(
+        service,
+        "create_or_get_soft_lead",
+        lambda **kwargs: "00000000-0000-0000-0000-000000009024",
+    )
+    monkeypatch.setattr(
+        service,
+        "update_lead_contact",
+        lambda **kwargs: "00000000-0000-0000-0000-000000009024",
+    )
+    monkeypatch.setattr(
+        service,
+        "_classify_contact_prompt_reply",
+        lambda *_args, **_kwargs: _decision("resume_saved_request"),
+    )
+    monkeypatch.setattr(service, "_contact_prompt_bridge_text", _bridge)
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: True)
+
+    def _capture_resumed_request(_session, message, _shown):
+        resumed_messages.append(message)
+        return {
+            "assistant_text": "Continuing your trailer search.",
+            "tool_events": [],
+            "last_listings": [],
+        }
+
+    monkeypatch.setattr(service, "_invoke_graph", _capture_resumed_request)
+
+    service.handle_chat(_req(session_id, original_request))
+    service.handle_chat(_req(session_id, "Ibrahim, 03304388550"))
+
+    assert resumed_messages[-1] == original_request
+
+    class _StaleHistoryExtractor:
+        def invoke(self, _messages):
+            return graph.FieldExtractionAdjudicationDecision(
+                metadata_filters_update={
+                    "length_ft": "20 ft",
+                    "width_ft": "7 ft",
+                    "payload_lbs": "7000 lbs",
+                    "hitch_type": "Gooseneck",
+                },
+                slots_collected_update={"trailer_length_ft": "20 ft"},
+                requested_non_metadata_features=["sliding gates"],
+                confidence="high",
+            )
+
+    class _SelectiveConfirmation:
+        def invoke(self, _messages):
+            return graph.CategoryFilterConfirmationDecision(
+                keep_fields=["length_ft"],
+                discard_fields=["payload_lbs"],
+                updates={"hitch_type": "Bumper Pull"},
+                resolved=True,
+                confidence="high",
+            )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        graph,
+        "_field_extraction_adjudicator_llm",
+        lambda: _StaleHistoryExtractor(),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_category_filter_confirmation_llm",
+        lambda: _SelectiveConfirmation(),
+    )
+    monkeypatch.setattr(
+        graph,
+        "classify_haul_requirements",
+        lambda **kwargs: graph.HaulClassificationDecision(),
+    )
+    monkeypatch.setattr(
+        graph,
+        "classify_no_preference",
+        lambda **kwargs: graph.PreferenceNullDecision(),
+    )
+
+    state = {
+        "session_id": session_id,
+        "user_message": "I need a utility trailer",
+        "active_search_request_text": original_request,
+        "messages": [
+            {"role": "user", "content": original_request},
+            {"role": "assistant", "content": "Here are matching livestock trailers."},
+            {"role": "user", "content": "I need a utility trailer"},
+        ],
+        "mind_decision": {
+            "action": "respond",
+            "trailer_category": "Utility",
+            "slots_collected_update": {},
+            "metadata_filters_update": {},
+        },
+        "trailer_category": "Livestock",
+        "slots_collected": {"trailer_length_ft": "20 ft"},
+        "slots_skipped": [],
+        "metadata_filters_collected": {
+            "length_ft": "20 ft",
+            "width_ft": "7 ft",
+            "payload_lbs": "7000 lbs",
+            "hitch_type": "Gooseneck",
+        },
+        "defaulted_metadata_filters": [],
+        "requested_non_metadata_features": ["sliding gates"],
+        "pending_questions": [],
+        "asked_questions": [],
+        "already_shown_listing_urls": ["https://example.test/livestock"],
+        "last_listings": [{"title": "Livestock result"}],
+        "tool_events": [],
+        "has_shown_search_results": True,
+    }
+
+    changed = graph._apply_mind_node(state)
+
+    assert changed["metadata_filters_collected"] == {}
+    assert changed["requested_non_metadata_features"] == []
+    assert set(changed["pending_category_change"]["carry_filters"]) == {
+        "length_ft",
+        "width_ft",
+        "payload_lbs",
+        "hitch_type",
+    }
+
+    changed["user_message"] = (
+        "Keep the length, discard the payload, and change the hitch to bumper pull"
+    )
+    changed["mind_decision"] = {"action": "respond", "trailer_category": "Utility"}
+    selective = graph._apply_mind_node(changed)
+
+    assert selective["metadata_filters_collected"] == {
+        "length_ft": "20 ft",
+        "hitch_type": "Bumper Pull",
+    }
+    assert selective["pending_category_change"]["carry_filters"] == {"width_ft": "7 ft"}
+    assert "width" in selective["assistant_text"].lower()
+
+    selective["user_message"] = "no"
+    selective["mind_decision"] = {"action": "respond", "trailer_category": "Utility"}
+    final = graph._apply_mind_node(selective)
+
+    assert final["pending_category_change"] is None
+    assert final["metadata_filters_collected"] == {
+        "length_ft": "20 ft",
+        "hitch_type": "Bumper Pull",
+    }
+    assert final["requested_non_metadata_features"] == []
+
+
 def test_category_clarification_state_survives_after_contact_resume(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001022"
     service.reset_session(session_id)
@@ -485,6 +644,55 @@ def test_contact_prompt_reply_classifier_uses_regex_fallback_on_llm_failure(monk
         session,
         "show me dump trailers instead",
     ) is False
+
+
+def test_contact_extraction_prompt_covers_standalone_contact_values(monkeypatch):
+    captured = {}
+
+    class _CaptureLLM:
+        def invoke(self, messages):
+            captured["system"] = messages[0].content
+            captured["human"] = messages[1].content
+            return service.ContactExtraction()
+
+    monkeypatch.setattr(service, "_contact_llm", lambda: _CaptureLLM())
+    service._extract_contact(
+        "ibrahim",
+        {
+            "customer_full_name": None,
+            "customer_email": "mk@gmail.com",
+            "customer_phone": None,
+        },
+    )
+
+    prompt = captured["system"].lower()
+    assert "standalone alphabetic personal name" in prompt
+    assert "standalone phone number" in prompt
+    assert "standalone email address" in prompt
+    assert "03304388550" in prompt
+    assert "ibrahim@example.com" in prompt
+    assert "email='mk@gmail.com'" in captured["human"]
+
+
+def test_contact_reply_prompt_treats_standalone_values_as_contact_replies(monkeypatch):
+    captured = {}
+
+    class _CaptureLLM:
+        def invoke(self, messages):
+            captured["system"] = messages[0].content
+            return service.ContactPromptReplyDecision(action="resume_saved_request")
+
+    monkeypatch.setattr(service, "_contact_prompt_reply_llm", lambda: _CaptureLLM())
+    session = service._new_session("00000000-0000-0000-0000-000000001130")
+    session["pending_initial_user_message"] = "I need a utility trailer"
+
+    service._classify_contact_prompt_reply(session, "ibrahim")
+
+    prompt = captured["system"].lower()
+    assert "immediately preceding contact request" in prompt
+    assert "'ibrahim'" in prompt
+    assert "'03304388550'" in prompt
+    assert "'ibrahim@example.com'" in prompt
 
 
 def test_voluntary_contact_updates_lead_status(monkeypatch):
@@ -817,6 +1025,148 @@ def test_inventory_lookup_works_after_results_for_ordinal_reference(monkeypatch)
 
     assert search_calls == [True]
     assert response.assistant_text == "Yes, that trailer is listed at $1."
+
+
+def test_inventory_results_send_silent_notification_with_completed_turn(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001127"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session.update(
+        {
+            "initial_contact_request_asked": True,
+            "has_shown_search_results": True,
+            "customer_full_name": "Test User",
+            "customer_phone": "979-555-1111",
+            "contact_status": "contact_available",
+            "last_listings": [
+                {"title": "Utility A", "stock_number": "11111"},
+                {"title": "Utility B", "stock_number": "22222"},
+            ],
+        }
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: {
+            "reply": "Trailer #1: Utility A",
+            "entity_type": "GENERAL",
+            "confidence": 1.0,
+            "top_matches": [{"title": "Utility A"}],
+            "extraction": {},
+        },
+    )
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_persist_email_transcript_snapshot",
+        lambda current: calls.append(("snapshot", current["messages"][-1]["content"])),
+    )
+    monkeypatch.setattr(
+        service,
+        "send_trailer_results_shown_email",
+        lambda **kwargs: calls.append(("email", kwargs)) or {"status": "sent"},
+    )
+
+    request = _req(session_id, "what is the price of the second one?")
+    session["messages"].append({"role": "user", "content": request.message})
+    response = service._inventory_lookup_response(session, request, request.message)
+
+    assert response is not None
+    assert response.assistant_text == "Trailer #1: Utility A"
+    assert calls[0] == ("snapshot", "Trailer #1: Utility A")
+    assert calls[1][0] == "email"
+
+
+def test_pinecone_results_defer_until_full_contact_and_send_latest_silently(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001128"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    calls = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "lead")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "lead")
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_persist_email_transcript_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "send_trailer_results_shown_email",
+        lambda **kwargs: calls.append(kwargs) or {"status": "sent"},
+    )
+    result_number = {"value": 0}
+
+    def _graph(*_args, **_kwargs):
+        result_number["value"] += 1
+        number = result_number["value"]
+        return {
+            "assistant_text": f"Result batch {number}",
+            "mind_decision": {"action": "pinecone_search"},
+            "tool_events": [{"tool": "pinecone_search", "result_count": 1}],
+            "last_listings": [{"title": f"Trailer {number}"}],
+        }
+
+    monkeypatch.setattr(service, "_invoke_graph", _graph)
+
+    first = service.handle_chat(_req(session_id, "show utility trailers"))
+    second = service.handle_chat(_req(session_id, "show more"))
+
+    assert first.assistant_text == "Result batch 1"
+    assert second.assistant_text == "Result batch 2"
+    assert calls == []
+    assert session["pending_results_notification"] is True
+
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service, "_main_smalltalk_response", lambda *_args, **_kwargs: "Contact saved.")
+    third = service.handle_chat(_req(session_id, "I am Alex and my phone is 979-555-2222"))
+
+    assert "saved" in third.assistant_text.lower()
+    assert "email" not in third.assistant_text.lower()
+    assert len(calls) == 1
+    assert calls[0]["full_name"] == "Alex"
+    assert session["pending_results_notification"] is False
+
+
+def test_results_email_failure_does_not_block_pinecone_response(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001129"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session.update(
+        {
+            "initial_contact_request_asked": True,
+            "customer_full_name": "Test User",
+            "customer_phone": "979-555-1111",
+            "contact_status": "contact_available",
+        }
+    )
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "lead")
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_persist_email_transcript_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "send_trailer_results_shown_email",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("email unavailable")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda *_args, **_kwargs: {
+            "assistant_text": "Trailer #1: Dump A",
+            "mind_decision": {"action": "pinecone_search"},
+            "tool_events": [{"tool": "pinecone_search", "result_count": 1}],
+            "last_listings": [{"title": "Dump A"}],
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "show dump trailers"))
+
+    assert response.assistant_text == "Trailer #1: Dump A"
 
 
 def test_inventory_lookup_is_inactive_after_category_switch_qna_reset(monkeypatch):

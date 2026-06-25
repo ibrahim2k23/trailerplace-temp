@@ -23,7 +23,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-TICKET_EMAIL_SUBJECT = "ticket notification"
+TICKET_EMAIL_SUBJECT = "Interest Ticket Notification"
 
 _faq_email_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="faq_email")
 
