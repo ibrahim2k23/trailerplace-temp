@@ -1926,14 +1926,20 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 context_summary=confusion_action["context_summary"],
             )
             next_question = str(result.get("active_question_text") or "")
-            base_reply = _strip_repeated_question(assistant_text, next_question)
-            assistant_text = compose_email_tool_reply(
+            has_search_results = bool(result.get("last_listings"))
+            base_reply = "" if has_search_results else _strip_repeated_question(assistant_text, next_question)
+            email_reply = compose_email_tool_reply(
                 email_purpose=confusion_action["summary"],
                 latest_message=request.message,
                 conversation_context=confusion_action["context_summary"],
                 base_reply=base_reply,
-                next_question=next_question,
-                fallback=f"I've asked our sales team to follow up.\n\n{assistant_text}".strip(),
+                next_question="" if has_search_results else next_question,
+                fallback="I've asked our sales team to follow up.",
+            )
+            assistant_text = (
+                f"{email_reply}\n\n{assistant_text}".strip()
+                if has_search_results
+                else email_reply
             )
         else:
             queued_actions = list(session.get("pending_contact_actions") or [])
