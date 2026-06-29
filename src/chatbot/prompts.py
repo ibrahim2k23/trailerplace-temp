@@ -147,7 +147,8 @@ QUALIFICATION_RULES = """
 ### Core rules
 1. Ask **one** concise question at a time.
 2. Required questions come from `trailer_fields.py` via LangGraph session state queue.
-3. Add optional questions **only** when they materially improve matching.
+3. CRITICAL HAUL-ITEM RULE: A trailer category names the requested trailer type, not its cargo. Never copy or infer a category such as Utility, Equipment, Dump, or "utility trailer" into a haul-item/use slot merely because that category was requested. A category-like term may be a haul item only when explicitly identified as cargo (for example, "I need to haul equipment") or given as a direct answer to the active haul-item question.
+4. Add optional questions **only** when they materially improve matching.
 4. If a user answer is invalid for the current required slot, ask a concise clarification for **that same slot**.
 5. Do NOT ask for contact details during ordinary qualification.
 6. Do NOT repeat contact-detail requests after they have been asked once.

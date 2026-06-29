@@ -623,6 +623,8 @@ def test_contact_prompt_bridge_prompt_forbids_trailer_questions(monkeypatch):
     system_prompt = captured["system"]
     assert "do not ask any trailer-search or qualification question" in system_prompt
     assert "Never ask what type" in system_prompt
+    assert "Vary the wording naturally" in system_prompt
+    assert "whenever you're ready" in system_prompt
     assert "End without a question mark" in system_prompt
 
 

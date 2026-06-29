@@ -747,8 +747,11 @@ def _contact_prompt_bridge_text(
                         "or budget the customer wants; the next response will handle trailer details. "
                         "If action is answer_contact_question, explain that contact details help the team "
                         "reach the customer later if the need arises and that sharing them is optional. "
-                        "If action is resume_saved_request, acknowledge their preference or ambiguity without pressure "
-                        "and say you can keep helping here. "
+                        "If action is resume_saved_request and contact details were provided, thank them briefly and naturally. "
+                        "If they declined, warmly acknowledge and respect their preference, then say you will continue helping "
+                        "with their trailer request. Vary the wording naturally; do not copy a fixed template. "
+                        "Never use stalling or readiness language such as 'whenever you're ready', 'when you're ready', "
+                        "or 'I'm here to help whenever'. The trailer response immediately following this opening continues the flow. "
                         "Keep it to 1-2 concise sentences, no markdown list. End without a question mark."
                     )
                 ),

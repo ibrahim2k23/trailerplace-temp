@@ -1,4 +1,22 @@
-from src.chatbot import graph, make_resolver
+import inspect
+
+from src.chatbot import graph, make_resolver, mini_llm_classifier, prompts
+
+
+def test_all_existing_llm_prompts_forbid_category_as_implicit_haul_item():
+    prompt_text = " ".join(
+        [
+            prompts.MIND_SYSTEM_PROMPT,
+            inspect.getsource(graph._extract_field_updates),
+            inspect.getsource(graph._adjudicate_active_question_turn),
+            inspect.getsource(mini_llm_classifier.classify_haul_requirements),
+        ]
+    ).lower()
+
+    assert prompt_text.count("critical haul-item rule") == 3
+    assert "a trailer category names the requested trailer type, not its cargo" in prompt_text
+    assert "i want an equipment trailer" in prompt_text
+    assert "i need to haul equipment" in prompt_text
 
 
 def _state(message: str, *, category: str) -> dict:
