@@ -110,6 +110,7 @@ class ContactPromptReplyDecision(BaseModel):
         "acknowledge_contact_details",
         "decline_contact_details",
         "resume_saved_request",
+        "resume_saved_request_with_update",
         "route_latest_request",
     ] = "resume_saved_request"
     reason: str = ""
@@ -686,8 +687,11 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
                             "   Never acknowledge name-only or phone/email-only as complete.\n"
                             "3. `resume_saved_request` — reply only provides or declines contact details AND a saved original request exists. "
                             "   Store any supplied field, then resume the saved request.\n"
-                            "4. `decline_contact_details` — user declines or skips contact and makes no other actionable request.\n"
-                            "5. `route_latest_request` — reply contains a clear new trailer, store, financing, service, parts, "
+                            "4. `resume_saved_request_with_update` — reply ignores contact and adds or refines the saved "
+                            "   request, including 'it should be 20ft', 'make it gooseneck', or 'I will haul cattle'.\n"
+                            "5. `decline_contact_details` — user declines or skips contact and makes no other actionable request.\n"
+                            "6. `route_latest_request` — reply clearly replaces the saved request with a different trailer, "
+                            "   store, financing, service, parts, "
                             "   trade-in, human-contact, or inventory request that should replace the saved request.\n\n"
 
                             "Judge intent from context, not fixed wording."
@@ -706,7 +710,7 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
         action = str(decision.get("action") or "resume_saved_request")
         allowed = {
             "answer_contact_question", "acknowledge_contact_details", "decline_contact_details",
-            "resume_saved_request", "route_latest_request",
+            "resume_saved_request", "resume_saved_request_with_update", "route_latest_request",
         }
         if action not in allowed:
             action = "route_latest_request"
@@ -754,7 +758,8 @@ def _contact_prompt_bridge_text(
                         "engaged with their trailer request. Use natural sales-friendly wording such as 'No problem at all—I "
                         "understand your preference, and I'll continue helping with your trailer search.' Vary the wording naturally "
                         "rather than copying a fixed template. Apply the same respectful approach when resume_saved_request "
-                        "represents a refusal or skip. "
+                        "represents a refusal or skip. For resume_saved_request_with_update, briefly acknowledge that you "
+                        "will continue with the added requirement; do not repeat or interpret the trailer details yourself. "
                         "Never use stalling or readiness language such as 'whenever you're ready', 'when you're ready', "
                         "or 'I'm here to help whenever'. The trailer response immediately following this opening continues the flow. "
                         "Keep it to 1-2 concise sentences, no markdown list. End without a question mark."
@@ -1701,6 +1706,12 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     session = _get_session(request.session_id)
     _ensure_lead(session)
     had_contact_before_turn = _has_contact(session)
+    contact_before_turn = {
+        "customer_full_name": session.get("customer_full_name"),
+        "customer_full_name_confidence": session.get("customer_full_name_confidence"),
+        "customer_email": session.get("customer_email"),
+        "customer_phone": session.get("customer_phone"),
+    }
     session["messages"].append({"role": "user", "content": request.message})
     was_awaiting_initial_contact = bool(session.get("awaiting_initial_contact_reply"))
     had_pending_contact_action = bool(
@@ -1788,6 +1799,14 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     if was_awaiting_initial_contact or contact_became_available:
         session["awaiting_initial_contact_reply"] = False
         contact_reply_decision = _classify_contact_prompt_reply(session, request.message)
+        if contact_reply_decision.action in {
+            "route_latest_request", "resume_saved_request_with_update"
+        } and not _has_contact(session):
+            for key, value in contact_before_turn.items():
+                session[key] = value
+            _sync_contact_status(session)
+            contact_changed_this_turn = False
+            _persist_contact(session)
         if contact_changed_this_turn and not _has_contact(session):
             session["awaiting_initial_contact_reply"] = True
             assistant_text = _initial_contact_request_text(session)
@@ -1837,11 +1856,17 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 main_prior_messages=session.get("messages") or [],
                 listings=[],
             )
-        if pending_initial and contact_reply_decision.action in {"answer_contact_question", "resume_saved_request"}:
+        if pending_initial and contact_reply_decision.action in {
+            "answer_contact_question", "resume_saved_request", "resume_saved_request_with_update"
+        }:
             contact_reply_action = contact_reply_decision.action
             contact_reply_latest_message = request.message
             contact_reply_saved_request = pending_initial
-            effective_message = pending_initial
+            effective_message = (
+                f"{pending_initial} | Additional requirement: {request.message}"
+                if contact_reply_decision.action == "resume_saved_request_with_update"
+                else pending_initial
+            )
         else:
             effective_message = request.message
     else:

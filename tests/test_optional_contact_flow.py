@@ -263,6 +263,16 @@ def test_new_actionable_request_after_contact_refusal_replaces_original_request(
     monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **kwargs: "00000000-0000-0000-0000-000000009005")
     monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009005")
     monkeypatch.setattr(service, "_classify_contact_prompt_reply", lambda *_args, **_kwargs: _decision("route_latest_request"))
+    monkeypatch.setattr(
+        service,
+        "_extract_contact",
+        lambda message, *_args, **_kwargs: {
+            "full_name": None,
+            "email": None,
+            "phone": "25" if "25ft" in message else None,
+            "name_confidence": "none",
+        },
+    )
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
     monkeypatch.setattr(service, "_should_route_to_graph", lambda _session, message: invoked.append(message) or True)
     monkeypatch.setattr(
@@ -276,11 +286,45 @@ def test_new_actionable_request_after_contact_refusal_replaces_original_request(
     )
 
     service.handle_chat(_req(session_id, "I need a 6x12 utility trailer"))
-    response = service.handle_chat(_req(session_id, "No thanks, show me dump trailers instead"))
+    response = service.handle_chat(_req(session_id, "The trailer should be a 25ft livestock"))
 
-    assert response.assistant_text == "Continuing with: No thanks, show me dump trailers instead"
-    assert invoked[-1] == "No thanks, show me dump trailers instead"
+    assert response.assistant_text == "Continuing with: The trailer should be a 25ft livestock"
+    assert invoked[-1] == "The trailer should be a 25ft livestock"
+    assert service._get_session(session_id)["customer_phone"] is None
     assert service._get_session(session_id)["pending_initial_user_message"] is None
+
+
+def test_contact_ignored_requirement_refines_saved_request(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001105"
+    service.reset_session(session_id)
+    invoked = []
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **_kwargs: "lead")
+    monkeypatch.setattr(
+        service,
+        "_classify_contact_prompt_reply",
+        lambda *_args, **_kwargs: _decision("resume_saved_request_with_update"),
+    )
+    monkeypatch.setattr(service, "_contact_prompt_bridge_text", _bridge)
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda _session, message: invoked.append(message) or True)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda _session, message, _shown: {
+            "assistant_text": f"Continuing with: {message}",
+            "tool_events": [],
+            "last_listings": [],
+        },
+    )
+
+    service.handle_chat(_req(session_id, "Hello. I am looking for a livestock trailer"))
+    service.handle_chat(_req(session_id, "it should be of 20ft length"))
+
+    assert invoked[-1] == (
+        "Hello. I am looking for a livestock trailer"
+        " | Additional requirement: it should be of 20ft length"
+    )
 
 
 def test_unclear_reply_after_initial_contact_request_continues_original_request(monkeypatch):
