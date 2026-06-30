@@ -2009,7 +2009,7 @@ _LLM_ADJUDICATED_METADATA_KEYS = _METADATA_FILTER_KEYS - {"make"}
 
 def _metadata_field_definitions() -> dict[str, str]:
     return {
-        "length_ft": "Trailer, deck, cargo, or bin length. Accept equivalent length units such as inches when the user is clearly giving length.",
+        "length_ft": "Trailer, deck, cargo, or bin length. Accept equivalent length units such as inches when the user is clearly giving length such as 12ft, 12 foot, 12 footer etc.",
         "width_ft": "Trailer, cargo, or load width. Do not use a width value as length.",
         "height_ft": "Trailer side-wall, cargo-wall, or usable side height. Wording such as '3 inch sides', '3 inch walls', '3 ft sides', or '3 ft walls' etc should be treated as height.",
         "payload_lbs": "Payload, load, haul, or carried weight/capacity. This is not GVWR unless the user specifically asks for GVWR elsewhere.",
@@ -2528,6 +2528,9 @@ def _adjudicate_active_question_turn(
                         "Determine whether the user answered the active question, explicitly said no preference, or did not answer it.\n"
                         "Treat the active slot definition and question text as authoritative.\n"
                         "If the active question was answered, set answered_active_question=true and provide active_slot_value.\n"
+                        "Interpret concise and natural answers semantically from the active question. For a length "
+                        "question, replies such as '14 footer', 'twenty-foot', or simply '14' are valid length answers. "
+                        "Use history only to resolve an explicit reference; never copy an old value as a new answer.\n"
                         "CRITICAL HAUL-ITEM RULE: For a haul-item/use slot, requesting or repeating a trailer category "
                         "does not identify cargo. Accept a category-like term only when explicitly framed as cargo or "
                         "given as the direct answer to the active haul question. Thus 'I want an equipment trailer' "
@@ -2759,10 +2762,27 @@ def _normalize_length_or_width_value(value: Any) -> Any:
     text = str(value or "").strip()
     if not text:
         return value
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:in|inch|inches)\b", text, re.I)
+    match = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s*(ft|feet|foot|footer|footers|'|in|inch|inches|\"|mm|millimeters?|cm|centimeters?|m|meters?|metres?|yd|yards?)?",
+        text,
+        re.I,
+    )
     if not match:
         return value
-    feet = float(match.group(1)) / 12
+    amount = float(match.group(1))
+    unit = str(match.group(2) or "ft").lower()
+    if unit in {"in", "inch", "inches", '"'}:
+        feet = amount / 12
+    elif unit in {"mm", "millimeter", "millimeters"}:
+        feet = amount / 304.8
+    elif unit in {"cm", "centimeter", "centimeters"}:
+        feet = amount / 30.48
+    elif unit in {"m", "meter", "meters", "metre", "metres"}:
+        feet = amount * 3.280839895
+    elif unit in {"yd", "yard", "yards"}:
+        feet = amount * 3
+    else:
+        feet = amount
     return f"{feet:g} ft"
 
 
@@ -2789,10 +2809,26 @@ def _normalize_payload_value(value: Any) -> Any:
     text = str(value or "").strip()
     if not text:
         return value
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*k\s*(?:lbs?|pounds?|#)?\b", text, re.I)
+    match = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s*(k)?\s*(lbs?|pounds?|#|kg|kilograms?|tons?|tonnes?|oz|ounces?)?",
+        text,
+        re.I,
+    )
     if not match:
         return value
-    pounds = float(match.group(1)) * 1000
+    amount = float(match.group(1))
+    multiplier = 1000 if match.group(2) else 1
+    unit = str(match.group(3) or "lbs").lower()
+    if unit in {"kg", "kilogram", "kilograms"}:
+        pounds = amount * multiplier * 2.2046226218
+    elif unit in {"ton", "tons"}:
+        pounds = amount * multiplier * 2000
+    elif unit in {"tonne", "tonnes"}:
+        pounds = amount * multiplier * 2204.6226218
+    elif unit in {"oz", "ounce", "ounces"}:
+        pounds = amount * multiplier / 16
+    else:
+        pounds = amount * multiplier
     return f"{pounds:g} lbs"
 
 
@@ -2904,11 +2940,9 @@ def _extract_field_updates(
 ) -> FieldExtractionAdjudicationDecision:
     latest = state.get("user_message") or ""
     if not os.getenv("OPENAI_API_KEY"):
-        return _legacy_field_updates_from_filter_extraction(
-            state=state,
-            category=category,
-            awaiting_slot=awaiting_slot,
-            apply_slot_updates=apply_slot_updates,
+        return FieldExtractionAdjudicationDecision(
+            confidence="low",
+            reason="field_extraction_llm_unavailable",
         )
 
     allowed_category_slots = _category_slots(category)
@@ -2959,6 +2993,11 @@ def _extract_field_updates(
                         "from the assistant's previous answer or other conversation context. "
                         "Do not extract subcategory unless current_category is Aluminum. "
                         "Use recent messages and the previous assistant question only as context for interpreting the latest user message, not as new updates. "
+                        "You are authoritative for whether the latest message supports each update; understand natural "
+                        "language rather than requiring fixed wording. Examples: 'I want a 14 footer' means "
+                        "length_ft=14 ft, 'a twenty-foot trailer' means length_ft=20 ft, and a concise value can answer "
+                        "the previous assistant's active field question. Never return an existing or historical value "
+                        "unless the latest message states, changes, confirms, or clearly refers to it. "
                         "When current_category is unknown, extract any stated item, cargo, material, equipment, or use case into slots_collected_update.generic_haul_use. "
                         "This includes specific nouns and broad natural phrases such as 'a car', 'equipment', 'tools', 'some heavy items', 'construction materials', or 'landscaping equipment'. "
                         "Preserve the meaningful phrase the customer used; do not require a precise named object. "
@@ -2969,6 +3008,9 @@ def _extract_field_updates(
                         "Extract requested_non_metadata_features for user-requested equipment/configuration/features not represented by metadata filters or category slots. "
                         "Do not infer requested_non_metadata_features from inventory/listing text. "
                         "Accept equivalent units such as inches when they clearly answer a length or width field. "
+                        "Return every length, width, and height in feet with the suffix 'ft', converting other units. "
+                        "Return every weight or payload in pounds with the suffix 'lbs', converting other units. "
+                        "Normalize wording such as '14 footer' to '14 ft'; never preserve 'footer' in an extracted value. "
                         "Compact trailer size notation is positional: AxB means width A and length B; AxBxC means width A, length B, height C. "
                         "If confidence is low, leave updates empty and optionally set clarification_needed."
                     )
@@ -2978,18 +3020,6 @@ def _extract_field_updates(
         )
     except Exception:
         logger.exception("field_extraction_adjudicator_llm_failed")
-        if (os.getenv("FIELD_EXTRACTION_LEGACY_FALLBACK_ENABLED") or "0").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            return _legacy_field_updates_from_filter_extraction(
-                state=state,
-                category=category,
-                awaiting_slot=awaiting_slot,
-                apply_slot_updates=apply_slot_updates,
-            )
         return FieldExtractionAdjudicationDecision(
             confidence="low",
             reason="field_extraction_adjudicator_exception",
@@ -3007,43 +3037,18 @@ def _extract_field_updates(
             reason=data.get("reason") or "low_confidence",
         )
 
-    shorthand_updates = _dimension_shorthand_updates(latest)
     metadata_updates: dict[str, Any] = {}
     for key, value in (data.get("metadata_filters_update") or {}).items():
-        if not _message_has_filter_evidence(str(key), latest, awaiting_slot):
-            logger.info(
-                "metadata_filter_rejected | key=%s | value=%r | reason=not_in_latest_message",
-                key,
-                value,
-            )
-            continue
         sanitized = _canonicalize_adjudicated_metadata(key=str(key), value=value, category=category)
         if sanitized:
             clean_key, clean_value = sanitized
             metadata_updates[clean_key] = clean_value
-    for key in ("width_ft", "length_ft"):
-        if key in shorthand_updates:
-            sanitized = _canonicalize_adjudicated_metadata(
-                key=key,
-                value=shorthand_updates[key],
-                category=category,
-            )
-            if sanitized:
-                clean_key, clean_value = sanitized
-                metadata_updates[clean_key] = clean_value
 
     raw_slot_updates = {
         str(key): value
         for key, value in (data.get("slots_collected_update") or {}).items()
-        if _message_has_slot_evidence(str(key), value, latest, awaiting_slot)
+        if value not in (None, "")
     }
-    for key, value in (data.get("slots_collected_update") or {}).items():
-        if str(key) not in raw_slot_updates:
-            logger.info(
-                "slot_update_rejected | slot=%s | value=%r | reason=not_in_latest_message",
-                key,
-                value,
-            )
     slot_updates = (
         _canonicalize_adjudicated_slots(
             raw=raw_slot_updates,
@@ -3248,6 +3253,8 @@ def _extract_filter_decision(state: ChatbotState, category: str | None) -> Filte
                         "- Return null for fields not explicitly mentioned in the latest user message; never infer updates from recent messages.\n"
                         "- Width phrases such as 'width should be at least 6 ft' or '6 ft wide' map only to width_ft, never length_ft.\n"
                         "- Length phrases must mention length, long, deck length, trailer length, size, trailer size, or an ambiguous 'make it 14 ft' update.\n"
+                        "- Understand natural length expressions too: '14 footer' means 14 ft and 'twenty-foot trailer' means 20 ft.\n"
+                        "- Return all dimensions converted to feet with suffix 'ft' and all weights converted to pounds with suffix 'lbs'.\n"
                         "- Trailer shorthand like '6x12' means width_ft=6 and length_ft=12; '6x12x5' means width_ft=6, length_ft=12, height=5. Do not store height unless there is an allowed slot/filter for it.\n"
                         "- Payload/load/haul weight maps to payload_lbs, not GVWR.\n"
                         "- hitch_type can only be Gooseneck or Bumper Pull and must be explicitly named in the latest message; return null otherwise.\n"
@@ -3268,8 +3275,8 @@ def _extract_filter_decision(state: ChatbotState, category: str | None) -> Filte
             ]
         )
     except Exception:
-        logger.exception("Filter extractor LLM failed; using regex fallback")
-        return _fallback_filter_extraction(state)
+        logger.exception("Filter extractor LLM failed; returning no updates")
+        return FilterExtractionDecision()
 
 
 def _metadata_filters_from_extraction(
@@ -4916,6 +4923,24 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             defaulted_metadata_filters.discard(field)
     pending_category_change = dict(state.get("pending_category_change") or {})
     pending_category_suggestion = dict(state.get("pending_category_suggestion") or {})
+    if pending_category_suggestion and not decision.get("trailer_category"):
+        extracted_slots, _extracted_metadata, extracted_features = _apply_explicit_filter_extraction(
+            state=state,
+            category=None,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=None,
+            apply_slot_updates=True,
+        )
+        slots.update(extracted_slots)
+        requested_non_metadata_features = extracted_features
+        state = {
+            **state,
+            "slots_collected": slots,
+            "metadata_filters_collected": metadata_filters,
+            "requested_non_metadata_features": requested_non_metadata_features,
+        }
     if (
         pending_category_suggestion
         and not decision.get("trailer_category")
@@ -4928,6 +4953,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         return {
             **state,
             "assistant_text": suggestion_text,
+            "slots_collected": slots,
+            "metadata_filters_collected": metadata_filters,
+            "requested_non_metadata_features": requested_non_metadata_features,
             "awaiting_slot": _CATEGORY_SUGGESTION_SLOT,
             "pending_questions": [],
             "mind_decision": decision,

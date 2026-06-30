@@ -1,6 +1,6 @@
 import inspect
 
-from src.chatbot import graph, make_resolver, mini_llm_classifier, prompts
+from src.chatbot import graph, make_resolver, mini_llm_classifier, prompts, service
 
 
 def test_all_existing_llm_prompts_forbid_category_as_implicit_haul_item():
@@ -1586,6 +1586,75 @@ def test_llm_field_extraction_normalizes_compact_size_order(monkeypatch):
 
     assert decision.metadata_filters_update["width_ft"] == "6"
     assert decision.metadata_filters_update["length_ft"] == "12"
+
+
+def test_llm_field_extraction_accepts_natural_14_footer(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _FakeExtractorLLM:
+        def invoke(self, _messages):
+            return graph.FieldExtractionAdjudicationDecision(
+                metadata_filters_update={
+                    "length_ft": "14 footer",
+                    "width_ft": "72 inches",
+                    "height_ft": "100 cm",
+                    "payload_lbs": "1000 kg",
+                },
+                confidence="high",
+            )
+
+    monkeypatch.setattr(graph, "_field_extraction_adjudicator_llm", lambda: _FakeExtractorLLM())
+
+    decision = graph._extract_field_updates(
+        state=_state("I want a 14 footer", category=None),
+        category=None,
+        awaiting_slot=None,
+        apply_slot_updates=True,
+    )
+
+    assert decision.metadata_filters_update == {
+        "length_ft": "14 ft",
+        "width_ft": "6 ft",
+        "height_ft": "3.28084 ft",
+        "payload_lbs": "2204.62 lbs",
+    }
+
+
+def test_category_recommendation_preserves_length_and_bridge_cannot_copy_question(monkeypatch):
+    monkeypatch.setattr(
+        graph,
+        "_extract_field_updates",
+        lambda **_kwargs: graph.FieldExtractionAdjudicationDecision(
+            metadata_filters_update={"length_ft": "14 ft"},
+            confidence="high",
+        ),
+    )
+    state = _state("I am looking for a 14 footer", category=None)
+    state["pending_category_suggestion"] = {
+        "categories": [{"category": "Livestock"}],
+        "status": "awaiting_choice_or_recommendation",
+    }
+
+    out = graph._apply_mind_node(state)
+
+    assert out["metadata_filters_collected"] == {"length_ft": "14 ft"}
+
+    captured = {}
+
+    class _BridgeLLM:
+        def invoke(self, messages):
+            captured["human"] = messages[1].content
+            return type("_Response", (), {"content": "No problem—I’ll keep helping."})()
+
+    monkeypatch.setattr(service, "_contact_prompt_bridge_llm", lambda: _BridgeLLM())
+    service._contact_prompt_bridge_text(
+        action="decline_contact_details",
+        latest_message="no",
+        saved_request="I am looking for a 14 footer",
+    )
+
+    assert "Trailer/search response" not in captured["human"]
+    assert "What type of trailer" not in captured["human"]
 
 
 def test_generic_category_no_preference_reuses_length_and_asks_payload(monkeypatch):

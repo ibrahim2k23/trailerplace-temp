@@ -730,7 +730,6 @@ def _contact_prompt_bridge_text(
     action: str,
     latest_message: str,
     saved_request: str,
-    graph_response: str,
 ) -> str:
     try:
         response = _contact_prompt_bridge_llm().invoke(
@@ -740,6 +739,8 @@ def _contact_prompt_bridge_text(
                         "Write a short, natural opening for a TrailerPlace sales chat response. "
                         "The user just replied to an optional contact-details request. "
                         "Address only that contact-related reply. "
+                        "Write acknowledgment text only. Never include or anticipate the next trailer question, "
+                        "category list, recommendation, or search response; the application appends that separately. "
                         "Do not answer the trailer request yourself, do not mention specific inventory, "
                         "do not repeat the full saved request, and do not ask any trailer-search or "
                         "qualification question. "
@@ -748,8 +749,12 @@ def _contact_prompt_bridge_text(
                         "If action is answer_contact_question, explain that contact details help the team "
                         "reach the customer later if the need arises and that sharing them is optional. "
                         "If action is resume_saved_request and contact details were provided, thank them briefly and naturally. "
-                        "If they declined, warmly acknowledge and respect their preference, then say you will continue helping "
-                        "with their trailer request. Vary the wording naturally; do not copy a fixed template. "
+                        "If action is decline_contact_details, never thank them for sharing contact details. Warmly respect "
+                        "their choice without guilt or pressure, reassure them that it is no problem, and smoothly keep them "
+                        "engaged with their trailer request. Use natural sales-friendly wording such as 'No problem at all—I "
+                        "understand your preference, and I'll continue helping with your trailer search.' Vary the wording naturally "
+                        "rather than copying a fixed template. Apply the same respectful approach when resume_saved_request "
+                        "represents a refusal or skip. "
                         "Never use stalling or readiness language such as 'whenever you're ready', 'when you're ready', "
                         "or 'I'm here to help whenever'. The trailer response immediately following this opening continues the flow. "
                         "Keep it to 1-2 concise sentences, no markdown list. End without a question mark."
@@ -759,8 +764,7 @@ def _contact_prompt_bridge_text(
                     content=(
                         f"Action: {action}\n"
                         f"User contact reply: {latest_message!r}\n"
-                        f"Saved trailer request being resumed: {saved_request!r}\n"
-                        f"Trailer/search response that will follow this opening: {graph_response!r}"
+                        f"An original trailer request will resume: {bool(saved_request)!r}"
                     )
                 ),
             ]
@@ -1875,7 +1879,6 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 action=contact_reply_action,
                 latest_message=contact_reply_latest_message,
                 saved_request=contact_reply_saved_request,
-                graph_response=assistant_text,
             )
             if bridge:
                 assistant_text = f"{bridge}\n\n{assistant_text}"
@@ -2014,7 +2017,6 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             action=contact_reply_action,
             latest_message=contact_reply_latest_message,
             saved_request=contact_reply_saved_request,
-            graph_response=assistant_text,
         )
         if bridge:
             assistant_text = f"{bridge}\n\n{assistant_text}"

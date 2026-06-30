@@ -593,7 +593,6 @@ def test_contact_prompt_bridge_uses_llm_text(monkeypatch):
         action="resume_saved_request",
         latest_message="I'm not comfortable sharing that",
         saved_request="I need a 6x12 trailer",
-        graph_response="What kind of trailer are you looking for?",
     )
 
     assert text == "Absolutely, you can skip that. I can keep helping here."
@@ -617,7 +616,6 @@ def test_contact_prompt_bridge_prompt_forbids_trailer_questions(monkeypatch):
         action="resume_saved_request",
         latest_message="I'm not comfortable sharing that",
         saved_request="Hello I'm looking for a trailer",
-        graph_response="What type of trailer are you looking for?",
     )
 
     system_prompt = captured["system"]
@@ -625,6 +623,8 @@ def test_contact_prompt_bridge_prompt_forbids_trailer_questions(monkeypatch):
     assert "Never ask what type" in system_prompt
     assert "Vary the wording naturally" in system_prompt
     assert "whenever you're ready" in system_prompt
+    assert "never thank them for sharing contact details" in system_prompt
+    assert "without guilt or pressure" in system_prompt
     assert "End without a question mark" in system_prompt
 
 

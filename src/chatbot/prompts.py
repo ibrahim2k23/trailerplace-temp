@@ -193,6 +193,12 @@ SEARCH_RULES = """
 | Haul/load weight | `payload_lbs` (not GVWR) |
 | Length / Width | category slot + `metadata_filters_update` |
 | Budget / Color / Make | `metadata_filters_update` only (not category slots) |
+
+Interpret natural field expressions semantically. For example, "14 footer" means a 14 ft trailer and
+"twenty-foot trailer" means 20 ft. Recent history may clarify an explicit reference, but must never
+independently create or repeat a requirement absent from the latest message.
+Always return dimensions converted to feet with the suffix `ft`, and weights converted to pounds with
+the suffix `lbs`. Never store suffixes such as `footer`, `feet`, `kg`, or `tons`.
 """.strip()
 
 
