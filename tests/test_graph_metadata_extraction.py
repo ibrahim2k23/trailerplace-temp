@@ -1588,6 +1588,14 @@ def test_llm_field_extraction_normalizes_compact_size_order(monkeypatch):
     assert decision.metadata_filters_update["length_ft"] == "12"
 
 
+def test_field_extraction_decision_normalizes_empty_rejected_candidates_object():
+    decision = graph.FieldExtractionAdjudicationDecision.model_validate(
+        {"rejected_candidates": {}}
+    )
+
+    assert decision.rejected_candidates == []
+
+
 def test_llm_field_extraction_accepts_natural_14_footer(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 

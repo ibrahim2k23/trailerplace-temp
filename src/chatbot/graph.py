@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from trailer_fields import get_trailer_fields_as_dict, list_all_categories
 from src.chatbot.categories import (
@@ -295,6 +295,16 @@ class FieldExtractionAdjudicationDecision(BaseModel):
     clarification_needed: Optional[str] = None
     confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
+
+    @field_validator("rejected_candidates", mode="before")
+    @classmethod
+    def normalize_empty_rejected_candidates(cls, value: Any) -> Any:
+        # Function-calling models occasionally encode an empty JSON array as
+        # an empty object. They are equivalent for this optional diagnostic
+        # field, so normalize that harmless shape mismatch before validation.
+        if value == {}:
+            return []
+        return value
 
 
 class NonRecommendationTurnDecision(BaseModel):
@@ -2973,6 +2983,7 @@ def _extract_field_updates(
                     content=(
                         "Extract all explicit trailer search updates from the latest user message in one pass. "
                         "Return structured data only.\n"
+                        "Always return rejected_candidates as a JSON array; use [] when there are none. "
                         "CRITICAL HAUL-ITEM RULE: A trailer category identifies the requested trailer type, not its cargo. "
                         "Never copy or infer a category name or phrase into haul_item, haul_material, generic_haul_use, "
                         "or any haul/use alias merely because that category was requested. 'I want an equipment trailer' "
