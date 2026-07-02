@@ -268,6 +268,22 @@ class MindDecision(BaseModel):
     escalation_summary: Optional[str] = None
     unsupported_request: Optional[str] = None
 
+    @field_validator("category_recommendations", mode="before")
+    @classmethod
+    def normalize_category_recommendations(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [
+            {
+                "category": item,
+                "confidence": "medium",
+                "reasoning": "",
+            }
+            if isinstance(item, str)
+            else item
+            for item in value
+        ]
+
 
 class FilterExtractionDecision(BaseModel):
     length_ft: Optional[str] = None
@@ -4115,6 +4131,7 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             "email": state.get("customer_email"),
             "phone": state.get("customer_phone"),
             "contact_status": state.get("contact_status"),
+            "contact_request_allowed": bool(state.get("contact_request_allowed")),
         },
         "current_category": state.get("trailer_category"),
         "deterministic_category_hint": deterministic_hint,
@@ -4157,6 +4174,10 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             state.get("user_message"),
         )
         decision.trailer_category = None
+    if deterministic_hint:
+        decision.trailer_category = deterministic_hint
+        decision.category_resolution_kind = "explicit"
+        decision.category_confidence = "high"
     pending_suggestion = dict(state.get("pending_category_suggestion") or {})
     if pending_suggestion:
         latest_choice_text = _normalize_choice_text(state.get("user_message") or "")
@@ -4760,6 +4781,8 @@ def _apply_explicit_filter_extraction(
     )
     extracted_metadata = dict(extraction.metadata_filters_update or {})
     extracted_slots = dict(extraction.slots_collected_update or {})
+    if category:
+        extracted_slots.pop(_GENERIC_HAUL_USE_SLOT, None)
     bare_trailer_inches = re.search(
         r"\b(\d+(?:\.\d+)?)\s*(?:\"|in|inch|inches)\s+(?:(?:\w+)\s+){0,3}trailer\b",
         latest_message or "",

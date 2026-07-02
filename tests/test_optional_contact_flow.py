@@ -8,8 +8,131 @@ def _req(session_id: str, message: str) -> ChatRequest:
     return ChatRequest(session_id=session_id, message=message)
 
 
-def _decision(action: str) -> service.ContactPromptReplyDecision:
-    return service.ContactPromptReplyDecision(action=action)
+def _decision(action: str, remaining_message: str | None = None) -> service.ContactPromptReplyDecision:
+    return service.ContactPromptReplyDecision(action=action, remaining_message=remaining_message)
+
+
+def test_contact_plus_message_continues_with_clean_routing_context(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001099"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session["initial_contact_request_asked"] = True
+    captured = {}
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "_extract_contact", lambda *_args, **_kwargs: {
+        "full_name": "Frank Garvey", "email": "frank@example.com", "phone": "4092677859",
+        "name_confidence": "high",
+    })
+    monkeypatch.setattr(
+        service, "_classify_contact_prompt_reply",
+        lambda *_args, **_kwargs: _decision("acknowledge_and_continue", "Do you offer financing?"),
+    )
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args: True)
+    def invoke(context, message, _shown):
+        captured.update(message=message, messages=context["messages"])
+        return {"assistant_text": "Yes, financing is available.", "tool_events": [], "last_listings": []}
+    monkeypatch.setattr(service, "_invoke_graph", invoke)
+
+    original = "Frank Garvey, frank@example.com, 4092677859. Do you offer financing?"
+    response = service.handle_chat(_req(session_id, original))
+
+    assert response.assistant_text == f"{service._CONTACT_CONTINUE_ACK}\n\nYes, financing is available."
+    assert captured["message"] == "Do you offer financing?"
+    assert captured["messages"][-1]["content"] == "Do you offer financing?"
+    assert service._get_session(session_id)["messages"][0]["content"] == original
+
+
+def test_contact_refusal_policy_and_authoritative_category_resolution(monkeypatch):
+    session = service._new_session("policy-category")
+    session["contact_status"] = "contact_declined"
+
+    class _Validator:
+        def invoke(self, _messages):
+            return service.ContactPolicyDecision(violates_contact_policy=True)
+
+    class _Rewriter:
+        def invoke(self, _messages):
+            return service.ContactPolicyRewrite(
+                assistant_text="What will you be hauling on the utility trailer?"
+            )
+
+    monkeypatch.setattr(service, "_contact_policy_validator_llm", lambda: _Validator())
+    monkeypatch.setattr(service, "_contact_policy_rewriter_llm", lambda: _Rewriter())
+    cleaned = service._enforce_contact_response_policy(
+        session,
+        "Please provide your email or phone number.",
+        "What will you be hauling on the utility trailer?",
+    )
+    assert cleaned == "What will you be hauling on the utility trailer?"
+    service._sync_contact_status(session)
+    assert session["contact_status"] == "contact_declined"
+    session["pending_contact_action"] = {"type": "faq"}
+    assert service._enforce_contact_response_policy(
+        session, "Please provide your email."
+    ) == "Please provide your email."
+    session["customer_full_name"] = "Ibrahim"
+    session["customer_email"] = "ibrahim@example.com"
+    service._sync_contact_status(session)
+    assert session["contact_status"] == "contact_available"
+
+    class _Mind:
+        def invoke(self, _messages):
+            return graph.MindDecision(
+                action="send_non_sales_faq_email",
+                assistant_text="We offer financing.",
+                faq_category="financing",
+            )
+
+    monkeypatch.setattr(graph, "_mind_llm", lambda: _Mind())
+    out = graph._mind_node({
+        "user_message": "Do you finance utility trailers?",
+        "messages": [],
+        "slots_collected": {},
+        "metadata_filters_collected": {},
+    })
+    decision = out["mind_decision"]
+    assert decision["trailer_category"] == "Utility"
+    assert decision["category_resolution_kind"] == "explicit"
+    assert decision["category_confidence"] == "high"
+    assert decision["action"] == "send_non_sales_faq_email"
+
+
+def test_meaningful_initial_message_resumes_after_contact_refusal(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001100"
+    service.reset_session(session_id)
+
+    class _Preserver:
+        def invoke(self, _messages):
+            return service.InitialMessagePreservationDecision(
+                has_meaningful_non_contact_intent=True
+            )
+
+    monkeypatch.setattr(service, "_initial_message_preservation_llm", lambda: _Preserver())
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "_extract_contact", lambda *_args, **_kwargs: {
+        "full_name": "Ibrahim", "email": None, "phone": None, "name_confidence": "high"
+    })
+    monkeypatch.setattr(
+        service, "_classify_contact_prompt_reply",
+        lambda *_args, **_kwargs: _decision("decline_contact_details"),
+    )
+    monkeypatch.setattr(service, "_contact_prompt_bridge_text", _bridge)
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args: True)
+    monkeypatch.setattr(service, "_enforce_contact_response_policy", lambda _s, text, *_a: text)
+    monkeypatch.setattr(service, "_invoke_graph", lambda _s, message, _shown: {
+        "assistant_text": f"Answering: {message}", "tool_events": [], "last_listings": []
+    })
+
+    original = "Hello, what are the use cases for trailers? My name is Ibrahim"
+    service.handle_chat(_req(session_id, original))
+    response = service.handle_chat(_req(session_id, "no"))
+
+    assert response.assistant_text == f"Bridge[resume_saved_request]\n\nAnswering: {original}"
+    assert response.contact_status == "contact_declined"
 
 
 def _bridge(**kwargs) -> str:

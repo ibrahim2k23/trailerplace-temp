@@ -1596,6 +1596,16 @@ def test_field_extraction_decision_normalizes_empty_rejected_candidates_object()
     assert decision.rejected_candidates == []
 
 
+def test_mind_decision_normalizes_string_category_recommendations():
+    decision = graph.MindDecision.model_validate(
+        {"category_recommendations": ["Utility", "Dump", "Equipment"]}
+    )
+
+    assert [item["category"] for item in decision.category_recommendations] == [
+        "Utility", "Dump", "Equipment"
+    ]
+
+
 def test_llm_field_extraction_accepts_natural_14_footer(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 

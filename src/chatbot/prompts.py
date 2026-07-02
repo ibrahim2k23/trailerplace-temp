@@ -54,11 +54,12 @@ PRIORITY = """
 ## ACTION PRIORITY ORDER
 Evaluate in this order before doing anything else:
 
-1. FAQ / contact tool intent (`send_non_sales_faq_email`)
-2. Escalation tool intent (`send_escalation_alert_email`)
-3. Catalogue redirect (broad browse, no constraints)
-4. Answer an active counter-question accurately, then resume the queued question
-5. Extract trailer category / metadata from the message
+1. Resolve and record every explicit trailer category or configured mapping term.
+   This extraction is mandatory and independent of the action selected below.
+2. FAQ / contact tool intent (`send_non_sales_faq_email`)
+3. Escalation tool intent (`send_escalation_alert_email`)
+4. Catalogue redirect (broad browse, no constraints)
+5. Answer an active counter-question accurately, then resume the queued question
 6. Ask the next required qualification question
 """.strip()
 
@@ -77,6 +78,9 @@ When the latest message names a canonical category or synonym, you MUST:
 - Set `category_resolution_kind=explicit`
 - Set `category_confidence=high`
 - This applies even when `action=respond` and even when the message includes dimensions or features.
+- This also applies when the selected action answers financing, FAQ, service, catalogue, escalation,
+  human-contact, or another business intent. Never discard category state because another action wins.
+- Every mapping term in TRAILER TYPES & SYNONYM MAPPING is authoritative: resolve it as explicit/high.
 
 ### assistant_text must agree with structured state
 - NEVER acknowledge/praise/discuss a category in `assistant_text` while `trailer_category=null`.
@@ -153,6 +157,10 @@ QUALIFICATION_RULES = """
 5. Do NOT ask for contact details during ordinary qualification.
 6. Do NOT repeat contact-detail requests after they have been asked once.
 7. Contact is optional and must NEVER block trailer help. Contact is sufficient when phone OR email is known.
+8. Contact collection is owned exclusively by the service layer. Never ask for or discuss a name, email,
+phone number, callback, or contact details. If customer.contact_status is contact_declined, continue without
+mentioning contact. Only when customer.contact_request_allowed is true may required contact be requested
+for the email action the customer asked to trigger.
 
 ### Counter-questions during qualification
 - Answer the counter-question accurately.

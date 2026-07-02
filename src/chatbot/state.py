@@ -20,6 +20,7 @@ class ChatbotState(TypedDict, total=False):
     customer_phone: Optional[str]
     lead_id: Optional[str]
     contact_status: str
+    contact_request_allowed: bool
     sales_phase: str
     trailer_category: Optional[str]
     pending_category_change: Optional[dict[str, Any]]

@@ -83,6 +83,7 @@ _CONTACT_ONLY_ACK = (
     "Thanks for sharing your contact details. I've saved them. "
     "How can I help you today?"
 )
+_CONTACT_CONTINUE_ACK = "Thanks for sharing your contact details. I've saved them."
 _INITIAL_CONTACT_REQUEST = (
     "Thank you for contacting TrailerPlace. Before we get started, could I get your name, "
     "email, and phone number? Sharing contact details is optional, and I can still help with your trailer search."
@@ -108,11 +109,26 @@ class ContactPromptReplyDecision(BaseModel):
     action: Literal[
         "answer_contact_question",
         "acknowledge_contact_details",
+        "acknowledge_and_continue",
         "decline_contact_details",
         "resume_saved_request",
         "resume_saved_request_with_update",
         "route_latest_request",
     ] = "resume_saved_request"
+    remaining_message: Optional[str] = None
+    reason: str = ""
+
+class ContactPolicyDecision(BaseModel):
+    violates_contact_policy: bool = False
+    reason: str = ""
+
+
+class ContactPolicyRewrite(BaseModel):
+    assistant_text: str = ""
+
+
+class InitialMessagePreservationDecision(BaseModel):
+    has_meaningful_non_contact_intent: bool = False
     reason: str = ""
 
 
@@ -134,11 +150,22 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 def _should_save_initial_message_for_resume(message: str) -> bool:
     text = (message or "").strip()
-    if not text or _GREETING_RE.match(text):
+    if not text:
         return False
-    if _is_contact_only_message(text):
-        return False
-    return True
+    try:
+        decision = _initial_message_preservation_llm().invoke([
+            SystemMessage(content=(
+                "Decide whether the message contains any meaningful non-contact intent that should be resumed "
+                "after an optional contact-details prompt. This includes any question, request, answer, preference, "
+                "correction, business inquiry, trailer inquiry, FAQ, or conversational intent beyond a greeting "
+                "and contact details. A greeting at the start does not erase later intent. Return structured output."
+            )),
+            HumanMessage(content=f"User message:\n{text}"),
+        ])
+        return bool(decision.has_meaningful_non_contact_intent)
+    except Exception:
+        logger.exception("initial_message_preservation_llm_failed; preserving message")
+        return True
 
 
 def _format_recent_message_transcript(messages: list[dict[str, Any]], limit: int = 4) -> str:
@@ -294,6 +321,23 @@ def _contact_prompt_reply_llm():
 def _contact_prompt_bridge_llm():
     model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
     return ChatOpenAI(model=model, temperature=0.3)
+
+def _contact_policy_validator_llm():
+    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
+        ContactPolicyDecision, method="function_calling"
+    )
+
+
+def _contact_policy_rewriter_llm():
+    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
+        ContactPolicyRewrite, method="function_calling"
+    )
+
+
+def _initial_message_preservation_llm():
+    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
+        InitialMessagePreservationDecision, method="function_calling"
+    )
 
 
 def _catalogue_overview_llm():
@@ -527,7 +571,51 @@ def _has_full_initial_details(session: dict[str, Any]) -> bool:
 
 
 def _sync_contact_status(session: dict[str, Any]) -> None:
-    session["contact_status"] = "contact_available" if _has_contact(session) else "missing_contact"
+    if _has_contact(session):
+        session["contact_status"] = "contact_available"
+    elif session.get("contact_status") != "contact_declined":
+        session["contact_status"] = "missing_contact"
+
+
+def _contact_request_allowed(session: dict[str, Any]) -> bool:
+    if _has_contact(session):
+        return False
+    return bool(session.get("pending_contact_action") or session.get("pending_contact_actions"))
+
+
+def _enforce_contact_response_policy(
+    session: dict[str, Any], assistant_text: str, active_question: str | None = None
+) -> str:
+    if session.get("contact_status") != "contact_declined" or _contact_request_allowed(session):
+        return assistant_text
+    try:
+        decision = _contact_policy_validator_llm().invoke([
+            SystemMessage(content=(
+                "Determine whether the assistant response asks for, encourages, or discusses collecting "
+                "the customer's name, email, phone number, callback details, or other contact information. "
+                "The customer declined contact collection, so any such content violates policy. "
+                "Return structured output only."
+            )),
+            HumanMessage(content=f"Assistant response:\n{assistant_text}"),
+        ])
+        if not decision.violates_contact_policy:
+            return assistant_text
+        rewrite = _contact_policy_rewriter_llm().invoke([
+            SystemMessage(content=(
+                "Rewrite the response without requesting or discussing contact details. Preserve its useful "
+                "answer and continue the trailer conversation. Preserve the active qualification question "
+                "exactly when supplied. Return structured output only."
+            )),
+            HumanMessage(content=(
+                f"Response:\n{assistant_text}\n\nActive qualification question:\n{active_question or ''}"
+            )),
+        ])
+        clean = str(rewrite.assistant_text or "").strip()
+        if clean:
+            return clean
+    except Exception:
+        logger.exception("contact_response_policy_enforcement_failed")
+    return str(active_question or "What type of trailer are you looking for?").strip()
 
 
 def _ensure_lead(session: dict[str, Any]) -> None:
@@ -684,13 +772,18 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
                             "## ACTION RULES (evaluate in order)\n"
                             "1. `answer_contact_question` — reply asks why contact is needed, how it will be used, or if it's required.\n"
                             "2. `acknowledge_contact_details` — reply supplies name + phone or name + email AND no saved request exists. "
-                            "   Never acknowledge name-only or phone/email-only as complete.\n"
-                            "3. `resume_saved_request` — reply only provides or declines contact details AND a saved original request exists. "
+                            "   Use this only when no meaningful non-contact content remains.\n"
+                            "3. `acknowledge_and_continue` — reply supplies contact details AND also contains any meaningful "
+                            "   non-contact content: an answer, question, request, correction, preference, small talk, or requirement. "
+                            "   Set remaining_message to that content with only contact-related text removed. Preserve its meaning, "
+                            "   wording, constraints, and multiple requirements; do not classify or answer it.\n"
+                            "4. `resume_saved_request` — reply only provides or declines contact details AND a saved original request exists. "
                             "   Store any supplied field, then resume the saved request.\n"
-                            "4. `resume_saved_request_with_update` — reply ignores contact and adds or refines the saved "
+                            "5. `resume_saved_request_with_update` — reply adds or refines the saved "
                             "   request, including 'it should be 20ft', 'make it gooseneck', or 'I will haul cattle'.\n"
-                            "5. `decline_contact_details` — user declines or skips contact and makes no other actionable request.\n"
-                            "6. `route_latest_request` — reply clearly replaces the saved request with a different trailer, "
+                            "   If contact details are also present, put only the non-contact update in remaining_message.\n"
+                            "6. `decline_contact_details` — user declines or skips contact and makes no other actionable request.\n"
+                            "7. `route_latest_request` — reply clearly replaces the saved request with a different trailer, "
                             "   store, financing, service, parts, "
                             "   trade-in, human-contact, or inventory request that should replace the saved request.\n\n"
 
@@ -709,17 +802,25 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
         decision = _model_dump(result)
         action = str(decision.get("action") or "resume_saved_request")
         allowed = {
-            "answer_contact_question", "acknowledge_contact_details", "decline_contact_details",
+            "answer_contact_question", "acknowledge_contact_details", "acknowledge_and_continue",
+            "decline_contact_details",
             "resume_saved_request", "resume_saved_request_with_update", "route_latest_request",
         }
         if action not in allowed:
+            action = "route_latest_request"
+        remaining_message = str(decision.get("remaining_message") or "").strip() or None
+        if action == "acknowledge_and_continue" and not remaining_message:
             action = "route_latest_request"
         logger.info(
             "contact_prompt_reply_decision | action=%s | reason=%r",
             action,
             decision.get("reason") or "",
         )
-        return ContactPromptReplyDecision(action=action, reason=str(decision.get("reason") or ""))
+        return ContactPromptReplyDecision(
+            action=action,
+            remaining_message=remaining_message,
+            reason=str(decision.get("reason") or ""),
+        )
     except Exception:
         logger.exception("Contact prompt reply LLM failed; routing latest message")
         return ContactPromptReplyDecision(action="route_latest_request", reason="LLM unavailable.")
@@ -805,6 +906,14 @@ def _without_latest_user_message(messages: list[dict[str, Any]], latest_message:
     ):
         return list(messages[:-1])
     return list(messages)
+
+def _replace_latest_user_message(
+    messages: list[dict[str, Any]], original: str, replacement: str
+) -> list[dict[str, Any]]:
+    updated = list(messages)
+    if updated and updated[-1].get("role") == "user" and str(updated[-1].get("content") or "") == original:
+        updated[-1] = {**updated[-1], "content": replacement}
+    return updated
 
 
 def _active_question_followup(session: dict[str, Any]) -> str:
@@ -1630,6 +1739,7 @@ def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: lis
         "customer_phone": session.get("customer_phone"),
         "lead_id": session.get("lead_id"),
         "contact_status": session.get("contact_status"),
+        "contact_request_allowed": _contact_request_allowed(session),
         "sales_phase": "main",
         "active_search_request_text": session.get("active_search_request_text") or "",
         "trailer_category": session.get("trailer_category"),
@@ -1799,6 +1909,8 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     if was_awaiting_initial_contact or contact_became_available:
         session["awaiting_initial_contact_reply"] = False
         contact_reply_decision = _classify_contact_prompt_reply(session, request.message)
+        if contact_reply_decision.action == "decline_contact_details":
+            session["contact_status"] = "contact_declined"
         if contact_reply_decision.action in {
             "route_latest_request", "resume_saved_request_with_update"
         } and not _has_contact(session):
@@ -1863,23 +1975,26 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             contact_reply_latest_message = request.message
             contact_reply_saved_request = pending_initial
             effective_message = (
-                f"{pending_initial} | Additional requirement: {request.message}"
+                f"{pending_initial} | Additional requirement: {contact_reply_decision.remaining_message or request.message}"
                 if contact_reply_decision.action == "resume_saved_request_with_update"
                 else pending_initial
             )
+        elif contact_reply_decision.action == "acknowledge_and_continue":
+            contact_reply_action = contact_reply_decision.action
+            contact_reply_latest_message = request.message
+            effective_message = contact_reply_decision.remaining_message or request.message
         else:
             effective_message = request.message
     else:
         effective_message = request.message
     context_session = session
     if contact_reply_action:
-        context_session = {
-            **session,
-            "messages": _without_latest_user_message(
-                session.get("messages") or [],
-                request.message,
-            ),
-        }
+        context_messages = (
+            _replace_latest_user_message(session.get("messages") or [], request.message, effective_message)
+            if contact_reply_action == "acknowledge_and_continue"
+            else _without_latest_user_message(session.get("messages") or [], request.message)
+        )
+        context_session = {**session, "messages": context_messages}
     actionable_intent = _has_actionable_intent(effective_message)
 
     has_active_qualification_question = bool(session.get("awaiting_slot") or session.get("pending_questions"))
@@ -1899,11 +2014,16 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
 
     if not should_route_graph:
         assistant_text = _main_smalltalk_response(context_session, effective_message)
+        assistant_text = _enforce_contact_response_policy(session, assistant_text)
         if contact_reply_action:
-            bridge = _contact_prompt_bridge_text(
-                action=contact_reply_action,
-                latest_message=contact_reply_latest_message,
-                saved_request=contact_reply_saved_request,
+            bridge = (
+                _CONTACT_CONTINUE_ACK
+                if contact_reply_action == "acknowledge_and_continue"
+                else _contact_prompt_bridge_text(
+                    action=contact_reply_action,
+                    latest_message=contact_reply_latest_message,
+                    saved_request=contact_reply_saved_request,
+                )
             )
             if bridge:
                 assistant_text = f"{bridge}\n\n{assistant_text}"
@@ -1984,6 +2104,9 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
             session.get("has_shown_search_results"),
         )
     assistant_text = (result.get("assistant_text") or "").strip() or " "
+    assistant_text = _enforce_contact_response_policy(
+        session, assistant_text, result.get("active_question_text")
+    )
     if repeated_question_escalation:
         confusion_action = {
             "type": "faq",
@@ -2038,10 +2161,14 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
     if deferred_email_prefix:
         assistant_text = f"{deferred_email_prefix}\n\n{assistant_text}".strip()
     if contact_reply_action:
-        bridge = _contact_prompt_bridge_text(
-            action=contact_reply_action,
-            latest_message=contact_reply_latest_message,
-            saved_request=contact_reply_saved_request,
+        bridge = (
+            _CONTACT_CONTINUE_ACK
+            if contact_reply_action == "acknowledge_and_continue"
+            else _contact_prompt_bridge_text(
+                action=contact_reply_action,
+                latest_message=contact_reply_latest_message,
+                saved_request=contact_reply_saved_request,
+            )
         )
         if bridge:
             assistant_text = f"{bridge}\n\n{assistant_text}"
