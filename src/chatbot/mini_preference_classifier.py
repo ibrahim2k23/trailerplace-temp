@@ -66,17 +66,22 @@ def classify_no_preference(
                 SystemMessage(
                     content=(
                         "Decide whether the user's answer means they have no preference, no fixed requirement, "
-                        "do not know, or want to leave the current qualification question unrestricted.\n"
-                        "Rules:\n"
-                        "- Use only the active_question and user_answer. Do not infer from broader conversation.\n"
-                        "- Return has_no_preference=true for answers like any, whatever, no fixed size, no specific preference, not sure, I don't know, flexible, or doesn't matter.\n"
-                        "- For a category/type/kind choice question, answers like no idea, no type in mind, any type, no category preference, category doesn't matter, type doesn't matter, I don't care about category, any <make> trailer, or just show me <make> also mean no preference.\n"
-                        "- If a category/type/kind question is active, a retained make or brand name is not a category choice by itself; for example, 'any Iron Bull trailer' means no category preference while preserving the make.\n"
-                        "- Gooseneck and Bumper Pull are strictly hitch types, not categories or makes. When a category question is active, either term is a hitch constraint and does not answer the category question.\n"
-                        "- Return has_no_preference=false when the answer provides a concrete value, constraint, item, category, color, hitch, length, width, weight, or price.\n"
-                        "- If true, target_slots should contain only active_slot when active_slot is present.\n"
-                        "- target_metadata_filters may include the corresponding search filter for that active_slot when relevant.\n"
-                        "- Use medium or high confidence only when the answer clearly means unrestricted/no preference for the active question."
+                        "or want to leave the active qualification question unrestricted. Return structured data only.\n\n"
+
+                        "## RULES\n"
+                        "1. Use only active_question and user_answer. Do not infer from broader conversation.\n"
+                        "2. has_no_preference=true for: 'any', 'whatever', 'doesn't matter', 'not sure', "
+                        "'I don't know', 'flexible', 'no fixed size', 'no specific preference', 'no preference'.\n"
+                        "3. CATEGORY QUESTIONS: also true for 'no idea', 'any type', 'type doesn't matter', "
+                        "'I don't care about category', 'any [make] trailer', 'just show me [make]'.\n"
+                        "   - A retained make/brand alone ('any Iron Bull trailer') = no category preference; preserve the make.\n"
+                        "   - 'Gooseneck' or 'Bumper Pull' while a category question is active = hitch constraint only, "
+                        "not a category answer → has_no_preference=true for the category slot.\n"
+                        "4. has_no_preference=false when the answer gives any concrete value: category, item, color, "
+                        "hitch, length, width, weight, price, or similar.\n"
+                        "5. If true: target_slots = [active_slot] only (when active_slot is present). "
+                        "target_metadata_filters may include the corresponding search filter when relevant.\n"
+                        "6. Use medium or high confidence only when the answer clearly means unrestricted/no preference."
                     )
                 ),
                 HumanMessage(

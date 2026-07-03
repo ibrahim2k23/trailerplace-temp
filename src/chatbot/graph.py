@@ -376,6 +376,18 @@ class QuestionTurnDecision(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
 
+    @field_validator("active_slot_value", mode="before")
+    @classmethod
+    def coerce_numeric_active_slot_value(cls, value: Any) -> Any:
+        """Accept JSON numeric answers without invalidating the full LLM response."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return format(value, "g")
+        return value
+
 
 class CategoryFilterConfirmationDecision(BaseModel):
     keep_fields: list[str] = Field(default_factory=list)
@@ -2035,14 +2047,14 @@ _LLM_ADJUDICATED_METADATA_KEYS = _METADATA_FILTER_KEYS - {"make"}
 
 def _metadata_field_definitions() -> dict[str, str]:
     return {
-        "length_ft": "Trailer, deck, cargo, or bin length. Accept equivalent length units such as inches when the user is clearly giving length such as 12ft, 12 foot, 12 footer etc.",
-        "width_ft": "Trailer, cargo, or load width. Do not use a width value as length.",
-        "height_ft": "Trailer side-wall, cargo-wall, or usable side height. Wording such as '3 inch sides', '3 inch walls', '3 ft sides', or '3 ft walls' etc should be treated as height.",
-        "payload_lbs": "Payload, load, haul, or carried weight/capacity. This is not GVWR unless the user specifically asks for GVWR elsewhere.",
-        "max_price": "Maximum price, budget, or amount the customer wants to stay under.",
-        "hitch_type": "Trailer hitch preference. Only gooseneck or bumper pull are supported.",
+        "length_ft": "Trailer/deck/cargo/bin length in feet. Accept any length phrasing: '12ft', '12 foot', '12 footer', 'twelve feet', etc. Store open-ended answers like 'any length' as 'null'",
+        "width_ft": "Trailer/cargo/load width in feet. Never use a width value as length.Store open-ended answers like 'any width' as 'null'",
+        "height_ft": "Side-wall or usable cargo height in feet. Triggered by: 'X inch sides', 'X ft walls', 'X ft sides', etc.",
+        "payload_lbs": "Haul/carried weight or capacity in lbs. Not GVWR unless the user specifically says GVWR.",
+        "max_price": "Maximum price or budget. Only set when the user gives a concrete upper limit.",
+        "hitch_type": "Hitch preference: 'gooseneck' or 'bumper pull' only. Set only on explicit user selection.",
         "color": "Requested trailer color.",
-        "subcategory": "Only for Aluminum category: the underlying trailer type/base category such as utility, equipment, enclosed, or similar.",
+        "subcategory": "Aluminum category only: the underlying trailer type (e.g. utility, equipment, enclosed).",
     }
 
 
@@ -2547,95 +2559,85 @@ def _adjudicate_active_question_turn(
         decision = _question_turn_adjudicator_llm().invoke(
             [
                 SystemMessage(
-                    content=(
-                        f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
-                        "You evaluate the latest user turn while a trailer qualification question is active. "
-                        "Return structured data only.\n"
-                        "Determine whether the user answered the active question, explicitly said no preference, or did not answer it.\n"
-                        "Treat the active slot definition and question text as authoritative.\n"
-                        "If the active question was answered, set answered_active_question=true and provide active_slot_value.\n"
-                        "Interpret concise and natural answers semantically from the active question. For a length "
-                        "question, replies such as '14 footer', 'twenty-foot', or simply '14' are valid length answers. "
-                        "Use history only to resolve an explicit reference; never copy an old value as a new answer.\n"
-                        "CRITICAL HAUL-ITEM RULE: For a haul-item/use slot, requesting or repeating a trailer category "
-                        "does not identify cargo. Accept a category-like term only when explicitly framed as cargo or "
-                        "given as the direct answer to the active haul question. Thus 'I want an equipment trailer' "
-                        "does not answer what will be hauled, but the direct reply 'equipment' does.\n"
-                        "If the user explicitly says no preference for the active question, set no_preference_for_active_question=true.\n"
-                        "If the user did not answer the active question, do not fabricate a value. Instead provide a brief reply_to_user that addresses their question or comment.\n"
-                        "On the first unanswered reply, also provide rephrased_question: a natural rewording that asks for exactly the same active slot."
-                        "Do not add requirements or change meaning. The retry must sound like one natural conversational response, "
-                        "not a pasted answer followed by the original fixed question word-for-word. Use a smooth transition from "
-                        "the customer's counter-question or comment into the missing detail. Rephrase the canonical question rather "
-                        "than copying it verbatim. Put the complete customer-facing response, including the naturally rephrased retry, "
-                        "in reply_to_user. Set retry_slot exactly to active_slot. The rephrased_question must appear "
-                        "exactly once in reply_to_user, as its final question. Answer the counter-question with a "
-                        "statement and never ask a follow-up about the counter-question topic. The only question in "
-                        "reply_to_user must be the rephrased active qualification question. "
-                        "Always answer the counter-question first, then use a brief contextual bridge and naturally "
-                        "rephrase the still-unanswered active question. The result must read as one cohesive response, "
-                        "not an answer followed by a mechanically pasted question. "
-                        "When unanswered_count_before_this_turn is 1 or more, leave rephrased_question empty because the application will skip the question.\n"
-                        "Classify counter_question_topic by the noun being asked about. Trailer/category types, hitch types, and makes are different topics. The word 'type' alone does not mean trailer category. Never answer a hitch-type question with trailer categories.\n"
-                        "Supported hitch types are exactly Bumper Pull and Gooseneck. They are strictly hitch types, "
-                        "never trailer categories, base categories, subcategories, makes, or manufacturers. "
-                        "If the user says 'gooseneck trailer' or 'bumper pull trailer', extract/update hitch_type only; "
-                        "do not treat that phrase as answering a trailer-category question.\n"
-                        "Examples while 'What type of trailer are you looking for?' is active:\n"
-                        "- 'Which trailer types do you carry?' -> counter_question_topic=trailer_categories; list canonical trailer categories.\n"
-                        "- 'Which hitch types do you carry?' -> counter_question_topic=hitch_types; reply that TrailerPlace offers Bumper Pull and Gooseneck configurations.\n"
-                        "- 'Which makes do you carry?' -> counter_question_topic=makes; list canonical inventory makes.\n"
-                        "While a weight question is active, 'What hitch types do you have?' must be answered with "
-                        "Bumper Pull and Gooseneck and then naturally return to asking for weight. Never ask which hitch they prefer.\n"
-                        "Use the TrailerPlace knowledge, canonical category, and canonical make blocks above when answering counter-questions.\n"
-                        "If the user asks which trailer types, categories, or makes are available, directly list the relevant available values from those blocks in reply_to_user. "
-                        "Do not merely say you can help, and do not ask the active qualification question inside reply_to_user because the application appends that question afterward.\n"
-                        "You may also extract other valid metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same latest user message.\n"
-                        "During active qualification, you may set email_action to send_non_sales_faq_email for financing, trade-in, service/parts, store/location, or supported human/contact help.\n"
-                        "During active qualification, you may set email_action to send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported business action, such as call them, email them, send a quote, send an invoice, prepare paperwork, provide future-arrival timing, reserve/hold a trailer, schedule something, or make a custom arrangement.\n"
-                        "Examples: 'How can I contact you guys?' -> email_action=send_non_sales_faq_email, faq_category=contact_human. "
-                        "'Where are you located?' -> email_action=send_non_sales_faq_email, faq_category=store_info. "
-                        "'Can you call me tomorrow?' -> email_action=send_escalation_alert_email, not a contact FAQ. Tool intent has priority even though the active question remains unanswered.\n"
-                        "Do not set an email action for broad catalogue browsing; that should be answered with the website link elsewhere.\n"
-                        "Never set send_interested_listing_email during active qualification.\n"
-                        "Do not invent updates. Do not use listing evidence. Do not rewrite the active question. "
-                        "Use medium or high confidence only when clearly supported.\n\n"
-                        "TRAILER TYPES AND MAPPING TERMS:\n"
-                        "If a user mentions a synonym or term, map it to the canonical category even during the active QnA flow.\n"
-                        f"{category_prompt_block()}\n"
-                        "While mentioning a category, a user can make spelling mistakes. Infer the intended trailer type from the message when supported.\n\n"
-                        "EXTREMELY Important notes:\n"
-                        "1. When current_category is unknown and cannot be mapped with a trailer term/synonym, and the customer gives only an item/use case to haul, respond with 2 or 3 suitable canonical trailer types, each with a very short practical description, then ask which trailer type they prefer. Do not ask dimensions/features before trailer type is chosen.\n"
-                        "2. When current_category is unknown, the customer must ultimately choose or confirm the trailer type before inventory search.\n"
-                        "3. During active QnA, the user can change category preference. If they do, set category_update to the new canonical category and preserve any latest-message field updates that still apply.\n\n"
-                        "Hitch-only guardrail: Gooseneck and Bumper Pull must only populate hitch_type. Never use either "
-                        "as active_slot_value for a category/base-category question, and never treat either as a make. "
-                        "If one is stated while another qualification question is active, preserve it in "
-                        "metadata_filters_update.hitch_type but leave the active question unanswered unless the same "
-                        "message also gives a valid answer to that question.\n\n"
-                        "Aluminum active-question rules:\n"
-                        "- Aluminum is the current main category; base_category asks for the underlying trailer type.\n"
-                        "- When current_category=Aluminum and active_slot=base_category, a plain canonical category "
-                        "reply such as 'utility', 'equipment', 'enclosed', 'dump', 'livestock', or 'car hauler' answers "
-                        "the active question. Set answered_active_question=true and active_slot_value to the canonical "
-                        "category. Do not interpret it as a main-category change.\n"
-                        "- Examples: reply='utility' -> active_slot_value='Utility'; reply='an enclosed one' -> "
-                        "active_slot_value='Enclosed'; reply='I need it for equipment' -> active_slot_value='Equipment'.\n"
-                        "- Keep the active answer focused on the underlying type. Do not return Aluminum as "
-                        "active_slot_value and do not put the answer in requested_non_metadata_features.\n"
-                        "- Only treat the reply as switching away from Aluminum when the customer explicitly rejects "
-                        "or replaces Aluminum, such as 'not aluminum, I want utility', 'I do not want aluminum anymore', "
-                        "or 'instead of aluminum, make it enclosed'. A mere category name is never enough to switch.\n"
-                        "- If the reply contains multiple possible base categories and no clear preference, set "
-                        "answered_active_question=false, leave active_slot_value empty, and ask the customer to choose "
-                        "one underlying trailer type in reply_to_user.\n"
-                        "- If the reply is not a recognizable canonical base category, do not invent the closest type. "
-                        "Leave it unanswered so the application can repeat or clarify the base_category question.\n\n"
-                        "TRAILER BRANDS/MAKES: use only to educate the user when they ask what brands/makes are available; do not use them to infer category.\n"
-                        f"{make_prompt_block()}\n"
-                        "EXTREMELY IMPORTANT: On the first unanswered reply, also provide rephrased_question: a natural rewording that asks for exactly the same active slot."
-                    )
-                ),
+    content=(
+        f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
+        "You evaluate the latest user turn while a trailer qualification question is active. "
+        "Return structured data only.\n\n"
+
+        "## HARD RULES (apply before anything else)\n"
+        "1. CATEGORY ≠ HAUL ITEM. 'I want an equipment trailer' sets category only — not haul_item/generic_haul_use. "
+        "   Accept a category-like term as haul cargo only when explicitly framed as cargo or as a direct answer to the active haul question ('equipment' as reply to 'what will you haul?').\n"
+        "2. HITCH TYPES ONLY IN hitch_type. Gooseneck and Bumper Pull are hitch configurations only. "
+        "   Never use either as active_slot_value for a category/base-category question, a make, or any other slot. "
+        "   If stated while a different question is active, store in metadata_filters_update.hitch_type and leave the active question unanswered unless the same message also answers it.\n"
+        "   Informational hitch questions ('what hitches do you have?', 'which is better?') → no hitch_type update.\n"
+        "3. NO MAKE INFERENCE. Makes are for user education only — never infer category from make.\n\n"
+
+        "## OPEN-ENDED / VAGUE ANSWERS\n"
+        "- Dimensions (length_ft, width_ft, height_ft) and numeric fields (payload_lbs, max_price): "
+        "  vague answers ('no idea etc','any', 'doesn't matter', 'no preference') → set to null. Store concrete values only.\n"
+        "- hitch_type: store only 'gooseneck' or 'bumper pull'. Any non-specific answer → null.\n"
+        "- Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — "
+        "  'anything', 'all types of material', 'various equipment'. Capture the phrase as-is.\n\n"
+
+        "## ACTIVE QUESTION EVALUATION\n"
+        "- Treat the active slot definition and question text as authoritative.\n"
+        "- answered_active_question=true + active_slot_value when the question is clearly answered.\n"
+        "- no_preference_for_active_question=true when the user explicitly says no preference for the active slot.\n"
+        "- If unanswered: do not fabricate a value. Provide reply_to_user addressing their comment/question.\n"
+        "- Interpret answers semantically: '14 footer', 'twenty-foot', '14' all answer a length question.\n"
+        "- Use history only to resolve an explicit reference — never copy an old value as a new answer.\n\n"
+
+        "## REPHRASED QUESTION (first unanswered reply only)\n"
+        "- Provide rephrased_question: a natural rewording of the same active slot — do not add requirements or change meaning.\n"
+        "- Structure: answer the counter-question as a statement → brief contextual bridge → naturally rephrased active question.\n"
+        "- The rephrased question must appear exactly once, as the final sentence of reply_to_user.\n"
+        "- Never ask a follow-up about the counter-question topic. The only question in reply_to_user is the rephrased active slot question.\n"
+        "- When unanswered_count_before_this_turn >= 1: leave rephrased_question empty (app skips the question).\n\n"
+
+        "## COUNTER-QUESTION HANDLING\n"
+        "Classify counter_question_topic by the noun being asked about. 'Type' alone ≠ trailer category.\n"
+        "| User asks | counter_question_topic | reply_to_user content |\n"
+        "|---|---|---|\n"
+        "| 'Which trailer types do you carry?' | trailer_categories | List all canonical trailer categories |\n"
+        "| 'Which hitch types do you carry?' | hitch_types | 'Bumper Pull and Gooseneck' — never list trailer categories |\n"
+        "| 'Which makes do you carry?' | makes | List canonical inventory makes |\n"
+        "If the user asks what types/makes are available, list them directly — do not say 'I can help with that'.\n\n"
+
+        "## EMAIL ACTIONS (priority over active question)\n"
+        "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
+        "- send_escalation_alert_email: unsupported actions — call me, email me, quote, invoice, hold/reserve, schedule, paperwork, arrival timing.\n"
+        "- Never set send_interested_listing_email during active qualification.\n"
+        "- Do not set any email action for broad catalogue browsing.\n"
+        "Examples: 'How do I contact you?' → send_non_sales_faq_email, faq_category=contact_human. "
+        "'Can you call me tomorrow?' → send_escalation_alert_email.\n\n"
+
+        "## ALUMINUM BASE-CATEGORY RULES\n"
+        "When current_category=Aluminum and active_slot=base_category:\n"
+        "- A plain canonical category reply answers the active question. Set answered_active_question=true, active_slot_value=canonical category.\n"
+        "  Examples: 'utility' → Utility; 'an enclosed one' → Enclosed; 'I need it for equipment' → Equipment.\n"
+        "- Do NOT return Aluminum as active_slot_value. Do NOT put the answer in requested_non_metadata_features.\n"
+        "- Switch away from Aluminum ONLY on explicit rejection: 'not aluminum', 'I don't want aluminum anymore', 'instead of aluminum make it enclosed'.\n"
+        "- Multiple possible base categories with no clear preference → answered_active_question=false, ask user to choose one.\n"
+        "- Unrecognized reply → leave unanswered, let the app clarify.\n\n"
+
+        "## CATEGORY HANDLING DURING ACTIVE QnA\n"
+        "- User may change category mid-flow. If so, set category_update to the new canonical category and preserve any still-valid field updates.\n"
+        "- When current_category is unknown and the user gives only a use case/haul item: offer 2–3 suitable canonical trailer types each with a one-line description, then ask which they prefer. Do not ask dimensions/features before type is chosen.\n"
+        "- Map spelling mistakes and synonyms to canonical categories.\n\n"
+
+        "## GENERAL EXTRACTION RULES\n"
+        "- You may also extract metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same message.\n"
+        "- requested_non_metadata_features: user-requested equipment/config/features not covered by metadata or slots. Never infer from listing text.\n"
+        "- Do not invent updates. Use medium or high confidence only when clearly supported.\n"
+        "- Use recent messages and the previous assistant question only to interpret the latest message — not as new updates.\n\n"
+
+        "## TRAILER TYPES AND MAPPING TERMS\n"
+        f"{category_prompt_block()}\n\n"
+        "## TRAILER BRANDS / MAKES (education only — never infer category)\n"
+        f"{make_prompt_block()}"
+    )
+),
                 HumanMessage(content=_safe_json(context)),
             ]
         )
@@ -2996,52 +2998,55 @@ def _extract_field_updates(
         decision = _field_extraction_adjudicator_llm().invoke(
             [
                 SystemMessage(
-                    content=(
-                        "Extract all explicit trailer search updates from the latest user message in one pass. "
-                        "Return structured data only.\n"
-                        "Always return rejected_candidates as a JSON array; use [] when there are none. "
-                        "CRITICAL HAUL-ITEM RULE: A trailer category identifies the requested trailer type, not its cargo. "
-                        "Never copy or infer a category name or phrase into haul_item, haul_material, generic_haul_use, "
-                        "or any haul/use alias merely because that category was requested. 'I want an equipment trailer' "
-                        "sets no haul item; 'I need to haul equipment' explicitly sets equipment. A category-like term may "
-                        "also be accepted as a direct answer to an active haul-item question. History may resolve an "
-                        "explicit reference such as 'it', but history alone must not create a haul item.\n"
-                        "The metadata field definitions and category slot definitions are authoritative. "
-                        "Do not extract make/manufacturer; make is handled by a separate resolver. "
-                        "Gooseneck and Bumper Pull are strictly hitch types. Extract either only into "
-                        "metadata_filters_update.hitch_type and, when allowed, the hitch_type category slot. "
-                        "Never put either into category slots such as base_category, generic_haul_use, haul_item, "
-                        "subcategory, requested_non_metadata_features, make, or manufacturer. "
-                        "Set hitch_type only when the latest user message explicitly selects, requests, prefers, or "
-                        "states that hitch configuration for their trailer. Informational questions do not select a "
-                        "hitch type. Messages such as 'what hitch types do you offer?', 'do you have gooseneck "
-                        "trailers?', 'what is a bumper pull?', or 'which hitch is better?' must return no hitch_type "
-                        "update unless the same message separately expresses a clear choice. Never copy a hitch type "
-                        "from the assistant's previous answer or other conversation context. "
-                        "Do not extract subcategory unless current_category is Aluminum. "
-                        "Use recent messages and the previous assistant question only as context for interpreting the latest user message, not as new updates. "
-                        "You are authoritative for whether the latest message supports each update; understand natural "
-                        "language rather than requiring fixed wording. Examples: 'I want a 14 footer' means "
-                        "length_ft=14 ft, 'a twenty-foot trailer' means length_ft=20 ft, and a concise value can answer "
-                        "the previous assistant's active field question. Never return an existing or historical value "
-                        "unless the latest message states, changes, confirms, or clearly refers to it. "
-                        "When current_category is unknown, extract any stated item, cargo, material, equipment, or use case into slots_collected_update.generic_haul_use. "
-                        "This includes specific nouns and broad natural phrases such as 'a car', 'equipment', 'tools', 'some heavy items', 'construction materials', or 'landscaping equipment'. "
-                        "Preserve the meaningful phrase the customer used; do not require a precise named object. "
-                        "Example: 'I need a 32ft trailer to haul some heavy items' must produce metadata_filters_update.length_ft='32ft' and slots_collected_update.generic_haul_use='some heavy items'. "
-                        "Example: 'Need something for a car and tools' with no resolved category must produce slots_collected_update.generic_haul_use='a car and tools'. "
-                        "generic_haul_use is a temporary category-unknown slot that will be mapped to the selected category's haul field later. "
-                        "Do not put haul/use/cargo/material phrases into requested_non_metadata_features, and do not leave generic_haul_use empty merely because the phrase is broad. "
-                        "Extract requested_non_metadata_features for user-requested equipment/configuration/features not represented by metadata filters or category slots. "
-                        "Do not infer requested_non_metadata_features from inventory/listing text. "
-                        "Accept equivalent units such as inches when they clearly answer a length or width field. "
-                        "Return every length, width, and height in feet with the suffix 'ft', converting other units. "
-                        "Return every weight or payload in pounds with the suffix 'lbs', converting other units. "
-                        "Normalize wording such as '14 footer' to '14 ft'; never preserve 'footer' in an extracted value. "
-                        "Compact trailer size notation is positional: AxB means width A and length B; AxBxC means width A, length B, height C. "
-                        "If confidence is low, leave updates empty and optionally set clarification_needed."
-                    )
-                ),
+    content=(
+        "Extract all explicit trailer search updates from the latest user message in one pass. "
+        "Return structured data only. Always return rejected_candidates as a JSON array ([] if none).\n\n"
+
+        "## HARD RULES (apply before extracting anything)\n"
+        "1. CATEGORY ≠ HAUL ITEM. A category names the trailer type, not its cargo.\n"
+        "   - 'I want an equipment trailer' → sets category only. haul_item/generic_haul_use = nothing.\n"
+        "   - 'I need to haul equipment' → sets generic_haul_use='equipment'.\n"
+        "   - A category-like term may answer an active haul-item question from the assistant.\n"
+        "   - History alone must never create a haul item.\n"
+        "2. HITCH TYPES ONLY GO IN hitch_type. Gooseneck and Bumper Pull are hitch configurations.\n"
+        "   Never put either into base_category, generic_haul_use, haul_item, subcategory, make, or features.\n"
+        "   Only extract hitch_type when the user explicitly selects or prefers one in the latest message.\n"
+        "   Informational questions ('what hitches do you have?', 'which is better?') → no hitch_type update.\n"
+        "3. NO MAKE EXTRACTION. Make/manufacturer is handled by a separate resolver.\n"
+        "4. NO subcategory UNLESS current_category=Aluminum.\n\n"
+
+        "## FIELD EXTRACTION RULES\n"
+        "- Use recent messages and the previous assistant question only to interpret the latest message — not as new updates.\n"
+        "- Never return an existing/historical value unless the latest message states, changes, confirms, or clearly refers to it.\n"
+        "- LOOSE / OPEN-ENDED ANSWERS: Store vague or open-ended answers as-is in the relevant field.\n"
+        "  Examples: 'any length' → length_ft='any'; 'all types of material' → generic_haul_use='all types of material';\n"
+        "  'no budget limit' → do not set max_price; 'doesn't matter' for a field → leave that field null.\n"
+        "  The goal is to capture what the user said, even if it is non-specific.\n"
+        "- UNKNOWN CATEGORY: Extract any stated item, cargo, material, equipment, or use case into generic_haul_use.\n"
+        "  Include broad phrases: 'some heavy items', 'construction materials', 'a car and tools'.\n"
+        "  Do not require a precise named object. Do not put haul/use phrases into requested_non_metadata_features.\n"
+        "- requested_non_metadata_features: only user-requested equipment/config/features not covered by metadata or slots.\n"
+        "  Do not infer from inventory/listing text.\n\n"
+
+        "## UNIT NORMALIZATION\n"
+        "- Lengths and widths → feet with suffix 'ft'. Convert inches, 'footer', 'foot' etc.\n"
+        "  Compact notation AxB = width A x length B; AxBxC = width A x length B x height C.\n"
+        "- Weights and payloads → pounds with suffix 'lbs'. Convert tons, kg, etc.\n"
+        "- payload_lbs is haul/carried weight — NOT GVWR unless user specifically says GVWR.\n"
+        "- Side/wall height: '3 inch sides', '3 ft walls' → height_ft.\n\n"
+
+        "## CONFIDENCE\n"
+        "If confidence is low, leave updates empty and optionally set clarification_needed.\n"
+        "The field definitions and category slot definitions passed in context are authoritative."
+        
+        "- LOOSE / OPEN-ENDED ANSWERS:\n"
+"  • Dimensions (length_ft, width_ft, height_ft): vague answers ('any length', 'doesn't matter', 'no preference') → set to null. Only store a concrete measurement.\n"
+"  • Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — 'all types of material', 'anything', 'various equipment'. Capture the phrase as-is.\n"
+"  • hitch_type: only store 'gooseneck' or 'bumper pull'. Any other answer or non-specific reply ('either', 'doesn't matter', 'any') → set to null.\n"
+"  • max_price: only set when the user gives a concrete upper limit. Vague answers → null.\n"
+"  • payload_lbs: store a concrete weight only. Vague answers ('any weight', 'doesn't matter') → null.\n"
+    )
+),
                 HumanMessage(content=f"Return field extraction for this context:\n{_safe_json(context)}"),
             ]
         )
