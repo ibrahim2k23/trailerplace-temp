@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from src.email_sender import send_faq_email_sync, send_ticket_notification
 from src.conversation_store import (
@@ -25,6 +27,25 @@ FAQ_ITEM_OF_INTEREST_LABELS = {
 }
 TRAILER_RESULTS_SHOWN_SUBJECT = "Trailer Results Shown to User"
 TRAILER_RESULTS_SHOWN_DESCRIPTION = "Trailer results were shown to the user."
+_EMAIL_EVENTS: ContextVar[list[dict] | None] = ContextVar("chatbot_email_events", default=None)
+
+
+@contextmanager
+def capture_email_events():
+    events: list[dict] = []
+    token = _EMAIL_EVENTS.set(events)
+    try:
+        yield events
+    finally:
+        _EMAIL_EVENTS.reset(token)
+
+
+def _queue_email(event_type: str, payload: dict) -> dict | None:
+    events = _EMAIL_EVENTS.get()
+    if events is None:
+        return None
+    events.append({"event_type": event_type, "payload": payload})
+    return {"status": "queued", "body_preview": ""}
 
 
 def _conversation_transcript_from_db(session_id: str) -> str:
@@ -64,6 +85,11 @@ def send_interested_listing_email(
     item_name: str,
 ) -> dict:
     """Tool 2: notify the business that the customer is interested in a listing."""
+    queued = _queue_email("interested_listing", dict(
+        session_id=session_id, full_name=full_name, email=email, phone=phone, item_name=item_name
+    ))
+    if queued:
+        return queued
     item = (item_name or "").strip()
     details = _append_conversation("", session_id).strip()
     send_ticket_notification(
@@ -99,6 +125,13 @@ def send_non_sales_faq_email(
     context_summary: str | None = None,
 ) -> dict:
     """Tool 3: notify the business about contact, financing, trade-in, service, or store info."""
+    queued = _queue_email("non_sales_faq", dict(
+        session_id=session_id, full_name=full_name, email=email, phone=phone,
+        faq_category=faq_category, summary=summary, user_message=user_message,
+        context_summary=context_summary,
+    ))
+    if queued:
+        return queued
     category = (faq_category or "contact_human").strip().lower()
     if category not in FAQ_CATEGORY_LABELS:
         category = "contact_human"
@@ -140,6 +173,12 @@ def send_escalation_alert_email(
     context_summary: str | None = None,
 ) -> dict:
     """Tool 4: alert the business about an unsupported customer-requested action."""
+    queued = _queue_email("escalation_alert", dict(
+        session_id=session_id, full_name=full_name, email=email, phone=phone,
+        summary=summary, user_message=user_message, context_summary=context_summary,
+    ))
+    if queued:
+        return queued
     summary_line = (summary or "Customer requested an action the chatbot cannot complete.").strip()
     if not summary_line.startswith("[Escalation Alert]"):
         summary_line = f"[Escalation Alert] {summary_line}"
@@ -170,6 +209,11 @@ def send_trailer_results_shown_email(
     phone: str,
 ) -> dict:
     """Silently notify the business after a non-empty trailer result batch is shown."""
+    queued = _queue_email("results_shown", dict(
+        session_id=session_id, full_name=full_name, email=email, phone=phone
+    ))
+    if queued:
+        return queued
     summary_line = _append_conversation(TRAILER_RESULTS_SHOWN_DESCRIPTION, session_id)
     send_faq_email_sync(
         full_name=full_name,

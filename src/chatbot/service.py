@@ -26,17 +26,23 @@ from src.chatbot.prompts import (
     TRAILERPLACE_PERSONA_SECTION,
 )
 from src.chatbot.tools.email_tools import (
+    capture_email_events,
     send_escalation_alert_email,
     send_interested_listing_email,
     send_non_sales_faq_email,
     send_trailer_results_shown_email,
 )
 from src.conversation_store import (
+    close_session,
     create_or_get_soft_lead,
+    deliver_pending_outbox,
+    durable_turn,
     enqueue_upsert_conversation,
+    persistence_enabled,
     persist_messages_snapshot,
     update_lead_contact,
 )
+from src.db_models import ChatbotConversation, ChatbotOutbox, ChatbotTurn
 from src.models import ChatRequest, ChatResponse
 
 load_dotenv()
@@ -294,6 +300,7 @@ def _get_session(session_id: str) -> dict[str, Any]:
 def reset_session(session_id: str) -> None:
     with _lock:
         _sessions.pop(session_id, None)
+    close_session(session_id)
 
 
 def _contact_llm():
@@ -1729,6 +1736,101 @@ def _inventory_lookup_response(
     )
 
 
+def _legacy_messages(conversation: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for turn in conversation or []:
+        if turn.get("user") is not None:
+            messages.append({"role": "user", "content": turn.get("user")})
+        if turn.get("chatbot") is not None:
+            messages.append({"role": "assistant", "content": turn.get("chatbot")})
+    return messages
+
+
+def handle_chat(request: ChatRequest) -> ChatResponse:
+    """Process and commit one idempotent, fully resumable turn."""
+    if not persistence_enabled():
+        return _handle_chat_in_memory(request)
+
+    from fastapi import HTTPException
+
+    try:
+        with durable_turn(request.session_id, request.turn_id, request.message) as (
+            db_session,
+            row,
+            receipt,
+        ):
+            if receipt:
+                return ChatResponse.model_validate(receipt.response)
+            if row and row.closed_at is not None:
+                raise HTTPException(status_code=409, detail="Session is closed")
+
+            if row and isinstance(row.state_snapshot, dict):
+                loaded = deepcopy(row.state_snapshot)
+                loaded["session_id"] = request.session_id
+            else:
+                loaded = _new_session(request.session_id)
+                if row:
+                    loaded["messages"] = _legacy_messages(row.conversation)
+            with _lock:
+                _sessions[request.session_id] = loaded
+
+            with capture_email_events() as email_events:
+                response = _handle_chat_in_memory(request)
+            snapshot = deepcopy(_sessions[request.session_id])
+            json.dumps(snapshot)  # Fail before success if state is not JSON-safe.
+            payload = _model_dump(response)
+
+            if row is None:
+                lead_id = snapshot.get("lead_id")
+                if not lead_id:
+                    raise RuntimeError("A durable conversation requires a lead")
+                row = ChatbotConversation(
+                    session_id=request.session_id,
+                    lead_id=lead_id,
+                    conversation=_conversation_payload(snapshot),
+                )
+                db_session.add(row)
+                db_session.flush()
+            row.conversation = _conversation_payload(snapshot)
+            row.state_snapshot = snapshot
+            row.state_schema_version = 1
+            row.state_version = int(row.state_version or 0) + 1
+            db_session.add(
+                ChatbotTurn(
+                    session_id=request.session_id,
+                    turn_id=request.turn_id,
+                    request_message=request.message,
+                    response=payload,
+                )
+            )
+            for index, event in enumerate(email_events):
+                db_session.add(
+                    ChatbotOutbox(
+                        session_id=request.session_id,
+                        turn_id=request.turn_id,
+                        event_key=f"{event['event_type']}:{index}",
+                        event_type=event["event_type"],
+                        payload=event["payload"],
+                    )
+                )
+            committed_response = response
+        try:
+            deliver_pending_outbox()
+        except Exception:
+            logger.exception("outbox_drain_failed")
+        return committed_response
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("durable_chat_turn_failed | session_id=%s", request.session_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation could not be saved; retry this turn",
+        ) from exc
+
+
 def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: list[str]) -> dict[str, Any]:
     graph_state = {
         "session_id": session["session_id"],
@@ -1812,7 +1914,7 @@ def _reset_search_state_for_category_switch(session: dict[str, Any], old_categor
     )
 
 
-def handle_chat(request: ChatRequest) -> ChatResponse:
+def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
     session = _get_session(request.session_id)
     _ensure_lead(session)
     had_contact_before_turn = _has_contact(session)

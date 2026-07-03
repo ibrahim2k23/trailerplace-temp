@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -54,6 +54,10 @@ class ChatbotConversation(Base):
         index=True,
     )
     conversation: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    state_snapshot: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    state_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -67,3 +71,30 @@ class ChatbotConversation(Base):
     )
 
     lead: Mapped["ChatbotLead"] = relationship(back_populates="conversations")
+
+
+class ChatbotTurn(Base):
+    __tablename__ = "chatbot_turns"
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chatbot_conversations.session_id", ondelete="CASCADE"), primary_key=True
+    )
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    request_message: Mapped[str] = mapped_column(Text, nullable=False)
+    response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ChatbotOutbox(Base):
+    __tablename__ = "chatbot_outbox"
+    __table_args__ = (UniqueConstraint("session_id", "turn_id", "event_key", name="uq_chatbot_outbox_event"),)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    event_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

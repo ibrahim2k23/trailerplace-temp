@@ -68,6 +68,15 @@ def _reset_api_session(session_id: str) -> None:
         pass
 
 
+def _restore_api_session(session_id: str) -> dict | None:
+    try:
+        response = requests.get(f"{CHATBOT_API_URL}/session/{session_id}", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
 def _password_matches(got: str, expected: str) -> bool:
     ga, ea = got.encode("utf-8"), expected.encode("utf-8")
     if len(ga) != len(ea):
@@ -133,6 +142,17 @@ components.html(
   const url = new URL(parentWindow.location.href);
   const urlTheme = url.searchParams.get("theme");
   const savedTheme = parentWindow.localStorage.getItem(storageKey);
+  const chatKey = "trailerplace-chat-session";
+  const urlSession = url.searchParams.get("chat_session");
+  const savedSession = parentWindow.sessionStorage.getItem(chatKey);
+
+  if (!urlSession && savedSession) {
+    url.searchParams.set("chat_session", savedSession);
+    parentWindow.location.replace(url.toString());
+    return;
+  } else if (urlSession) {
+    parentWindow.sessionStorage.setItem(chatKey, urlSession);
+  }
 
   if (!urlTheme && (savedTheme === "light" || savedTheme === "dark")) {
     url.searchParams.set("theme", savedTheme);
@@ -1078,7 +1098,17 @@ if not st.session_state.auth_ok:
 
 
 if "chat_session_id" not in st.session_state:
-    st.session_state.chat_session_id = str(uuid.uuid4())
+    st.session_state.chat_session_id = st.query_params.get("chat_session") or str(uuid.uuid4())
+    st.query_params["chat_session"] = st.session_state.chat_session_id
+if "durable_session_restored" not in st.session_state:
+    restored = _restore_api_session(st.session_state.chat_session_id)
+    if restored and restored.get("exists") and not restored.get("closed"):
+        st.session_state.messages = restored.get("messages") or []
+        st.session_state.sales_phase = restored.get("sales_phase") or "main"
+        for key in ("customer_full_name", "customer_email", "customer_phone"):
+            if restored.get(key) is not None:
+                st.session_state[key] = restored[key]
+    st.session_state.durable_session_restored = True
 if "backend_ready_status" not in st.session_state:
     _start_backend_initialization()
 backend_ready_future = st.session_state.get("backend_ready_future")
@@ -1101,6 +1131,8 @@ if "last_thinking_payload" not in st.session_state:
     st.session_state.last_thinking_payload = None
 if "chat_awaiting_response" not in st.session_state:
     st.session_state.chat_awaiting_response = False
+if "pending_turn_id" not in st.session_state:
+    st.session_state.pending_turn_id = None
 
 thinking_future = st.session_state.get("thinking_future")
 if isinstance(thinking_future, Future) and thinking_future.done():
@@ -1186,11 +1218,13 @@ with st.sidebar:
             if k in st.session_state:
                 del st.session_state[k]
         st.session_state.chat_session_id = str(uuid.uuid4())
+        st.query_params["chat_session"] = st.session_state.chat_session_id
         st.session_state.last_thinking_result = None
         st.session_state.thinking_status = "idle"
         st.session_state.thinking_future = None
         st.session_state.last_thinking_payload = None
         st.session_state.chat_awaiting_response = False
+        st.session_state.pending_turn_id = None
         _start_backend_initialization()
         st.rerun()
     if st.button("Log out", use_container_width=True):
@@ -1198,6 +1232,7 @@ with st.sidebar:
         if old_sid:
             _reset_api_session(old_sid)
         st.session_state.auth_ok = False
+        st.query_params["chat_session"] = str(uuid.uuid4())
         st.session_state.messages = []
         for k in (
             "chat_session_id",
@@ -1215,6 +1250,8 @@ with st.sidebar:
             "backend_ready_error",
             "backend_ready_future",
             "chat_awaiting_response",
+            "pending_turn_id",
+            "durable_session_restored",
         ):
             if k in st.session_state:
                 del st.session_state[k]
@@ -1355,7 +1392,7 @@ else:
 # ─────────────────────────────────────────────────────────────
 # CHAT INPUT
 # ─────────────────────────────────────────────────────────────
-def _process_assistant_reply(prompt: str) -> None:
+def _process_assistant_reply(prompt: str) -> bool:
     """Call the chat API, append the assistant turn, and run optional thinking."""
     with st.chat_message("assistant"):
         with st.spinner(""):
@@ -1363,6 +1400,7 @@ def _process_assistant_reply(prompt: str) -> None:
             thinking_context = None
             payload = {
                 "session_id": st.session_state.chat_session_id,
+                "turn_id": st.session_state.pending_turn_id,
                 "sales_phase": st.session_state.sales_phase,
                 "message": prompt,
                 "onboarding_api_messages": st.session_state.onboarding_api_messages,
@@ -1384,6 +1422,8 @@ def _process_assistant_reply(prompt: str) -> None:
                 r.raise_for_status()
                 data = r.json()
             except (requests.RequestException, ValueError) as exc:
+                st.error(f"The assistant service is unavailable ({exc!s}). Retry when it is ready.")
+                return False
                 response_text = (
                     f"Sorry — the assistant service is unavailable ({exc!s}). "
                     f"Start the API with `python main.py` (default {CHATBOT_API_URL})."
@@ -1405,6 +1445,7 @@ def _process_assistant_reply(prompt: str) -> None:
                 if data.get("main_prior_messages") is not None:
                     st.session_state.main_prior_messages = data["main_prior_messages"]
                 thinking_context = data.get("thinking_context")
+                st.session_state.pending_turn_id = None
 
                 listings = []
                 for d in (data.get("listings") or []):
@@ -1489,6 +1530,7 @@ def _process_assistant_reply(prompt: str) -> None:
             sid,
             [str(x.url or "") for x in listings if getattr(x, "url", None)],
         )
+    return st.session_state.pending_turn_id is None
 
 
 placeholder = (
@@ -1524,11 +1566,12 @@ _pending_user_turn = (
 
 if _pending_user_turn:
     st.chat_input(placeholder, disabled=True)
-    _process_assistant_reply(st.session_state.messages[-1]["content"])
-    st.session_state.chat_awaiting_response = False
-    st.rerun()
+    if _process_assistant_reply(st.session_state.messages[-1]["content"]):
+        st.session_state.chat_awaiting_response = False
+        st.rerun()
 elif prompt := st.chat_input(placeholder, disabled=chat_input_disabled):
     st.session_state.messages.append({"role": "user", "content": prompt, "listings": None})
+    st.session_state.pending_turn_id = str(uuid.uuid4())
     st.session_state.chat_awaiting_response = True
     st.rerun()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,7 @@ class TrailerListing(BaseModel):
 
 class ChatRequest(BaseModel):
     session_id: str
+    turn_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     sales_phase: str = "onboarding"
     message: str
     onboarding_api_messages: list[dict[str, Any]] = Field(default_factory=list)
@@ -54,3 +56,15 @@ class ChatResponse(BaseModel):
 
 class ResetSessionRequest(BaseModel):
     session_id: str
+
+
+class SessionRestoreResponse(BaseModel):
+    exists: bool
+    closed: bool = False
+    state_version: int = 0
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    sales_phase: str = "main"
+    customer_full_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
+    contact_status: Optional[str] = None

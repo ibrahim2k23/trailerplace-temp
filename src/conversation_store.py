@@ -3,13 +3,15 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from src.db_models import ChatbotConversation, ChatbotLead
+from src.db_models import ChatbotConversation, ChatbotLead, ChatbotOutbox, ChatbotTurn
 from src import db
 
 load_dotenv()
@@ -251,6 +253,118 @@ def get_conversation(session_id: str) -> list[dict[str, Any]]:
         if not row or not isinstance(row.conversation, list):
             return []
         return list(row.conversation)
+
+
+@contextmanager
+def durable_turn(
+    session_id: str,
+    turn_id: uuid.UUID,
+    request_message: str,
+):
+    """Serialize one session's turns and expose its transaction to the service."""
+    ensure_persistence_schema()
+    sid = _as_uuid(session_id)
+    with _session() as session:
+        # Works for both existing and not-yet-created conversation rows.
+        session.execute(select(func.pg_advisory_xact_lock(func.hashtext(str(sid)))))
+        row = session.get(ChatbotConversation, sid)
+        receipt = session.get(ChatbotTurn, (sid, turn_id))
+        if receipt and receipt.request_message != request_message:
+            raise ValueError("turn_id was already used with a different message")
+        try:
+            yield session, row, receipt
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+
+def restore_session(session_id: str) -> dict[str, Any]:
+    if not persistence_enabled():
+        return {"exists": False}
+    ensure_persistence_schema()
+    try:
+        sid = _as_uuid(session_id)
+    except Exception:
+        return {"exists": False}
+    with _session() as session:
+        row = session.get(ChatbotConversation, sid)
+        if not row:
+            return {"exists": False}
+        snapshot = dict(row.state_snapshot or {})
+        messages = snapshot.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+            for turn in row.conversation or []:
+                if turn.get("user") is not None:
+                    messages.append({"role": "user", "content": turn.get("user")})
+                if turn.get("chatbot") is not None:
+                    messages.append({"role": "assistant", "content": turn.get("chatbot")})
+        return {
+            "exists": True,
+            "closed": row.closed_at is not None,
+            "state_version": row.state_version,
+            "messages": messages,
+            "sales_phase": snapshot.get("sales_phase", "main"),
+            "customer_full_name": snapshot.get("customer_full_name"),
+            "customer_email": snapshot.get("customer_email"),
+            "customer_phone": snapshot.get("customer_phone"),
+            "contact_status": snapshot.get("contact_status"),
+        }
+
+
+def close_session(session_id: str) -> None:
+    if not persistence_enabled():
+        return
+    try:
+        sid = _as_uuid(session_id)
+    except Exception:
+        return
+    with _session() as session:
+        row = session.get(ChatbotConversation, sid)
+        if row and row.closed_at is None:
+            row.closed_at = datetime.now(timezone.utc)
+            session.commit()
+
+
+def deliver_pending_outbox(limit: int = 10) -> None:
+    """Best-effort at-least-once delivery; failed rows remain retryable."""
+    if not persistence_enabled():
+        return
+    from src.chatbot.tools import email_tools
+
+    handlers = {
+        "interested_listing": email_tools.send_interested_listing_email,
+        "non_sales_faq": email_tools.send_non_sales_faq_email,
+        "escalation_alert": email_tools.send_escalation_alert_email,
+        "results_shown": email_tools.send_trailer_results_shown_email,
+    }
+    with _session() as session:
+        rows = list(session.execute(
+            select(ChatbotOutbox)
+            .where(ChatbotOutbox.status.in_(("pending", "failed")))
+            .order_by(ChatbotOutbox.created_at)
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+        ).scalars())
+        for row in rows:
+            row.status = "processing"
+            row.attempt_count += 1
+        session.commit()
+
+    for row in rows:
+        try:
+            handlers[row.event_type](**row.payload)
+            status, error = "sent", None
+        except Exception as exc:
+            logger.exception("outbox_delivery_failed | event_id=%s", row.event_id)
+            status, error = "failed", str(exc)[:2000]
+        with _session() as session:
+            current = session.get(ChatbotOutbox, row.event_id)
+            if current:
+                current.status = status
+                current.last_error = error
+                session.commit()
 
 
 def enqueue_upsert_conversation(

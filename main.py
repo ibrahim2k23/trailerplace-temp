@@ -13,7 +13,8 @@ from src.chatbot.inventory_matcher import (
 )
 from src.chatbot.service import handle_chat, reset_session
 from src.log_setup import configure_trailerplace_logging
-from src.models import ChatRequest, ChatResponse, ResetSessionRequest
+from src.conversation_store import restore_session
+from src.models import ChatRequest, ChatResponse, ResetSessionRequest, SessionRestoreResponse
 
 load_dotenv()
 configure_trailerplace_logging()
@@ -29,6 +30,11 @@ def health() -> dict[str, str]:
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     return handle_chat(request)
+
+
+@app.get("/session/{session_id}", response_model=SessionRestoreResponse)
+def get_session(session_id: str) -> SessionRestoreResponse:
+    return SessionRestoreResponse.model_validate(restore_session(session_id))
 
 
 @app.post("/trailer-search", response_model=TrailerSearchResponse)
