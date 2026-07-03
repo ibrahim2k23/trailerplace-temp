@@ -357,6 +357,8 @@ class QuestionTurnDecision(BaseModel):
     ] = "none"
     answered_active_question: bool = False
     no_preference_for_active_question: bool = False
+    search_now_requested: bool = False
+    skip_remaining_questions: bool = False
     active_slot_value: Optional[str] = None
     metadata_filters_update: dict[str, Any] = Field(default_factory=dict)
     slots_collected_update: dict[str, Any] = Field(default_factory=dict)
@@ -2221,6 +2223,10 @@ def _sanitize_question_turn_decision(data: dict[str, Any]) -> QuestionTurnDecisi
         counter_question_topic=counter_topic,  # type: ignore[arg-type]
         answered_active_question=bool(data.get("answered_active_question")),
         no_preference_for_active_question=bool(data.get("no_preference_for_active_question")),
+        search_now_requested=bool(
+            data.get("search_now_requested") or data.get("skip_remaining_questions")
+        ),
+        skip_remaining_questions=bool(data.get("skip_remaining_questions")),
         active_slot_value=str(data.get("active_slot_value") or "").strip() or None,
         metadata_filters_update=dict(data.get("metadata_filters_update") or {}),
         slots_collected_update=dict(data.get("slots_collected_update") or {}),
@@ -2369,6 +2375,33 @@ def _adjudicate_office_trailer_clarification_turn(
     )
 
 
+def _skip_remaining_questions_requested(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:don['\u2019]?t|do\s+not|won['\u2019]?t|will\s+not)\s+"
+            r"(?:want\s+to\s+)?answer\b[^.?!]*(?:more|any\s+more|additional|remaining)\s+questions?\b"
+            r"|\b(?:skip|stop)\b[^.?!]*(?:the\s+)?(?:rest|remaining|questions?)\b"
+            r"|\b(?:that['\u2019]?s|that\s+is)\s+enough\s+questions?\b",
+            text or "",
+            re.I,
+        )
+    )
+
+
+def _immediate_search_requested(text: str) -> bool:
+    return bool(
+        _skip_remaining_questions_requested(text)
+        or re.search(
+            r"\b(?:show|let\s+me\s+see|give|find|search|pull\s+up)\b[^.?!]*"
+            r"(?:results?|trailers?|listings?|options?|inventory|what\s+you\s+have)\b"
+            r"|\bwhat\b[^.?!]*(?:trailers?|listings?|options?)\b[^.?!]*"
+            r"(?:have|available|in\s+stock)\b",
+            text or "",
+            re.I,
+        )
+    )
+
+
 def _fallback_question_turn_decision(
     *,
     state: ChatbotState,
@@ -2384,6 +2417,15 @@ def _fallback_question_turn_decision(
     text = str(latest_message or "").strip()
     if not text:
         return QuestionTurnDecision(reason="empty_latest_message", confidence="low")
+
+    if category and _immediate_search_requested(text):
+        skip_all = _skip_remaining_questions_requested(text)
+        return QuestionTurnDecision(
+            search_now_requested=True,
+            skip_remaining_questions=skip_all,
+            confidence="high",
+            reason="deterministic_immediate_search_request",
+        )
 
     if active_slot == _MAKE_CATEGORY_CHOICE_SLOT:
         chosen_category = _category_from_choice(text, make_category_options)
@@ -2558,86 +2600,136 @@ def _adjudicate_active_question_turn(
     try:
         decision = _question_turn_adjudicator_llm().invoke(
             [
-                SystemMessage(
-    content=(
-        f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
-        "You evaluate the latest user turn while a trailer qualification question is active. "
-        "Return structured data only.\n\n"
+            SystemMessage(
+                content=(
+                    f"{TRAILERPLACE_KNOWLEDGE_SECTION}\n\n"
+                    "You evaluate the latest user turn while a trailer qualification question is active. "
+                    "Return structured data only.\n\n"
 
-        "## HARD RULES (apply before anything else)\n"
-        "1. CATEGORY ≠ HAUL ITEM. 'I want an equipment trailer' sets category only — not haul_item/generic_haul_use. "
-        "   Accept a category-like term as haul cargo only when explicitly framed as cargo or as a direct answer to the active haul question ('equipment' as reply to 'what will you haul?').\n"
-        "2. HITCH TYPES ONLY IN hitch_type. Gooseneck and Bumper Pull are hitch configurations only. "
-        "   Never use either as active_slot_value for a category/base-category question, a make, or any other slot. "
-        "   If stated while a different question is active, store in metadata_filters_update.hitch_type and leave the active question unanswered unless the same message also answers it.\n"
-        "   Informational hitch questions ('what hitches do you have?', 'which is better?') → no hitch_type update.\n"
-        "3. NO MAKE INFERENCE. Makes are for user education only — never infer category from make.\n\n"
+                    "## HARD RULES (apply before anything else)\n"
+                    "1. CATEGORY ≠ HAUL ITEM. 'I want an equipment trailer' sets category only — not haul_item/generic_haul_use. "
+                    "   Accept a category-like term as haul cargo only when explicitly framed as cargo or as a direct answer to the active haul question.\n"
+                    "2. HITCH TYPES ONLY IN hitch_type. Gooseneck and Bumper Pull are hitch configurations only. "
+                    "   Never use either as active_slot_value for a category/base-category question, make, or any other slot. "
+                    "   If stated while a different question is active, store in metadata_filters_update.hitch_type and leave the active question unanswered unless the same message also answers it. "
+                    "   Informational hitch questions ('what hitches do you have?', 'which is better?') → no hitch_type update.\n"
+                    "3. NO MAKE INFERENCE. Makes are for user education only — never infer category from make.\n\n"
 
-        "## OPEN-ENDED / VAGUE ANSWERS\n"
-        "- Dimensions (length_ft, width_ft, height_ft) and numeric fields (payload_lbs, max_price): "
-        "  vague answers ('no idea etc','any', 'doesn't matter', 'no preference') → set to null. Store concrete values only.\n"
-        "- hitch_type: store only 'gooseneck' or 'bumper pull'. Any non-specific answer → null.\n"
-        "- Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — "
-        "  'anything', 'all types of material', 'various equipment'. Capture the phrase as-is.\n\n"
+                    "## FOUR MUTUALLY EXCLUSIVE RESPONSE STATES\n"
+                    "Every user turn must be classified into exactly one primary state. Do not combine:\n"
+                    "| State | Field | When to set |\n"
+                    "|---|---|---|\n"
+                    "| Answered | answered_active_question=true | Message clearly answers the active slot |\n"
+                    "| No preference | no_preference_for_active_question=true | User says no preference for the active slot only |\n"
+                    "| Search now | search_now_requested=true | User wants to see inventory/listings immediately |\n"
+                    "| Skip all | skip_remaining_questions=true | User refuses further questions (always also sets search_now_requested=true) |\n"
+                    "These are mutually exclusive for the primary intent. A message may combine answered + search_now (e.g. 'gravel, but just show me trailers now').\n\n"
 
-        "## ACTIVE QUESTION EVALUATION\n"
-        "- Treat the active slot definition and question text as authoritative.\n"
-        "- answered_active_question=true + active_slot_value when the question is clearly answered.\n"
-        "- no_preference_for_active_question=true when the user explicitly says no preference for the active slot.\n"
-        "- If unanswered: do not fabricate a value. Provide reply_to_user addressing their comment/question.\n"
-        "- Interpret answers semantically: '14 footer', 'twenty-foot', '14' all answer a length question.\n"
-        "- Use history only to resolve an explicit reference — never copy an old value as a new answer.\n\n"
+                    "## IMMEDIATE SEARCH / STOP QUALIFICATION\n"
+                    "Set search_now_requested=true when the user clearly wants to see matching inventory now:\n"
+                    "- 'Show me the results / trailers / options'\n"
+                    "- 'What options do you have?' / 'What do you have available?'\n"
+                    "- 'Let me see what's available' / 'Search with what I already gave you'\n"
+                    "- 'What dump trailers do you have?' / 'Show me dump trailers'\n\n"
+                    "Also set skip_remaining_questions=true when the user refuses further qualification:\n"
+                    "- 'I don't want to answer more questions'\n"
+                    "- 'That's enough questions / Skip the rest'\n"
+                    "- 'Just show me what you have / Use whatever you already have'\n\n"
+                    "Rules:\n"
+                    "- search_now_requested=true is only valid when current_category is already resolved.\n"
+                    "- Preserve all valid slots and metadata filters already collected.\n"
+                    "- Do not fabricate missing slot values.\n"
+                    "- Do not set answered_active_question=true unless the message separately answers the active slot.\n"
+                    "- Do not place the search request into active_slot_value.\n"
+                    "- When search_now_requested=true: leave reply_to_user and rephrased_question empty.\n"
+                    "- skip_remaining_questions=true must always also set search_now_requested=true.\n\n"
 
-        "## REPHRASED QUESTION (first unanswered reply only)\n"
-        "- Provide rephrased_question: a natural rewording of the same active slot — do not add requirements or change meaning.\n"
-        "- Structure: answer the counter-question as a statement → brief contextual bridge → naturally rephrased active question.\n"
-        "- The rephrased question must appear exactly once, as the final sentence of reply_to_user.\n"
-        "- Never ask a follow-up about the counter-question topic. The only question in reply_to_user is the rephrased active slot question.\n"
-        "- When unanswered_count_before_this_turn >= 1: leave rephrased_question empty (app skips the question).\n\n"
+                    "## SEARCH REQUEST VS INFORMATIONAL QUESTION\n"
+                    "| User says | Result |\n"
+                    "|---|---|\n"
+                    "| 'Show me dump trailers' | search_now_requested=true |\n"
+                    "| 'What dump trailers do you have available?' | search_now_requested=true |\n"
+                    "| 'What options do you have for dump trailers?' | search_now_requested=true |\n"
+                    "| 'What trailer types do you carry?' | counter_question_topic=trailer_categories, search_now_requested=false |\n"
+                    "| 'Can you explain the different trailer types?' | counter_question_topic=trailer_categories, search_now_requested=false |\n\n"
 
-        "## COUNTER-QUESTION HANDLING\n"
-        "Classify counter_question_topic by the noun being asked about. 'Type' alone ≠ trailer category.\n"
-        "| User asks | counter_question_topic | reply_to_user content |\n"
-        "|---|---|---|\n"
-        "| 'Which trailer types do you carry?' | trailer_categories | List all canonical trailer categories |\n"
-        "| 'Which hitch types do you carry?' | hitch_types | 'Bumper Pull and Gooseneck' — never list trailer categories |\n"
-        "| 'Which makes do you carry?' | makes | List canonical inventory makes |\n"
-        "If the user asks what types/makes are available, list them directly — do not say 'I can help with that'.\n\n"
+                    "## OPEN-ENDED / VAGUE ANSWERS\n"
+                    "- Dimensions (length_ft, width_ft, height_ft) and numeric fields (payload_lbs, max_price): "
+                    "  vague answers ('any', 'doesn't matter', 'no preference', 'no idea') → null. Store concrete values only.\n"
+                    "- hitch_type: store only 'gooseneck' or 'bumper pull'. Any non-specific answer → null.\n"
+                    "- Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — "
+                    "  'anything', 'all types of material', 'various equipment'. Capture the phrase as-is.\n\n"
 
-        "## EMAIL ACTIONS (priority over active question)\n"
-        "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
-        "- send_escalation_alert_email: unsupported actions — call me, email me, quote, invoice, hold/reserve, schedule, paperwork, arrival timing.\n"
-        "- Never set send_interested_listing_email during active qualification.\n"
-        "- Do not set any email action for broad catalogue browsing.\n"
-        "Examples: 'How do I contact you?' → send_non_sales_faq_email, faq_category=contact_human. "
-        "'Can you call me tomorrow?' → send_escalation_alert_email.\n\n"
+                    "## ACTIVE QUESTION EVALUATION\n"
+                    "- Treat the active slot definition and question text as authoritative.\n"
+                    "- answered_active_question=true + active_slot_value when the question is clearly answered.\n"
+                    "- no_preference_for_active_question=true when the user says no preference for the active slot only — this does NOT trigger a search.\n"
+                    "  Example: 'Any length is fine' → no_preference_for_active_question=true, search_now_requested=false.\n"
+                    "- If unanswered: do not fabricate a value. Provide reply_to_user addressing their comment/question.\n"
+                    "- Interpret answers semantically: '14 footer', 'twenty-foot', '14' all answer a length question.\n"
+                    "- Use history only to resolve an explicit reference — never copy an old value as a new answer.\n\n"
 
-        "## ALUMINUM BASE-CATEGORY RULES\n"
-        "When current_category=Aluminum and active_slot=base_category:\n"
-        "- A plain canonical category reply answers the active question. Set answered_active_question=true, active_slot_value=canonical category.\n"
-        "  Examples: 'utility' → Utility; 'an enclosed one' → Enclosed; 'I need it for equipment' → Equipment.\n"
-        "- Do NOT return Aluminum as active_slot_value. Do NOT put the answer in requested_non_metadata_features.\n"
-        "- Switch away from Aluminum ONLY on explicit rejection: 'not aluminum', 'I don't want aluminum anymore', 'instead of aluminum make it enclosed'.\n"
-        "- Multiple possible base categories with no clear preference → answered_active_question=false, ask user to choose one.\n"
-        "- Unrecognized reply → leave unanswered, let the app clarify.\n\n"
+                    "## COMBINED-INTENT EXAMPLES\n"
+                    "Active: 'What material will you haul?' | User: 'Gravel, but just show me the trailers now.'\n"
+                    "→ answered_active_question=true, active_slot_value='gravel', search_now_requested=true, skip_remaining_questions=false\n\n"
+                    "Active: 'What material will you haul?' | User: 'I don't want more questions. Show me what's available.'\n"
+                    "→ answered_active_question=false, no_preference_for_active_question=false, search_now_requested=true, skip_remaining_questions=true\n\n"
+                    "Active: 'What length do you need?' | User: 'Any length is fine.'\n"
+                    "→ no_preference_for_active_question=true, search_now_requested=false\n\n"
+                    "Active: 'What length do you need?' | User: 'What kinds of dump trailers are available?'\n"
+                    "→ search_now_requested=true, answered_active_question=false\n\n"
 
-        "## CATEGORY HANDLING DURING ACTIVE QnA\n"
-        "- User may change category mid-flow. If so, set category_update to the new canonical category and preserve any still-valid field updates.\n"
-        "- When current_category is unknown and the user gives only a use case/haul item: offer 2–3 suitable canonical trailer types each with a one-line description, then ask which they prefer. Do not ask dimensions/features before type is chosen.\n"
-        "- Map spelling mistakes and synonyms to canonical categories.\n\n"
+                    "## REPHRASED QUESTION (first unanswered reply only)\n"
+                    "- Provide rephrased_question: a natural rewording of the same active slot — do not add requirements or change meaning.\n"
+                    "- Structure: answer the counter-question as a statement → brief contextual bridge → naturally rephrased active question.\n"
+                    "- The rephrased question must appear exactly once, as the final sentence of reply_to_user.\n"
+                    "- Never ask a follow-up about the counter-question topic. The only question in reply_to_user is the rephrased active slot question.\n"
+                    "- When unanswered_count_before_this_turn >= 1: leave rephrased_question empty (app skips the question).\n"
+                    "- When search_now_requested=true: leave rephrased_question and reply_to_user empty.\n\n"
 
-        "## GENERAL EXTRACTION RULES\n"
-        "- You may also extract metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same message.\n"
-        "- requested_non_metadata_features: user-requested equipment/config/features not covered by metadata or slots. Never infer from listing text.\n"
-        "- Do not invent updates. Use medium or high confidence only when clearly supported.\n"
-        "- Use recent messages and the previous assistant question only to interpret the latest message — not as new updates.\n\n"
+                    "## COUNTER-QUESTION HANDLING\n"
+                    "Classify counter_question_topic by the noun being asked about. 'Type' alone ≠ trailer category.\n"
+                    "| User asks | counter_question_topic | reply_to_user content |\n"
+                    "|---|---|---|\n"
+                    "| 'Which trailer types do you carry?' | trailer_categories | List all canonical trailer categories |\n"
+                    "| 'Which hitch types do you carry?' | hitch_types | 'Bumper Pull and Gooseneck' — never list trailer categories |\n"
+                    "| 'Which makes do you carry?' | makes | List canonical inventory makes |\n"
+                    "If the user asks what types/makes are available, list them directly — do not say 'I can help with that'.\n\n"
 
-        "## TRAILER TYPES AND MAPPING TERMS\n"
-        f"{category_prompt_block()}\n\n"
-        "## TRAILER BRANDS / MAKES (education only — never infer category)\n"
-        f"{make_prompt_block()}"
-    )
-),
+                    "## EMAIL ACTIONS (priority over active question)\n"
+                    "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
+                    "- send_escalation_alert_email: unsupported actions — call me, email me, quote, invoice, hold/reserve, schedule, paperwork, arrival timing.\n"
+                    "- Never set send_interested_listing_email during active qualification.\n"
+                    "- Do not set any email action for broad catalogue browsing.\n"
+                    "Examples: 'How do I contact you?' → send_non_sales_faq_email, faq_category=contact_human. "
+                    "'Can you call me tomorrow?' → send_escalation_alert_email.\n\n"
+
+                    "## ALUMINUM BASE-CATEGORY RULES\n"
+                    "When current_category=Aluminum and active_slot=base_category:\n"
+                    "- A plain canonical category reply answers the active question. Set answered_active_question=true, active_slot_value=canonical category.\n"
+                    "  Examples: 'utility' → Utility; 'an enclosed one' → Enclosed; 'I need it for equipment' → Equipment.\n"
+                    "- Do NOT return Aluminum as active_slot_value. Do NOT put the answer in requested_non_metadata_features.\n"
+                    "- Switch away from Aluminum ONLY on explicit rejection: 'not aluminum', 'I don't want aluminum anymore', 'instead of aluminum make it enclosed'.\n"
+                    "- Multiple possible base categories with no clear preference → answered_active_question=false, ask user to choose one.\n"
+                    "- Unrecognized reply → leave unanswered, let the app clarify.\n\n"
+
+                    "## CATEGORY HANDLING DURING ACTIVE QnA\n"
+                    "- User may change category mid-flow. If so, set category_update to the new canonical category and preserve any still-valid field updates.\n"
+                    "- When current_category is unknown and the user gives only a use case/haul item: offer 2–3 suitable canonical trailer types each with a one-line description, then ask which they prefer. Do not ask dimensions/features before type is chosen.\n"
+                    "- Map spelling mistakes and synonyms to canonical categories.\n\n"
+
+                    "## GENERAL EXTRACTION RULES\n"
+                    "- You may also extract metadata_filters_update, slots_collected_update, and requested_non_metadata_features from the same message.\n"
+                    "- requested_non_metadata_features: user-requested equipment/config/features not covered by metadata or slots. Never infer from listing text.\n"
+                    "- Do not invent updates. Use medium or high confidence only when clearly supported.\n"
+                    "- Use recent messages and the previous assistant question only to interpret the latest message — not as new updates.\n\n"
+
+                    "## TRAILER TYPES AND MAPPING TERMS\n"
+                    f"{category_prompt_block()}\n\n"
+                    "## TRAILER BRANDS / MAKES (education only — never infer category)\n"
+                    f"{make_prompt_block()}"
+                )
+            ),
                 HumanMessage(content=_safe_json(context)),
             ]
         )
@@ -5435,6 +5527,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     active_qna_faq_summary: str | None = None
     active_qna_escalation_summary: str | None = None
     active_qna_unsupported_request: str | None = None
+    active_qna_search_now = False
+    active_qna_skip_remaining = False
     if active_qna_slot and latest_message.strip():
         question_turn = _adjudicate_active_question_turn(
             state={
@@ -5464,6 +5558,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         if (
             not question_turn.answered_active_question
             and not question_turn.no_preference_for_active_question
+            and not question_turn.search_now_requested
             and int(
                 (state.get("active_question_attempts") or {}).get(active_qna_slot)
                 or state.get("active_question_unanswered_count")
@@ -5479,10 +5574,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 direct_answer_fallback=str(decision.get("assistant_text") or ""),
             )
         logger.info(
-            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | counter_topic=%r | reply=%r | email_action=%r | confidence=%r | reason=%r",
+            "question_turn_adjudicated | slot=%r | answered=%s | no_preference=%s | search_now=%s | skip_remaining=%s | counter_topic=%r | reply=%r | email_action=%r | confidence=%r | reason=%r",
             active_qna_slot,
             question_turn.answered_active_question,
             question_turn.no_preference_for_active_question,
+            question_turn.search_now_requested,
+            question_turn.skip_remaining_questions,
             question_turn.counter_question_topic,
             question_turn.reply_to_user,
             question_turn.email_action,
@@ -5496,6 +5593,10 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         active_qna_escalation_summary = question_turn.escalation_summary
         active_qna_unsupported_request = question_turn.unsupported_request
         active_qna_retry_question = question_turn.rephrased_question
+        active_qna_search_now = bool(question_turn.search_now_requested and category)
+        active_qna_skip_remaining = bool(
+            question_turn.skip_remaining_questions and active_qna_search_now
+        )
         if question_turn.no_preference_for_active_question:
             active_question_was_resolved = True
             slots_skipped.add(str(active_qna_slot))
@@ -5538,6 +5639,11 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                     active_slot_value,
                     reason,
                 )
+        elif active_qna_search_now:
+            active_question_was_resolved = True
+            awaiting_slot = None
+            active_qna_reply = ""
+            active_qna_retry_question = ""
         else:
             active_qna_unanswered = True
             active_qna_reply = question_turn.reply_to_user
@@ -5591,6 +5697,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             if str(key) in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()) and active_qna_unanswered:
                 continue
             metadata_filters[key] = value
+        if active_qna_skip_remaining:
+            for slot in allowed_category_slots:
+                if slot not in slots:
+                    slots_skipped.add(str(slot))
+            awaiting_slot = None
+            pending_source_for_turn = []
+            active_question_attempts.clear()
         supplemental_slots, _supplemental_metadata, supplemental_features = _apply_explicit_filter_extraction(
             state=state,
             category=category,
@@ -5983,6 +6096,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             decision["escalation_summary"] = active_qna_escalation_summary
         if active_qna_unsupported_request:
             decision["unsupported_request"] = active_qna_unsupported_request
+    elif active_qna_search_now and category:
+        action = "pinecone_search"
+        decision["action"] = action
+        awaiting_slot = None
+        active_qna_unanswered = False
+        active_question_was_unanswered = False
+        if active_qna_skip_remaining:
+            pending = []
     elif active_qna_slot and action == "send_interested_listing_email":
         action = "respond"
         decision["action"] = action
@@ -6019,7 +6140,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 category,
             )
         action = "pinecone_search"
-    should_ask = not active_qna_unanswered and (
+    should_ask = not active_qna_search_now and not active_qna_unanswered and (
         action == "ask_next_question" or (
         action in {"pinecone_search", "respond"} and bool(pending)
         )
@@ -6028,7 +6149,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     asked = [] if reset_result_state else list(state.get("asked_questions") or [])
     assistant_text = decision.get("assistant_text") or ""
     displayed_active_question = ""
-    if active_qna_unanswered and active_qna_slot and action not in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
+    if (
+        active_qna_unanswered
+        and not active_qna_search_now
+        and active_qna_slot
+        and action not in {"send_non_sales_faq_email", "send_escalation_alert_email"}
+    ):
         action = "respond"
         awaiting_slot = active_qna_slot
         assistant_text = active_qna_reply or active_qna_retry_question

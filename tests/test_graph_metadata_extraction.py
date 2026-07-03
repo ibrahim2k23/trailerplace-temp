@@ -2313,6 +2313,50 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
     assert "What kind of material do you expect to haul?" not in out["assistant_text"]
 
 
+def test_active_question_immediate_search_bypasses_current_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            search_now_requested=True,
+            confidence="high",
+            reason="user_requested_results",
+        ),
+    )
+    state = _state("Just show me the trailers", category="Dump")
+    state["awaiting_slot"] = "haul_material"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] is None
+    assert "haul_material" not in out["slots_collected"]
+
+
+def test_active_question_skip_remaining_marks_questions_skipped_and_searches(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            search_now_requested=True,
+            skip_remaining_questions=True,
+            confidence="high",
+            reason="user_refused_more_questions",
+        ),
+    )
+    state = _state("I don't want more questions; show me what you have", category="Dump")
+    state["awaiting_slot"] = "haul_material"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "pinecone_search"
+    assert out["awaiting_slot"] is None
+    assert {"haul_material", "haul_weight_lbs"}.issubset(set(out["slots_skipped"]))
+    assert out["pending_questions"] == []
+
+
 def test_active_question_followup_prefers_awaiting_slot_over_next_pending_question():
     state = {
         "trailer_category": "Equipment",
