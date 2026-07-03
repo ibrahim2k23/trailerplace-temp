@@ -243,6 +243,7 @@ def _has_categoryless_trailer_features(
 
 class MindDecision(BaseModel):
     action: Literal[
+        "ask_trailer_category",
         "ask_next_question",
         "pinecone_search",
         "send_interested_listing_email",
@@ -4685,10 +4686,9 @@ def _classify_non_recommendation_turn(
             [
                 SystemMessage(
                     content=(
-                        "Classify the latest TrailerPlace chatbot turn before the generic trailer-category question runs. "
-                        "Return structured data only.\n\n"
-                        "Priority order: contact/store/FAQ tool intent, unsupported business-action escalation, catalogue redirect, "
-                        "active QnA answer, trailer-shopping data extraction, then generic missing-category question.\n\n"
+                        "Act only as a safety classifier for FAQ/contact and unsupported business-action tools. "
+                        "Return structured data only. For catalogue questions, category questions, recommendations, "
+                        "active QnA answers, and ordinary shopping, return continue_recommendation_flow without replacement text.\n\n"
                         "Choose send_non_sales_faq_email when the customer asks how to contact TrailerPlace, asks for the phone number, "
                         "location, store info, sales contact, financing, trade-in, service, or parts. Use faq_category contact_human for "
                         "general contact/sales-contact questions and store_info for location/store visit questions.\n\n"
@@ -4698,11 +4698,6 @@ def _classify_non_recommendation_turn(
                         "Choose send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported "
                         "business action such as contacting them, emailing them, sending a quote/invoice/paperwork, scheduling, "
                         "holding/reserving a trailer, future-arrival timing, buying trailers from the customer, or custom arrangements.\n\n"
-                        "Choose ask_trailer_category only with medium or high confidence, when the customer is clearly shopping "
-                        "for inventory, no category is known, and asking for trailer type is the best next step. "
-                        "Do not choose ask_trailer_category for recommendation or use-case questions such as "
-                        "'I need a trailer to haul heavy vehicles; can you recommend a type?'; choose respond or "
-                        "continue_recommendation_flow for those.\n\n"
                         "Choose continue_recommendation_flow when normal trailer QnA/search should continue and existing field extraction "
                         "should handle freeform details. Set should_store_freeform_fields=true only for clear trailer-shopping constraints "
                         "or active question answers. Do not infer inventory details from listings.\n\n"
@@ -4795,14 +4790,6 @@ def _non_recommendation_tool_state(
         "assistant_text": assistant_text,
         "mind_decision": decision,
     }
-
-
-def _allows_generic_category_question(decision: NonRecommendationTurnDecision | None) -> bool:
-    return bool(
-        decision
-        and decision.action == "ask_trailer_category"
-        and decision.confidence in {"medium", "high"}
-    )
 
 
 def _apply_make_resolution(
@@ -5030,6 +5017,8 @@ def _adjudicate_category_filter_confirmation(
 
 def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     decision = dict(state.get("mind_decision") or {})
+    original_mind_action = str(decision.get("action") or "respond")
+    original_mind_text = str(decision.get("assistant_text") or "").strip()
     slots_before = dict(state.get("slots_collected") or {})
     slots = dict(slots_before)
     slots_skipped_before = set(state.get("slots_skipped") or [])
@@ -5040,7 +5029,6 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     requested_non_metadata_features = list(state.get("requested_non_metadata_features") or [])
     invalid_required_slot: str | None = None
     awaiting_slot = state.get("awaiting_slot")
-    generic_category_was_active = awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT
     category_before = state.get("trailer_category")
     latest_message = state.get("user_message") or ""
     _apply_aluminum_category_guardrail(
@@ -5851,6 +5839,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         and bool(str(latest_message or "").strip())
     )
     pre_generic_turn_decision: NonRecommendationTurnDecision | None = None
+    pre_generic_tool_state: ChatbotState | None = None
     if should_check_pre_generic_turn:
         pre_generic_turn_decision = _classify_non_recommendation_turn(
             state=state,
@@ -5877,8 +5866,39 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             awaiting_slot=awaiting_slot,
             pending_questions=list(state.get("pending_questions") or []),
         )
-        if pre_generic_tool_state is not None:
-            return pre_generic_tool_state
+    if pre_generic_tool_state is not None:
+        return pre_generic_tool_state
+
+    if decision.get("action") == "ask_trailer_category":
+        if category:
+            # A resolved category enters its normal required-slot qualification flow.
+            decision["action"] = "ask_next_question"
+        else:
+            assistant_text = str(decision.get("assistant_text") or "").strip()
+            if not assistant_text:
+                assistant_text = _GENERIC_CATEGORY_QUESTION
+            return {
+                **state,
+                "trailer_category": None,
+                "category_needs_clarification": category_needs_clarification,
+                "category_clarification_key": category_clarification_key,
+                "slots_collected": slots,
+                "slots_skipped": sorted(slots_skipped),
+                "metadata_filters_collected": metadata_filters,
+                "requested_non_metadata_features": requested_non_metadata_features,
+                "active_search_request_text": _updated_active_search_request_text(
+                    state=state,
+                    latest_message=latest_message,
+                    slots=slots,
+                    metadata_filters=metadata_filters,
+                    reset_active_request=category_changed or make_changed,
+                ),
+                "make_category_options": make_category_options,
+                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
+                "pending_questions": [],
+                "assistant_text": assistant_text,
+                "mind_decision": {**decision, "assistant_text": assistant_text},
+            }
 
     product_counter_topics = {"trailer_categories", "hitch_types", "makes", "dimensions", "payload"}
     if (
@@ -5900,91 +5920,6 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             latest_message,
         )
         decision["action"] = "respond"
-    current_action = decision.get("action") or "respond"
-    tool_action_requested = current_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}
-
-    if (
-        (awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT or generic_category_was_active)
-        and not category
-        and not tool_action_requested
-        and not _generic_category_no_preference_active(slots_skipped)
-    ):
-        if _allows_generic_category_question(pre_generic_turn_decision):
-            decision["action"] = "respond"
-            return {
-                **state,
-                "trailer_category": category,
-                "category_needs_clarification": category_needs_clarification,
-                "category_clarification_key": category_clarification_key,
-                "slots_collected": slots,
-                "slots_skipped": sorted(slots_skipped),
-                "metadata_filters_collected": metadata_filters,
-                "requested_non_metadata_features": requested_non_metadata_features,
-                "active_search_request_text": _updated_active_search_request_text(
-                    state=state,
-                    latest_message=latest_message,
-                    slots=slots,
-                    metadata_filters=metadata_filters,
-                    reset_active_request=category_changed or make_changed,
-                ),
-                "make_category_options": make_category_options,
-                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-                "pending_questions": [],
-                "assistant_text": _GENERIC_CATEGORY_QUESTION,
-                "mind_decision": decision,
-            }
-        awaiting_slot = None
-        if pre_generic_turn_decision and pre_generic_turn_decision.action == "respond" and pre_generic_turn_decision.assistant_text:
-            decision["action"] = "respond"
-            decision["assistant_text"] = pre_generic_turn_decision.assistant_text
-
-    if (
-        not category
-        and awaiting_slot != _GENERIC_CATEGORY_CHOICE_SLOT
-        and not tool_action_requested
-        and not _generic_category_no_preference_active(slots_skipped)
-        and not (metadata_filters.get("make") and _MAKE_CATEGORY_CHOICE_SLOT in slots_skipped)
-        and (
-            _has_generic_trailer_request(latest_message)
-            or _has_categoryless_trailer_features(
-                metadata_filters=metadata_filters,
-                slots=slots,
-                requested_features=requested_non_metadata_features,
-            )
-        )
-    ):
-        if _allows_generic_category_question(pre_generic_turn_decision) or _has_categoryless_trailer_features(
-            metadata_filters=metadata_filters,
-            slots=slots,
-            requested_features=requested_non_metadata_features,
-        ):
-            decision["action"] = "respond"
-            return {
-                **state,
-                "trailer_category": category,
-                "category_needs_clarification": category_needs_clarification,
-                "category_clarification_key": category_clarification_key,
-                "slots_collected": slots,
-                "slots_skipped": sorted(slots_skipped),
-                "metadata_filters_collected": metadata_filters,
-                "requested_non_metadata_features": requested_non_metadata_features,
-                "active_search_request_text": _updated_active_search_request_text(
-                    state=state,
-                    latest_message=latest_message,
-                    slots=slots,
-                    metadata_filters=metadata_filters,
-                    reset_active_request=category_changed or make_changed,
-                ),
-                "make_category_options": make_category_options,
-                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-                "pending_questions": [],
-                "assistant_text": _GENERIC_CATEGORY_QUESTION,
-                "mind_decision": decision,
-            }
-        if pre_generic_turn_decision and pre_generic_turn_decision.action == "respond" and pre_generic_turn_decision.assistant_text:
-            decision["action"] = "respond"
-            decision["assistant_text"] = pre_generic_turn_decision.assistant_text
-
     _apply_aluminum_base_category_filter(category, slots, metadata_filters)
     _apply_flatbed_default_width(category, slots, metadata_filters, defaulted_metadata_filters)
 
@@ -6128,7 +6063,22 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         or make_only_complete
         or generic_no_category_complete
     )
-    if required_complete and action not in {
+    preserve_mind_response = bool(
+        original_mind_action == "respond"
+        and original_mind_text
+        and action == "respond"
+        and not active_question_was_resolved
+        and not active_qna_search_now
+    )
+    if preserve_mind_response:
+        logger.info(
+            "mind_response_preserved | action=%r | category=%r | required_complete=%s | active_question_resolved=%s",
+            original_mind_action,
+            category,
+            required_complete,
+            active_question_was_resolved,
+        )
+    if required_complete and not preserve_mind_response and action not in {
         "send_interested_listing_email",
         "send_non_sales_faq_email",
         "send_escalation_alert_email",
@@ -6140,9 +6090,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 category,
             )
         action = "pinecone_search"
-    should_ask = not active_qna_search_now and not active_qna_unanswered and (
+    should_ask = (
+        not preserve_mind_response
+        and not active_qna_search_now
+        and not active_qna_unanswered
+        and (
         action == "ask_next_question" or (
         action in {"pinecone_search", "respond"} and bool(pending)
+        )
         )
     )
 
@@ -6190,14 +6145,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             elif not assistant_text.strip():
                 assistant_text = "Could you share a little more detail so I can narrow this down?"
     elif action == "pinecone_search" and not category and not make_only_complete and not generic_no_category_complete:
-        if _allows_generic_category_question(pre_generic_turn_decision) or _has_categoryless_trailer_features(
-            metadata_filters=metadata_filters,
-            slots=slots,
-            requested_features=requested_non_metadata_features,
-        ):
-            assistant_text = _GENERIC_CATEGORY_QUESTION
-            awaiting_slot = _GENERIC_CATEGORY_CHOICE_SLOT
-        elif not assistant_text.strip():
+        if not assistant_text.strip():
             assistant_text = "Could you share a little more detail so I can narrow this down?"
             awaiting_slot = None
         action = "respond"

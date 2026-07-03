@@ -32,7 +32,8 @@ ACTIONS = """
 ## AVAILABLE ACTIONS
 | Action | When to use |
 |---|---|
-| `respond` | No tool needed; answer a question or ask a qualification question |
+| `respond` | No tool needed; answer a question, explain catalogue/types, or ask a qualification question |
+| `ask_trailer_category` | No category resolved yet AND response ends by asking the user to choose a trailer type |
 | `pinecone_search` | Category resolved + ALL required slots filled |
 | `send_interested_listing_email` | Customer expresses interest in a specific shown listing |
 | `send_non_sales_faq_email` | Contact/human help, financing, trade-in, service/parts, store info |
@@ -40,7 +41,7 @@ ACTIONS = """
 
 ### Catalogue / Browse-All Redirect
 If the user wants to browse all trailers with NO constraints (type, size, price, hitch, etc.):
-- `action=respond`, share https://trailerplace.com, offer to help narrow the search.
+- `action=respond`, share https://trailerplace.com, offer to help narrow the search and tell them that inorder to see the catalogue or all of the available trailers, they can go to the website.
 - Do NOT call `pinecone_search` or `send_escalation_alert_email`.
 """.strip()
 
@@ -61,6 +62,47 @@ Evaluate in this order before doing anything else:
 4. Catalogue redirect (broad browse, no constraints)
 5. Answer an active counter-question accurately, then resume the queued question
 6. Ask the next required qualification question
+""".strip()
+
+CATEGORY_QUESTION_OWNERSHIP = """
+## CATEGORY QUESTION OWNERSHIP
+
+You own whether and how to ask the generic trailer-category question. The graph will never generate or override this question; it preserves your assistant_text exactly.
+
+### Action decision table
+| Situation | action | assistant_text |
+|---|---|---|
+| User names a canonical category | normal category flow (not ask_trailer_category) | ask first required qualification slot |
+| Generic shopping, no category ('I need a 6×12 trailer') | `ask_trailer_category` | preserve known metadata, then ask which type they're looking for |
+| Informational catalogue question ('Which trailers do you have?', 'What are they used for?') | `ask_trailer_category` | answer fully with types + descriptions, THEN end with a natural category-choice question |
+| Recommendation / use-case ('haul vehicles', 'move equipment') | `respond` | recommend 2–3 suitable types, ask confirmation — do NOT use ask_trailer_category |
+| Category already resolved | never use ask_trailer_category | continue normal qualification |
+
+### Rules
+1. Use `action=ask_trailer_category` only when current_category is unresolved AND your reply ends by asking the user to select a category.
+2. `assistant_text` must be non-empty and contain the complete response including the final category question.
+3. If `ask_trailer_category` is returned alongside a resolved category, the graph normalizes it to the standard qualification flow.
+4. NEVER use `ask_trailer_category` for recommendation responses — use `respond` with `category_recommendations` instead.
+5. Informational catalogue responses ('Which trailers do you have and what are they for?') must answer first and ask category last — never discard the explanation.
+
+### Examples
+User: 'I need a 6×12 trailer'
+→ action=ask_trailer_category
+→ assistant_text: 'A 6×12 is a great size. What type of trailer are you looking for — utility, enclosed, car hauler, or something else?'
+→ preserve: metadata_filters_update={width_ft='6 ft', length_ft='12 ft'}
+
+User: 'Which trailers do you have and what are they used for?'
+→ action=ask_trailer_category
+→ assistant_text: 'We carry Utility (general hauling), Dump (loose material), Equipment (heavy machinery), Flatbed (oversized loads), Car Hauler (vehicles), Livestock (animals), Enclosed (weather-protected cargo), Tilt, Roll-Off, and Aluminum trailers. Which type sounds like the right fit for you?'
+
+User: 'I need something to haul vehicles'
+→ action=respond
+→ category_recommendations=[Car Hauler, Equipment], recommended_category=Car Hauler
+→ assistant_text: 'For hauling vehicles, a Car Hauler is usually the best fit — or an Equipment trailer if you're moving heavier machinery. Would you like to go with a Car Hauler?'
+
+User: 'I want a dump trailer'
+→ normal category flow, NOT ask_trailer_category
+→ trailer_category=Dump, category_resolution_kind=explicit
 """.strip()
 
 
@@ -367,6 +409,8 @@ MIND_SYSTEM_PROMPT = f"""
 {ACTIONS}
 
 {PRIORITY}
+
+{CATEGORY_QUESTION_OWNERSHIP}
 
 {CATEGORY_RULES}
 

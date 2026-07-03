@@ -1127,6 +1127,121 @@ def test_generic_6x12_trailer_request_extracts_size_and_asks_category(monkeypatc
     assert out["mind_decision"]["action"] == "respond"
 
 
+def test_mind_owns_catalogue_category_question_and_followup(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    catalogue_reply = (
+        "We carry Utility, Dump, Equipment, Enclosed, and other trailer types, "
+        "each suited to different hauling needs. Which type interests you?"
+    )
+    _mock_pre_generic_classifier(
+        monkeypatch,
+        action="respond",
+        assistant_text="This opposing classifier response must not replace the mind.",
+        confidence="high",
+    )
+    state = _state("Which trailers do you have and what are they used for?", category=None)
+    state["mind_decision"] = {
+        **state["mind_decision"],
+        "action": "ask_trailer_category",
+        "assistant_text": catalogue_reply,
+    }
+
+    first = graph._apply_mind_node(state)
+
+    assert first["assistant_text"] == catalogue_reply
+    assert first["awaiting_slot"] == "generic_category_choice"
+
+    second = graph._apply_mind_node({
+        **first,
+        "user_message": "Dump",
+        "mind_decision": {
+            **first["mind_decision"],
+            "action": "respond",
+            "assistant_text": "",
+            "trailer_category": "Dump",
+            "category_resolution_kind": "explicit",
+            "category_confidence": "high",
+        },
+    })
+
+    assert second["trailer_category"] == "Dump"
+    assert second["awaiting_slot"] != "generic_category_choice"
+
+
+def test_substantive_mind_response_is_preserved_when_requirements_complete(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    advice = (
+        "A Dump trailer is versatile for those materials, while a Flatbed can be "
+        "better for securing furniture and pipes. Which would you like to explore?"
+    )
+    state = _state(
+        "Which trailer type is best for hauling wood, tires, furniture, and pipes?",
+        category="Dump",
+    )
+    state["slots_collected"] = {
+        "haul_material": "wood, tires, furniture, pipes",
+        "haul_weight_lbs": "5000 lbs",
+    }
+    state["mind_decision"]["assistant_text"] = advice
+    state["mind_decision"]["category_recommendations"] = [
+        {"category": "Dump"},
+        {"category": "Flatbed"},
+    ]
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert out["assistant_text"] == advice
+
+
+def test_final_active_answer_still_searches_despite_mind_acknowledgement(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="5000 lbs",
+            confidence="high",
+        ),
+    )
+    state = _state("5000 pounds", category="Dump")
+    state["slots_collected"] = {"haul_material": "wood"}
+    state["awaiting_slot"] = "haul_weight_lbs"
+    state["mind_decision"]["assistant_text"] = "Thanks, that gives me what I need."
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_substantive_mind_response_does_not_append_pending_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    explanation = "A tandem axle generally provides better stability for heavier loads."
+    state = _state("Why would I need tandem axles?", category="Dump")
+    state["mind_decision"]["assistant_text"] = explanation
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "respond"
+    assert out["assistant_text"] == explanation
+    assert out["pending_questions"]
+
+
+def test_explicit_pinecone_action_still_searches_when_complete(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    state = _state("Show me trailers", category="Dump")
+    state["slots_collected"] = {
+        "haul_material": "wood",
+        "haul_weight_lbs": "5000 lbs",
+    }
+    state["mind_decision"]["action"] = "pinecone_search"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
 def test_generic_category_question_allows_medium_confidence_gate(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     _mock_pre_generic_classifier(
