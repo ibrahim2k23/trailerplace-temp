@@ -397,6 +397,18 @@ RESPONSE_RESTRICTIONS = """
 """.strip()
 
 
+RESPONSE_FORMAT_RULES = """
+## CUSTOMER-FACING RESPONSE FORMAT
+- Use concise paragraphs for ordinary answers.
+- For multiple options, add a blank line before the list.
+- Format each option as `- **Option name** — short practical description`.
+- Never place the first bullet on the same line as introductory prose.
+- Add a blank line after a list before the closing question or next step.
+- Do not mix bullets, numbering, and inline option lists in one response.
+- Use prose for a single answer; use bullets only when they improve comparison.
+""".strip()
+
+
 # ─────────────────────────────────────────────
 #  FINAL SYSTEM PROMPT
 # ─────────────────────────────────────────────
@@ -435,6 +447,8 @@ MIND_SYSTEM_PROMPT = f"""
 {EMAIL_FORMATS}
 
 {SEARCH_EXAMPLES}
+
+{RESPONSE_FORMAT_RULES}
 
 {RESPONSE_RESTRICTIONS}
 

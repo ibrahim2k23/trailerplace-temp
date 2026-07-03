@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from trailer_fields import get_trailer_fields_as_dict, list_all_categories
 from src.chatbot.categories import (
@@ -211,7 +211,8 @@ _SEARCH_PROMISE_RE = re.compile(
 
 def _strip_search_promises(text: Any) -> str:
     clean = _SEARCH_PROMISE_RE.sub("", str(text or "")).strip()
-    return re.sub(r"\s{2,}", " ", clean).strip()
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
+    return re.sub(r"\n{3,}", "\n\n", clean).strip()
 
 
 def _has_categoryless_spec_update(message: str) -> bool:
@@ -379,12 +380,48 @@ class QuestionTurnDecision(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
     reason: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_structured_active_slot_value(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        value = normalized.get("active_slot_value")
+        if isinstance(value, dict):
+            metadata = dict(normalized.get("metadata_filters_update") or {})
+            dimension_parts: list[str] = []
+            for key in ("length_ft", "width_ft", "height_ft"):
+                raw = value.get(key)
+                if raw in (None, ""):
+                    continue
+                text = format(raw, "g") if isinstance(raw, float) else str(raw).strip()
+                if isinstance(raw, (int, float)) or re.fullmatch(r"\d+(?:\.\d+)?", text):
+                    text = f"{text} ft"
+                metadata.setdefault(key, text)
+                dimension_parts.append(text)
+            if dimension_parts:
+                normalized["active_slot_value"] = " × ".join(dimension_parts)
+                normalized["metadata_filters_update"] = metadata
+            else:
+                normalized["active_slot_value"] = ", ".join(
+                    f"{str(key).replace('_', ' ')}: {value}"
+                    for key, value in value.items()
+                    if value not in (None, "")
+                )
+        elif isinstance(value, (list, tuple, set)):
+            normalized["active_slot_value"] = ", ".join(
+                str(item).strip() for item in value if str(item).strip()
+            )
+        elif isinstance(value, bool):
+            normalized["active_slot_value"] = "yes" if value else "no"
+        return normalized
+
     @field_validator("active_slot_value", mode="before")
     @classmethod
     def coerce_numeric_active_slot_value(cls, value: Any) -> Any:
         """Accept JSON numeric answers without invalidating the full LLM response."""
         if isinstance(value, bool):
-            return value
+            return "yes" if value else "no"
         if isinstance(value, int):
             return str(value)
         if isinstance(value, float):
@@ -2664,6 +2701,11 @@ def _adjudicate_active_question_turn(
                     "## ACTIVE QUESTION EVALUATION\n"
                     "- Treat the active slot definition and question text as authoritative.\n"
                     "- answered_active_question=true + active_slot_value when the question is clearly answered.\n"
+                    "- active_slot_value must be a scalar string, never an object or array. "
+                    "For composite dimensions use a string such as '20 ft × 8 ft × 7 ft' and also put "
+                    "individual dimensions in metadata_filters_update.\n"
+                    "- For multiple items or amenities, use one comma-separated string. "
+                    "For yes/no fields, use the strings 'yes' or 'no', not JSON booleans.\n"
                     "- no_preference_for_active_question=true when the user says no preference for the active slot only — this does NOT trigger a search.\n"
                     "  Example: 'Any length is fine' → no_preference_for_active_question=true, search_now_requested=false.\n"
                     "- If unanswered: do not fabricate a value. Provide reply_to_user addressing their comment/question.\n"
@@ -2724,6 +2766,15 @@ def _adjudicate_active_question_turn(
                     "- requested_non_metadata_features: user-requested equipment/config/features not covered by metadata or slots. Never infer from listing text.\n"
                     "- Do not invent updates. Use medium or high confidence only when clearly supported.\n"
                     "- Use recent messages and the previous assistant question only to interpret the latest message — not as new updates.\n\n"
+
+                    "## CUSTOMER-FACING MARKDOWN FORMAT\n"
+                    "- Use short paragraphs for ordinary answers.\n"
+                    "- For multiple options, put a blank line before the list.\n"
+                    "- Format each option as `- **Name** — short practical description`.\n"
+                    "- Never place the first bullet inline with introductory prose.\n"
+                    "- Put a blank line after the list before a closing question.\n"
+                    "- Do not mix inline options, bullets, and numbered lists in one response.\n"
+                    "- Keep a single direct answer as prose rather than forcing a list.\n\n"
 
                     "## TRAILER TYPES AND MAPPING TERMS\n"
                     f"{category_prompt_block()}\n\n"
@@ -3004,6 +3055,15 @@ def _canonicalize_adjudicated_slots(
         if key not in allowed_category_slots or value in (None, ""):
             continue
         mapped_fields = _SLOT_METADATA_FILTER_MAP.get(key, ())
+        dimension_values = [
+            metadata_updates[field]
+            for field in mapped_fields
+            if field in {"length_ft", "width_ft", "height_ft"}
+            and metadata_updates.get(field) not in (None, "")
+        ]
+        if len(dimension_values) > 1:
+            updates[key] = " × ".join(str(value) for value in dimension_values)
+            continue
         mapped_value = next(
             (metadata_updates[field] for field in mapped_fields if metadata_updates.get(field) not in (None, "")),
             None,
@@ -3132,12 +3192,13 @@ def _extract_field_updates(
         "If confidence is low, leave updates empty and optionally set clarification_needed.\n"
         "The field definitions and category slot definitions passed in context are authoritative."
         
-        "- LOOSE / OPEN-ENDED ANSWERS:\n"
+        "EXTREMELY IMPORTANT- LOOSE / OPEN-ENDED ANSWERS:\n"
 "  • Dimensions (length_ft, width_ft, height_ft): vague answers ('any length', 'doesn't matter', 'no preference') → set to null. Only store a concrete measurement.\n"
-"  • Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — 'all types of material', 'anything', 'various equipment'. Capture the phrase as-is.\n"
+"  • Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — 'all types of material', 'anything', 'various equipment','random things',it does not matter what they say. as long it's not a counter question or a value for any other field. Capture the phrase as-is.\n"
 "  • hitch_type: only store 'gooseneck' or 'bumper pull'. Any other answer or non-specific reply ('either', 'doesn't matter', 'any') → set to null.\n"
 "  • max_price: only set when the user gives a concrete upper limit. Vague answers → null.\n"
 "  • payload_lbs: store a concrete weight only. Vague answers ('any weight', 'doesn't matter') → null.\n"
+"IF ONE OF THE ANSWERS IF LOOSE/OPEN-ENDED, DO NOT SET OTHER FIELDS UNLESS EXPLICITLY STATED. For example, if the user says 'I want a trailer for gravel, any length is fine', set generic_haul_use='gravel' and length_ft=null. Do not set other fields unless explicitly stated."
     )
 ),
                 HumanMessage(content=f"Return field extraction for this context:\n{_safe_json(context)}"),
@@ -5581,9 +5642,19 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         active_qna_escalation_summary = question_turn.escalation_summary
         active_qna_unsupported_request = question_turn.unsupported_request
         active_qna_retry_question = question_turn.rephrased_question
-        active_qna_search_now = bool(question_turn.search_now_requested and category)
+        # Search/skip flags are high-impact routing decisions. Only honor them
+        # when the user's own words contain an explicit immediate-search intent;
+        # an adjudicator hallucination must not bypass qualification.
+        explicit_immediate_search = bool(
+            category and _immediate_search_requested(latest_message)
+        )
+        active_qna_search_now = bool(
+            question_turn.search_now_requested and explicit_immediate_search
+        )
         active_qna_skip_remaining = bool(
-            question_turn.skip_remaining_questions and active_qna_search_now
+            question_turn.skip_remaining_questions
+            and active_qna_search_now
+            and _skip_remaining_questions_requested(latest_message)
         )
         if question_turn.no_preference_for_active_question:
             active_question_was_resolved = True
@@ -5703,6 +5774,39 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         )
         for key, value in supplemental_slots.items():
             if str(key) == str(active_qna_slot):
+                is_valid, reason = _validate_slot_value(key, value)
+                if not is_valid:
+                    logger.info(
+                        "slot_validation_failed | slot=%s | value=%r | reason=%s",
+                        key,
+                        value,
+                        reason,
+                    )
+                    continue
+                # A confidence-gated extraction that validly fills the active
+                # slot overrides an adjudicator's false "unanswered" result.
+                slots[key] = value
+                slots_skipped.discard(str(key))
+                awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
+                active_question_attempts.pop(str(active_qna_slot), None)
+                active_question_was_resolved = True
+                active_question_was_unanswered = False
+                active_qna_unanswered = False
+                active_qna_reply = ""
+                active_qna_retry_question = ""
+                repeated_unanswered_escalation = False
+                skipped_unanswered_slot = None
+                for metadata_key, metadata_value in _slot_value_to_metadata_updates(
+                    str(active_qna_slot),
+                    value,
+                    category,
+                ).items():
+                    metadata_filters[metadata_key] = metadata_value
+                logger.info(
+                    "active_question_resolved_by_extraction | slot=%r | value=%r",
+                    active_qna_slot,
+                    value,
+                )
                 continue
             is_valid, reason = _validate_slot_value(key, value)
             if not is_valid:
@@ -6064,7 +6168,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         or generic_no_category_complete
     )
     preserve_mind_response = bool(
-        original_mind_action == "respond"
+        state.get("has_shown_search_results")
+        and original_mind_action == "respond"
         and original_mind_text
         and action == "respond"
         and not active_question_was_resolved

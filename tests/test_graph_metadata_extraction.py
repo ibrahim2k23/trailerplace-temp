@@ -1182,6 +1182,7 @@ def test_substantive_mind_response_is_preserved_when_requirements_complete(monke
         "haul_material": "wood, tires, furniture, pipes",
         "haul_weight_lbs": "5000 lbs",
     }
+    state["has_shown_search_results"] = True
     state["mind_decision"]["assistant_text"] = advice
     state["mind_decision"]["category_recommendations"] = [
         {"category": "Dump"},
@@ -1215,7 +1216,7 @@ def test_final_active_answer_still_searches_despite_mind_acknowledgement(monkeyp
     assert out["mind_decision"]["action"] == "pinecone_search"
 
 
-def test_substantive_mind_response_does_not_append_pending_question(monkeypatch):
+def test_pre_results_qualification_still_uses_pending_question(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     explanation = "A tandem axle generally provides better stability for heavier loads."
     state = _state("Why would I need tandem axles?", category="Dump")
@@ -1224,8 +1225,8 @@ def test_substantive_mind_response_does_not_append_pending_question(monkeypatch)
     out = graph._apply_mind_node(state)
 
     assert out["mind_decision"]["action"] == "respond"
-    assert out["assistant_text"] == explanation
-    assert out["pending_questions"]
+    assert out["assistant_text"] == "What material will you be hauling (dirt, gravel, debris, etc.)?"
+    assert out["awaiting_slot"] == "haul_material"
 
 
 def test_explicit_pinecone_action_still_searches_when_complete(monkeypatch):
@@ -2447,6 +2448,35 @@ def test_active_question_immediate_search_bypasses_current_question(monkeypatch)
     assert out["mind_decision"]["action"] == "pinecone_search"
     assert out["awaiting_slot"] is None
     assert "haul_material" not in out["slots_collected"]
+
+
+def test_active_extraction_overrides_wrong_adjudicator_and_asks_next_question(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"haul_material": "random things"},
+    )
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=False,
+            search_now_requested=True,
+            skip_remaining_questions=True,
+            reply_to_user="What material will you be hauling?",
+            rephrased_question="What material will you be hauling?",
+            retry_slot="haul_material",
+            confidence="low",
+        ),
+    )
+    state = _state("random things", category="Dump")
+    state["awaiting_slot"] = "haul_material"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["haul_material"] == "random things"
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert out["mind_decision"]["action"] == "respond"
+    assert out["assistant_text"] == "What's the rough haul weight per load?"
 
 
 def test_active_question_skip_remaining_marks_questions_skipped_and_searches(monkeypatch):
