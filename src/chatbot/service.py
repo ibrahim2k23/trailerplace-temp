@@ -161,6 +161,17 @@ class UnsupportedBusinessActionRoutingDecision(BaseModel):
     reason: str = ""
 
 
+class ListingReferenceDecision(BaseModel):
+    is_listing_selection: bool = False
+    has_explicit_listing_reference: bool = False
+    reference_intent: Literal["interest", "details", "none"] = "none"
+    selected_index: Optional[int] = None
+    selected_title: Optional[str] = None
+    selected_url: Optional[str] = None
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+
+
 def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -1673,11 +1684,199 @@ def _persist(session: dict[str, Any]) -> None:
     )
 
 
+def _resolve_listing_reference(
+    session: dict[str, Any],
+    user_message: str,
+) -> ListingReferenceDecision:
+    listings = list(session.get("last_listings") or [])
+    if not listings:
+        return ListingReferenceDecision(reason="no_current_listing_set")
+    latest_assistant = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(session.get("messages") or [])
+            if item.get("role") == "assistant"
+        ),
+        "",
+    )
+    context_listings = [
+        {
+            "index": index,
+            "title": item.get("title"),
+            "url": item.get("url"),
+            "stock_number": item.get("stock_number"),
+            "model": item.get("model"),
+            "price": item.get("price_display") or item.get("price"),
+        }
+        for index, item in enumerate(listings, 1)
+    ]
+    try:
+        proposed = _listing_reference_llm().invoke(
+            [
+                SystemMessage(content=(
+                    "Resolve whether the latest message refers to a listing in CURRENT_LISTINGS. "
+                    "Return structured output only. Use one-based displayed indexes. "
+                    "Set has_explicit_listing_reference=true only when the latest message contains evidence that "
+                    "points to a displayed item: an ordinal/number (#2, second, last), a shown title/model/stock "
+                    "number, or an unmistakable demonstrative reference such as 'that one' or 'the gray one'. "
+                    "General shopping, a new category request, or wording such as 'I am also looking for a car "
+                    "hauler' does not refer to a shown item: set has_explicit_listing_reference=false and "
+                    "is_listing_selection=false, even though it expresses shopping interest. "
+                    "reference_intent=interest only for explicit liking, buying, selecting, or asking the team "
+                    "to follow up about a listing. Use details for questions about a listing. "
+                    "Copy selected_title and selected_url exactly from CURRENT_LISTINGS; never use older results "
+                    "or invent a listing. If a phrase such as 'that one' is ambiguous, mark it as a listing "
+                    "selection but leave the selected fields empty with low confidence."
+                )),
+                HumanMessage(content=json.dumps({
+                    "latest_message": user_message,
+                    "current_listings": context_listings,
+                    "latest_assistant_response": latest_assistant,
+                    "recent_messages": (session.get("messages") or [])[-6:],
+                    "previous_trailer_category": session.get("trailer_category"),
+                }, default=str)),
+            ]
+        )
+    except Exception:
+        logger.exception("listing_reference_llm_failed")
+        return ListingReferenceDecision(reason="listing_reference_llm_failed")
+
+    if not proposed.has_explicit_listing_reference:
+        rejected = proposed.model_copy(update={
+            "is_listing_selection": False,
+            "reference_intent": "none",
+            "selected_index": None,
+            "selected_title": None,
+            "selected_url": None,
+            "confidence": "low",
+            "reason": proposed.reason or "no_explicit_current_listing_reference",
+        })
+        logger.info(
+            "listing_reference_resolution | selected=false | explicit_reference=false | reason=%r",
+            rejected.reason,
+        )
+        return rejected
+
+    index = proposed.selected_index
+    if (
+        not proposed.is_listing_selection
+        or proposed.reference_intent == "none"
+        or proposed.confidence not in {"medium", "high"}
+        or not index
+        or index < 1
+        or index > len(listings)
+    ):
+        logger.info(
+            "listing_reference_resolution | selected=%s | intent=%s | index=%r | confidence=%s | reason=%r",
+            proposed.is_listing_selection,
+            proposed.reference_intent,
+            index,
+            proposed.confidence,
+            proposed.reason,
+        )
+        return proposed
+
+    selected = listings[index - 1]
+    title = str(selected.get("title") or "")
+    url = str(selected.get("url") or "")
+    resolved = proposed.model_copy(update={
+        "selected_title": title,
+        "selected_url": url,
+    })
+    logger.info(
+        "listing_reference_resolution | selected=true | intent=%s | index=%s | title=%r | url=%r | confidence=%s",
+        resolved.reference_intent,
+        index,
+        title,
+        url,
+        resolved.confidence,
+    )
+    return resolved
+
+
+def _listing_reference_response(
+    session: dict[str, Any],
+    request: ChatRequest,
+    decision: ListingReferenceDecision,
+) -> ChatResponse | None:
+    if not decision.is_listing_selection:
+        return None
+    confident = (
+        decision.confidence in {"medium", "high"}
+        and decision.selected_index is not None
+        and bool(decision.selected_title)
+    )
+    if not confident:
+        titles = [
+            f"{index}. {item.get('title')}"
+            for index, item in enumerate(session.get("last_listings") or [], 1)
+            if item.get("title")
+        ]
+        assistant_text = "Which current listing do you mean? Please choose a number."
+        if titles:
+            assistant_text += "\n\n" + "\n".join(titles)
+        logger.info("listing_reference_ambiguous | listing_count=%s", len(titles))
+    elif decision.reference_intent == "details":
+        return None
+    elif decision.reference_intent == "interest":
+        title = str(decision.selected_title)
+        if not _has_contact(session):
+            session["pending_contact_action"] = {
+                "type": "interest",
+                "item_name": title,
+                "selected_listing_url": decision.selected_url,
+            }
+            assistant_text = (
+                f"I can send your interest in **{title}** to our team. "
+                "Please share your name and either an email address or phone number."
+            )
+        else:
+            _persist_email_transcript_snapshot(session)
+            result = send_interested_listing_email(
+                session_id=session.get("session_id") or "",
+                full_name=session.get("customer_full_name") or "",
+                email=session.get("customer_email"),
+                phone=session.get("customer_phone") or "",
+                item_name=title,
+            )
+            logger.info(
+                "listing_reference_field_extraction_bypassed | index=%s | title=%r | email_result=%s",
+                decision.selected_index,
+                title,
+                json.dumps(result, default=str),
+            )
+            assistant_text = (
+                f"Your interest in **{title}** has been logged. Our team will reach out soon."
+            )
+    else:
+        return None
+
+    session["messages"].append({"role": "assistant", "content": assistant_text})
+    _persist(session)
+    _log_chat_turn(request.session_id, request.message, assistant_text)
+    return ChatResponse(
+        assistant_text=assistant_text,
+        sales_phase="main",
+        onboarding_api_messages=request.onboarding_api_messages,
+        customer_full_name=session.get("customer_full_name"),
+        customer_email=session.get("customer_email") or "",
+        customer_phone=session.get("customer_phone"),
+        contact_status=session.get("contact_status"),
+        main_prior_messages=session.get("messages") or [],
+        listings=[],
+        thinking_context={"listing_reference": _model_dump(decision)},
+    )
+
+
 def _inventory_lookup_response(
     session: dict[str, Any],
     request: ChatRequest,
     user_message: str,
 ) -> ChatResponse | None:
+    reference_decision = _resolve_listing_reference(session, user_message)
+    reference_response = _listing_reference_response(session, request, reference_decision)
+    if reference_response is not None:
+        return reference_response
     has_shown_results = bool(session.get("has_shown_search_results"))
     direct_candidate = is_potential_direct_inventory_lookup(user_message)
     validated_extraction = (
@@ -1733,6 +1932,11 @@ def _inventory_lookup_response(
     shown = list(session.get("already_shown_listing_urls") or [])
     shown.extend([str(item.get("url")) for item in listings if item.get("url")])
     session["already_shown_listing_urls"] = sorted(set(shown))
+    logger.info(
+        "inventory_reference_state_replaced | listing_count=%s | accumulated_shown_url_count=%s",
+        len(listings),
+        len(session["already_shown_listing_urls"]),
+    )
     if listings:
         session["has_shown_search_results"] = True
         _send_results_shown_notification(session)
@@ -1756,6 +1960,14 @@ def _inventory_lookup_response(
                 "extraction": result.get("extraction") or {},
             }
         },
+    )
+
+
+def _listing_reference_llm():
+    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        ListingReferenceDecision,
+        method="function_calling",
     )
 
 

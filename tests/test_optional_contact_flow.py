@@ -1239,6 +1239,121 @@ def test_validated_inventory_lookup_overrides_post_results_qna(monkeypatch):
     assert session["pending_questions"] == [{"slot": "haul_weight_lbs"}]
 
 
+def test_inventory_batch_becomes_reference_set_and_second_interest_bypasses_graph(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001129"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session.update(
+        {
+            "initial_contact_request_asked": True,
+            "has_shown_search_results": True,
+            "trailer_category": "Dump",
+            "metadata_filters_collected": {"hitch_type": "Gooseneck"},
+            "customer_full_name": "Ibrahim",
+            "customer_email": "ibrahim@example.com",
+            "contact_status": "contact_available",
+            "last_listings": [{"title": "Old Dump", "url": "https://example.test/dump"}],
+            "already_shown_listing_urls": ["https://example.test/dump"],
+        }
+    )
+    fmax = [
+        {"title": "FMAX One", "url": "https://example.test/fmax-1"},
+        {"title": "FMAX Two", "url": "https://example.test/fmax-2"},
+    ]
+    monkeypatch.setattr(service, "is_potential_direct_inventory_lookup", lambda _text: True)
+    monkeypatch.setattr(service, "validated_direct_inventory_extraction", lambda _text: object())
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **_kwargs: {
+            "reply": "Trailer #1: FMAX One\nTrailer #2: FMAX Two",
+            "entity_type": "MODEL_SEARCH",
+            "confidence": 1.0,
+            "top_matches": fmax,
+            "extraction": {},
+        },
+    )
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_resolve_listing_reference",
+        lambda _session, message: (
+            service.ListingReferenceDecision()
+            if "availability" in message
+            else service.ListingReferenceDecision(
+                is_listing_selection=True,
+                has_explicit_listing_reference=True,
+                reference_intent="interest",
+                selected_index=2,
+                selected_title="FMAX Two",
+                selected_url="https://example.test/fmax-2",
+                confidence="high",
+            )
+        ),
+    )
+    sent = []
+    monkeypatch.setattr(
+        service,
+        "send_interested_listing_email",
+        lambda **kwargs: sent.append(kwargs) or {"status": "queued"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_persist_email_transcript_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+
+    first_request = _req(session_id, "I want to know the availability of Diamond C FMAX")
+    first = service._inventory_lookup_response(session, first_request, first_request.message)
+    assert first is not None
+    assert session["last_listings"] == fmax
+    assert set(session["already_shown_listing_urls"]) == {
+        "https://example.test/dump",
+        "https://example.test/fmax-1",
+        "https://example.test/fmax-2",
+    }
+
+    second_request = _req(session_id, "I like the 2nd one")
+    second = service._inventory_lookup_response(session, second_request, second_request.message)
+    assert second is not None
+    assert sent[0]["item_name"] == "FMAX Two"
+    assert session["trailer_category"] == "Dump"
+    assert session["metadata_filters_collected"] == {"hitch_type": "Gooseneck"}
+
+
+def test_new_category_request_is_not_a_listing_selection(monkeypatch):
+    class _WrongSelectionLLM:
+        def invoke(self, _messages):
+            return service.ListingReferenceDecision(
+                is_listing_selection=True,
+                has_explicit_listing_reference=False,
+                reference_intent="interest",
+                selected_index=3,
+                selected_title="Equipment Three",
+                selected_url="https://example.test/equipment-3",
+                confidence="medium",
+                reason="User is shopping for another trailer category, not selecting a shown item.",
+            )
+
+    monkeypatch.setattr(service, "_listing_reference_llm", lambda: _WrongSelectionLLM())
+    decision = service._resolve_listing_reference(
+        {
+            "trailer_category": "Equipment",
+            "messages": [{"role": "assistant", "content": "Do any of these trailers interest you?"}],
+            "last_listings": [
+                {"title": "Equipment One", "url": "https://example.test/equipment-1"},
+                {"title": "Equipment Two", "url": "https://example.test/equipment-2"},
+                {"title": "Equipment Three", "url": "https://example.test/equipment-3"},
+            ],
+        },
+        "I am looking for a car hauler as well",
+    )
+
+    assert decision.is_listing_selection is False
+    assert decision.reference_intent == "none"
+    assert decision.selected_index is None
+
+
 def test_inventory_results_send_silent_notification_with_completed_turn(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001127"
     service.reset_session(session_id)

@@ -6555,6 +6555,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     action = decision.get("action") or "respond"
     if action not in valid_actions:
         action = "respond"
+    if category_changed and action == "respond" and original_mind_text:
+        logger.info(
+            "stale_mind_response_discarded_after_category_change | old_category=%r | new_category=%r",
+            category_before,
+            category,
+        )
+        original_mind_text = ""
+        decision["assistant_text"] = ""
+        action = "ask_next_question"
+        decision["action"] = action
     if active_qna_email_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
         action = active_qna_email_action
         decision["action"] = action

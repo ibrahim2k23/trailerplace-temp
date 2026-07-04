@@ -2772,6 +2772,40 @@ def test_explicit_category_switch_is_applied_after_reconciliation(monkeypatch):
     assert out["trailer_category"] == "Equipment"
 
 
+def test_category_switch_discards_stale_mind_question(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"vehicle_type": "a car"},
+    )
+    _mock_haul_classifier(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_category_transition",
+        lambda **kwargs: graph.CategoryTransitionDecision(
+            final_category="Car Hauler",
+            approve_category_change=True,
+            explicit_category_switch=True,
+            confidence="high",
+            reason="Explicit switch.",
+        ),
+    )
+    state = _state("I am looking for a car hauler as well", category="Car Hauler")
+    state["trailer_category"] = "Equipment"
+    state["slots_collected"] = {"haul_item": "skid steer"}
+    state["has_shown_search_results"] = True
+    state["mind_decision"]["assistant_text"] = (
+        "What is the rough total weight of the skid steer?"
+    )
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Car Hauler"
+    assert out["slots_collected"] == {"vehicle_type": "a car"}
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert out["assistant_text"] == "What's the approximate weight of the vehicle?"
+    assert "skid steer" not in out["assistant_text"].lower()
+
+
 def test_either_hitch_is_advisory_no_preference_to_reconciler(monkeypatch):
     _mock_field_updates(monkeypatch)
     monkeypatch.setattr(
