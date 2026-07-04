@@ -1,4 +1,4 @@
-"""Opt-in live diagnostic for vague answers across every trailer category.
+"""Opt-in live diagnostic for every canonical trailer-category flow.
 
 Run with:
     $env:RUN_LIVE_VAGUE_QNA='1'
@@ -21,36 +21,39 @@ from src.chatbot.categories import CANONICAL_CATEGORIES
 from src.models import ChatRequest
 
 
+_TEST_CATEGORIES = tuple(CANONICAL_CATEGORIES)
+
+
 _VAGUE_ANSWERS = {
-    "haul_item": "Mostly assorted equipment and other general things.",
-    "haul_material": "A mixture of random materials and general debris.",
-    "haul_weight_lbs": "Somewhere around 5,000 pounds, give or take.",
-    "haul_length_ft": "Probably around 16 to 20 feet.",
-    "vehicle_type": "Different ordinary cars, nothing very specific.",
-    "vehicle_length_ft": "Roughly 15 to 18 feet or thereabouts.",
-    "trailer_length_ft": "Something around 16 feet, but I am flexible.",
-    "hitch_type": "Either bumper pull or gooseneck would probably be fine.",
-    "loading_style": "Whatever loading setup is generally easiest.",
-    "open_vs_covered": "I could work with either open or covered.",
-    "trailer_size": "A medium-sized one, maybe around 16 by 7.",
-    "sides_gate_storage": "Some useful sides or storage would be nice.",
-    "dump_mechanism": "Any dependable dump mechanism should be okay.",
-    "tilt_style": "Either tilt style is fine as long as it works well.",
-    "use_case": "General cargo and perhaps some occasional work use.",
-    "cargo_size": "Roughly 16 by 7 feet, with flexible height.",
-    "ac_windows_cabinets": "Maybe some of those amenities, but I am flexible.",
-    "finished_interior": "A basic finish is fine; I am open either way.",
-    "gate_preferences": "Any practical gate style would work.",
-    "package_scope": "Probably the trailer and some bins, but I am flexible.",
+    "haul_item": "A bit of everything—tools, machines, and whatever else comes up.",
+    "haul_material": "Usually cleanup waste, branches, and mixed jobsite stuff.",
+    "haul_weight_lbs": "I'd guess between six and eight thousand pounds.",
+    "haul_length_ft": "Maybe eighteen to twenty-four feet should do.",
+    "vehicle_type": "Mostly regular sedans and the occasional small SUV.",
+    "vehicle_length_ft": "They are likely somewhere between 14 and 17 feet long.",
+    "trailer_length_ft": "Around eighteen feet sounds right, though I can adjust.",
+    "hitch_type": "Either hitch works for me; I don't lean one way.",
+    "loading_style": "Whichever setup makes loading less of a headache.",
+    "open_vs_covered": "Open or covered is fine—I can make either work.",
+    "trailer_size": "Nothing huge, perhaps about 18 by 8.",
+    "sides_gate_storage": "Some practical storage or side rails would be handy.",
+    "dump_mechanism": "I have no strong preference as long as it dumps reliably.",
+    "tilt_style": "Any common tilt arrangement should be alright.",
+    "use_case": "Mostly moving supplies, with some light workshop use now and then.",
+    "cargo_size": "About 18 by 8 feet; height is not particularly important.",
+    "ac_windows_cabinets": "A few useful comforts would be nice, but none are essential.",
+    "finished_interior": "Either unfinished or simply finished would suit me.",
+    "gate_preferences": "Whatever gate is easiest for normal day-to-day use.",
+    "package_scope": "I need the trailer together with a few bins, ideally.",
     "bin_size": "A medium bin, perhaps around 15 to 20 yards.",
-    "deck_style": "Either a step deck or standard deck is okay.",
-    "cdl_concern": "I would prefer flexibility around CDL requirements.",
-    "fuel_type": "Mostly diesel, though general fuel use is possible.",
-    "tank_capacity": "A few hundred gallons, maybe around 500.",
-    "fiber_use_case": "Mostly splicing and perhaps occasional office use.",
-    "crew_size": "A small crew, perhaps three or four people.",
-    "fiber_amenities": "Basic useful amenities such as AC and a workbench.",
-    "race_amenities": "Some cabinets and workspace would probably help.",
+    "deck_style": "A step deck or regular deck would both be acceptable.",
+    "cdl_concern": "Staying below CDL limits would be helpful, but I am flexible.",
+    "fuel_type": "It will mainly carry diesel, possibly other fuel occasionally.",
+    "tank_capacity": "Somewhere in the 400 to 600 gallon neighborhood.",
+    "fiber_use_case": "Primarily field splicing, with a little desk work sometimes.",
+    "crew_size": "Usually two to five people depending on the job.",
+    "fiber_amenities": "Just practical basics—cooling, power, and a decent work surface.",
+    "race_amenities": "A modest work area and some storage would be useful.",
 }
 
 
@@ -86,7 +89,7 @@ def test_live_vague_answers_for_every_category():
         pytest.skip("Set RUN_LIVE_VAGUE_QNA=1 to run real LLM/Pinecone conversations")
 
     summaries = []
-    for category in CANONICAL_CATEGORIES:
+    for category in _TEST_CATEGORIES:
         # Durable persistence stores session IDs as UUID columns.
         session_id = str(uuid.uuid4())
         user_text = (
@@ -95,9 +98,11 @@ def test_live_vague_answers_for_every_category():
         )
 
         completed = False
+        awaiting_history = []
         for turn in range(1, 10):
             response = _send(session_id, user_text)
             state = service._get_session(session_id)
+            awaiting_history.append(state.get("awaiting_slot"))
             print(json.dumps({
                 "category": category,
                 "session_id": session_id,
@@ -134,9 +139,38 @@ def test_live_vague_answers_for_every_category():
                 "category": service._get_session(session_id).get("trailer_category"),
                 "slots": service._get_session(session_id).get("slots_collected") or {},
                 "skipped": service._get_session(session_id).get("slots_skipped") or [],
+                "metadata_filters": (
+                    service._get_session(session_id).get("metadata_filters_collected") or {}
+                ),
+                "awaiting_history": awaiting_history,
             },
         })
 
     print("VAGUE_QNA_SUMMARY=" + json.dumps(summaries, ensure_ascii=False, default=str))
-    assert [item["category"] for item in summaries] == list(CANONICAL_CATEGORIES)
+    assert [item["category"] for item in summaries] == list(_TEST_CATEGORIES)
     assert all(item["completed"] for item in summaries)
+
+    by_category = {item["category"]: item["final_state"] for item in summaries}
+
+    for category in ("Utility", "Flatbed", "Tilt"):
+        assert by_category[category]["category"] == category
+
+    equipment = by_category["Equipment"]
+    assert "hitch_type" in equipment["skipped"]
+    assert "hitch_type" not in equipment["slots"]
+    assert "hitch_type" not in equipment["metadata_filters"]
+
+    enclosed = by_category["Enclosed"]
+    assert "make" not in enclosed["metadata_filters"]
+    assert enclosed["metadata_filters"].get("length_ft") == "18 ft"
+    assert enclosed["metadata_filters"].get("width_ft") == "8 ft"
+    assert enclosed["awaiting_history"].count("cargo_size") == 1
+
+    roll_off = by_category["Roll Off"]
+    assert "package_scope" not in roll_off["skipped"]
+    assert "trailer" in str(roll_off["slots"].get("package_scope") or "").lower()
+    assert "bin" in str(roll_off["slots"].get("package_scope") or "").lower()
+
+    car_hauler = by_category["Car Hauler"]
+    assert car_hauler["slots"].get("vehicle_length_ft") == "14 ft"
+    assert car_hauler["metadata_filters"].get("length_ft") == "14 ft"

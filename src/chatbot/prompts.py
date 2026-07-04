@@ -195,11 +195,17 @@ QUALIFICATION_RULES = """
 2. Required questions come from `trailer_fields.py` via LangGraph session state queue.
 3. CRITICAL HAUL-ITEM RULE: A trailer category names the requested trailer type, not its cargo. Never copy or infer a category such as Utility, Equipment, Dump, or "utility trailer" into a haul-item/use slot merely because that category was requested. A category-like term may be a haul item only when explicitly identified as cargo (for example, "I need to haul equipment") or given as a direct answer to the active haul-item question.
 4. Add optional questions **only** when they materially improve matching.
-4. If a user answer is invalid for the current required slot, ask a concise clarification for **that same slot**.
-5. Do NOT ask for contact details during ordinary qualification.
-6. Do NOT repeat contact-detail requests after they have been asked once.
-7. Contact is optional and must NEVER block trailer help. Contact is sufficient when phone OR email is known.
-8. Contact collection is owned exclusively by the service layer. Never ask for or discuss a name, email,
+5. CRITICAL LOOSE-ANSWER MATRIX:
+   - Measurement/weight/numeric field: accept digits, number words, ranges, and approximations. For every range, store only its smallest stated value (`15–18 ft` → `15 ft`; `5,000–10,000 lbs` → `5,000 lbs`). If a cooperative answer contains no usable number and is not a counter-question or another-field answer, skip that field as no preference. Never invent or retry a number.
+   - Haul/use/free-text field: store any substantive direct wording, however broad or informal. Do not store only when the user refuses/skips, asks a counter-question, or answers another field.
+   - Hitch/fixed-choice/preference field: store a recognizable allowed choice. If the user is vague, flexible, says either/anything standard, or gives no usable choice, skip as no preference.
+   - Other fields follow the same pattern: accept a usable field value; otherwise skip a cooperative vague answer instead of treating it as rejection.
+   - Roll Off `bin_size`: preserve the user's chosen numeric bin size in its slot, and map that number directly to Pinecone `length_ft`. Example: `15 yd` → `length_ft="15 ft"` (never `45 ft`); for a range, use the smallest value.
+6. Ask a clarification for the same slot only when the turn is genuinely unrelated or ambiguous—not merely vague and cooperative.
+7. Do NOT ask for contact details during ordinary qualification.
+8. Do NOT repeat contact-detail requests after they have been asked once.
+9. Contact is optional and must NEVER block trailer help. Contact is sufficient when phone OR email is known.
+10. Contact collection is owned exclusively by the service layer. Never ask for or discuss a name, email,
 phone number, callback, or contact details. If customer.contact_status is contact_declined, continue without
 mentioning contact. Only when customer.contact_request_allowed is true may required contact be requested
 for the email action the customer asked to trigger.
@@ -258,6 +264,10 @@ CATEGORY_CHANGE_RULES = """
 1. If the user switches category, set `trailer_category` to the new category and restart required qualification before searching.
 2. During qualification (before first search), do NOT switch category based on incidental category terms unless the user clearly requests a change.
 3. When `pending_category_change` is present, interpret the user's reply in that confirmation context ("it" = the one pending field). Do not treat a filter-confirmation reply as a new category request.
+4. While an active qualification question exists, preserve the persisted category by default. Category-like words may be cargo answers:
+   - "assorted equipment" answers a haul-item question; it does not change Utility, Flatbed, or Tilt to Equipment.
+   - "general cargo" answers a use-case question; it does not select a make or another category.
+5. Change category during active Q&A only when the user explicitly expresses replacement intent such as "instead", "actually switch to", or "I want a different trailer type".
 """.strip()
 
 

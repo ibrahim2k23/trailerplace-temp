@@ -429,6 +429,22 @@ class QuestionTurnDecision(BaseModel):
         return value
 
 
+class CategoryTransitionDecision(BaseModel):
+    final_category: Optional[str] = None
+    approve_category_change: bool = False
+    explicit_category_switch: bool = False
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+
+
+class MakeVerificationDecision(BaseModel):
+    approve_make: bool = False
+    verified_make: Optional[str] = None
+    explicit_evidence: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+
+
 class CategoryFilterConfirmationDecision(BaseModel):
     keep_fields: list[str] = Field(default_factory=list)
     discard_fields: list[str] = Field(default_factory=list)
@@ -559,6 +575,45 @@ def _question_turn_adjudicator_llm():
     ).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         QuestionTurnDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _active_turn_reconciler_llm():
+    model = (
+        os.getenv("ACTIVE_TURN_RECONCILER_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        QuestionTurnDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _category_transition_llm():
+    model = (
+        os.getenv("CATEGORY_TRANSITION_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        CategoryTransitionDecision,
+        method="function_calling",
+    )
+
+
+@lru_cache(maxsize=1)
+def _make_verification_llm():
+    model = (
+        os.getenv("MAKE_VERIFICATION_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        MakeVerificationDecision,
         method="function_calling",
     )
 
@@ -1744,7 +1799,8 @@ _PSEUDO_SLOT_DEFINITIONS: dict[str, dict[str, Any]] = {
             "When current_category is unknown, store the free-form cargo, material, equipment, "
             "or use case the customer gives, including broad phrases after haul/carry/move such as "
             "'some heavy items', 'a car', 'equipment', or 'tools', as well as debris, a mower, "
-            "a skid steer, hay, or furniture. Do not store trailer category names here."
+            "a skid steer, hay, or furniture. Store any substantive direct haul/use answer unless "
+            "the user refuses/skips, asks a counter-question, or answers another field. Do not store trailer category names here."
         ),
         "mapped_metadata_fields": [],
     },
@@ -1755,7 +1811,10 @@ _PSEUDO_SLOT_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     _DYNAMIC_WIDTH_SLOT: {
         "question": _DYNAMIC_WIDTH_QUESTION,
-        "answer_guidance": "Store the required trailer or cargo width. Accept feet, inches, or clear width dimension shorthand only when width is being answered.",
+        "answer_guidance": (
+            "Store the required trailer or cargo width when the answer includes a digit, number word, range, or approximation. "
+            "If a cooperative answer has no usable number and is not a counter-question or another-field answer, skip width as no preference."
+        ),
         "mapped_metadata_fields": ["width_ft"],
     },
 }
@@ -2586,6 +2645,176 @@ def _fallback_question_turn_decision(
     )
 
 
+def _reconcile_category_transition(
+    *,
+    state: ChatbotState,
+    persisted_category: str,
+    proposed_category: str,
+    active_slot: str | None,
+    active_question: str,
+    latest_message: str,
+) -> CategoryTransitionDecision:
+    if not os.getenv("OPENAI_API_KEY"):
+        return CategoryTransitionDecision(
+            final_category=persisted_category,
+            reason="category_transition_llm_unavailable",
+        )
+    context = {
+        "persisted_category": persisted_category,
+        "mind_proposed_category": proposed_category,
+        "active_slot": active_slot,
+        "active_question": active_question,
+        "latest_user_message": latest_message,
+        "recent_messages": (state.get("messages") or [])[-8:],
+    }
+    try:
+        return _category_transition_llm().invoke(
+            [
+                SystemMessage(content=(
+                    "You verify a proposed trailer-category transition before any category state is changed. "
+                    "Return structured data only.\n\n"
+                    "Preserve persisted_category unless the latest user message explicitly asks to switch trailer "
+                    "types. During active Q&A, a category-like word may answer the active cargo/use question: "
+                    "'assorted equipment' is cargo and must not switch Utility, Flatbed, or Tilt to Equipment. "
+                    "Approve explicit language such as 'actually switch to Equipment', 'Equipment instead', or "
+                    "'I want a different trailer type: Equipment'. Incidental mentions, recommendations, comparisons, "
+                    "and cargo descriptions are not switches. On doubt, reject the change and return persisted_category.\n\n"
+                    "## TRAILER TYPES & SYNONYM MAPPING\n"
+                    "(Map spelling mistakes and synonyms to canonical categories)\n"
+                    f"{category_prompt_block()}\n\n"
+                    "## TRAILER BRANDS / MAKES\n"
+                    "(Use for informational answers only — do NOT infer category from make)\n"
+                    f"{make_prompt_block()}"
+                )),
+                HumanMessage(content=f"Verify this category transition:\n{_safe_json(context)}"),
+            ]
+        )
+    except Exception:
+        logger.exception("category_transition_llm_failed; preserving persisted category")
+        return CategoryTransitionDecision(
+            final_category=persisted_category,
+            reason="category_transition_llm_failed",
+        )
+
+
+def _verify_make_candidate(
+    *,
+    candidate_make: str,
+    candidate_match_type: str,
+    latest_message: str,
+    category: str | None,
+    recent_messages: list[dict[str, Any]],
+) -> MakeVerificationDecision:
+    if not os.getenv("OPENAI_API_KEY"):
+        return MakeVerificationDecision(reason="make_verification_llm_unavailable")
+    context = {
+        "deterministic_candidate": candidate_make,
+        "candidate_match_type": candidate_match_type,
+        "latest_user_message": latest_message,
+        "current_category": category,
+        "recent_messages": recent_messages[-6:],
+    }
+    try:
+        return _make_verification_llm().invoke(
+            [
+                SystemMessage(content=(
+                    "Verify whether the user explicitly requested the deterministic manufacturer candidate. "
+                    "Return structured data only. Approve only when the latest message uses the candidate as a "
+                    "trailer brand/make. Reject lexical collisions and ordinary descriptions: 'general cargo' is "
+                    "not Cargo Craft, 'diamond plate' is not Diamond C, and generic iron/aluminum wording is not a make. "
+                    "verified_make must equal the supplied candidate when approved. On uncertainty, reject.\n\n"
+                    "## TRAILER TYPES & SYNONYM MAPPING\n"
+                    "(Map spelling mistakes and synonyms to canonical categories)\n"
+                    f"{category_prompt_block()}\n\n"
+                    "## TRAILER BRANDS / MAKES\n"
+                    "(Use for informational answers only — do NOT infer category from make)\n"
+                    f"{make_prompt_block()}"
+                )),
+                HumanMessage(content=f"Verify this make candidate:\n{_safe_json(context)}"),
+            ]
+        )
+    except Exception:
+        logger.exception("make_verification_llm_failed; rejecting make candidate")
+        return MakeVerificationDecision(reason="make_verification_llm_failed")
+
+
+def _reconcile_active_question_turn(
+    *,
+    state: ChatbotState,
+    category: str | None,
+    active_slot: str,
+    active_question: str,
+    latest_message: str,
+    mind_decision: dict[str, Any],
+    adjudicator_decision: QuestionTurnDecision,
+    extracted_slots: dict[str, Any],
+    extracted_metadata: dict[str, Any],
+    extracted_features: list[str],
+    no_preference_decision: PreferenceNullDecision,
+) -> QuestionTurnDecision:
+    """Use an LLM as the final semantic authority for an active Q&A turn."""
+    if not os.getenv("OPENAI_API_KEY"):
+        return adjudicator_decision
+    context = {
+        "latest_user_message": latest_message,
+        "recent_messages": (state.get("messages") or [])[-8:],
+        "persisted_category": category,
+        "active_slot": active_slot,
+        "active_question": active_question,
+        "existing_slots": state.get("slots_collected") or {},
+        "existing_metadata_filters": state.get("metadata_filters_collected") or {},
+        "mind_proposal": mind_decision,
+        "question_adjudicator_proposal": _model_dump(adjudicator_decision),
+        "field_extractor_proposal": {
+            "slots_collected_update": extracted_slots,
+            "metadata_filters_update": extracted_metadata,
+            "requested_non_metadata_features": extracted_features,
+        },
+        "no_preference_classifier_proposal": _model_dump(no_preference_decision),
+    }
+    try:
+        return _active_turn_reconciler_llm().invoke(
+            [
+                SystemMessage(content=(
+                    "You are the final semantic state-transition authority for one active trailer Q&A turn. "
+                    "Reconcile the mind, question adjudicator, and field extractor. Return QuestionTurnDecision only.\n\n"
+                    "1. Preserve the persisted category unless the user explicitly asks to switch trailer type. "
+                    "Cargo words such as equipment, cars, livestock, cargo, or debris do not change category.\n"
+                    "2. Free-text slots (haul_item, haul_material, vehicle_type, use_case and similar) accept any "
+                    "substantive direct answer, however broad or informal. Preserve its meaning. Reject only an "
+                    "unrelated counter-question, explicit refusal/skip, or content that answers a different field.\n"
+                    "3. Numeric slots require a digit or an unambiguous number written in words. Accept ranges and "
+                    "approximations. If there is no usable number, set no_preference_for_active_question=true and "
+                    "do not invent or retry a value.\n"
+                    "4. For choice/preference slots, 'either', 'anything standard', 'whatever works', and flexible "
+                    "wording mean no preference.\n"
+                    "4a. For every other constrained field, accept a recognizable field value; otherwise a "
+                    "cooperative vague answer means no preference, not rejection and not a retry.\n"
+                    "5. Never overwrite an existing slot with an answer to another slot. Merge valid extractor "
+                    "updates only when explicitly supported by the latest message.\n"
+                    "6. Compound dimensions must be separated in metadata updates: '16 by 7 feet' means "
+                    "length_ft='16 ft' and width_ft='7 ft'; never copy the whole phrase into both fields.\n"
+                    "7. A make requires an explicitly named manufacturer. Generic 'cargo' never means Cargo Craft.\n"
+                    "8. search_now_requested and skip_remaining_questions are semantic intent decisions. Set them "
+                    "only when the user's message actually expresses those intents.\n"
+                    "9. Prefer the best-supported interpretation across the three proposals; confidence reflects "
+                    "the evidence. Treat the no-preference classifier as advisory evidence, not an automatic override. "
+                    "The result is authoritative.\n"
+                    "10. For every numeric range, choose and store only the smallest stated value. Examples: "
+                    "'15 to 18 ft' becomes '15 ft'; '5,000-10,000 lbs' becomes '5000 lbs'.\n"
+                    "11. 'Either A or B', 'either is fine', and equivalent wording mean no preference for a fixed-choice "
+                    "field; store neither option.\n"
+                    "12. Roll Off bin_size maps its numeric value directly to trailer length_ft for Pinecone. "
+                    "'15 yd' means length_ft='15 ft', never 45 ft; use the smallest number in a range."
+                )),
+                HumanMessage(content=f"Reconcile this active turn:\n{_safe_json(context)}"),
+            ]
+        )
+    except Exception:
+        logger.exception("active_turn_reconciler_llm_failed; using adjudicator proposal")
+        return adjudicator_decision
+
+
 def _adjudicate_active_question_turn(
     *,
     state: ChatbotState,
@@ -2645,7 +2874,7 @@ def _adjudicate_active_question_turn(
                     "Return structured data only.\n\n"
 
                     "## HARD RULES (apply before anything else)\n"
-                    "1. CATEGORY ≠ HAUL ITEM. 'I want an equipment trailer' sets category only — not haul_item/generic_haul_use. "
+                    "1. CRITICAL HAUL-ITEM RULE: CATEGORY ≠ HAUL ITEM. 'I want an equipment trailer' sets category only — not haul_item/generic_haul_use. "
                     "   Accept a category-like term as haul cargo only when explicitly framed as cargo or as a direct answer to the active haul question.\n"
                     "2. HITCH TYPES ONLY IN hitch_type. Gooseneck and Bumper Pull are hitch configurations only. "
                     "   Never use either as active_slot_value for a category/base-category question, make, or any other slot. "
@@ -2697,6 +2926,22 @@ def _adjudicate_active_question_turn(
                     "- hitch_type: store only 'gooseneck' or 'bumper pull'. Any non-specific answer → null.\n"
                     "- Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — "
                     "  'anything', 'all types of material', 'various equipment'. Capture the phrase as-is.\n\n"
+
+                    "## AUTHORITATIVE LOOSE-ANSWER POLICY\n"
+                    "- Numeric fields (weight, payload, length, width, height, capacity, crew size) require a digit "
+                    "or an unambiguous number written in words. Accept ranges and approximations; for every range "
+                    "store only its smallest stated value ('15 to 18 ft' -> '15 ft'). If no usable "
+                    "number is present, set no_preference_for_active_question=true; never retry or invent a value.\n"
+                    "- Roll Off bin_size is a search proxy for trailer length: copy its chosen numeric value directly "
+                    "to length_ft ('15 yd' -> length_ft='15 ft'), without converting yards to feet.\n"
+                    "- Free-text haul/use fields accept any substantive direct answer, including 'random things', "
+                    "'general cargo', and 'assorted equipment'. Reject only explicit refusal/skip, a counter-question, "
+                    "or content answering a different field.\n"
+                    "- 'Either', 'whatever works', 'standard', and flexible wording mean no preference for a choice slot.\n"
+                    "- Example: 'Either bumper pull or gooseneck is fine' means no preference: store neither hitch.\n"
+                    "- For every other constrained field, accept a recognizable field value; otherwise a cooperative "
+                    "vague answer means no preference, not rejection and not a retry.\n"
+                    "- Incidental cargo words never change an already selected category during active Q&A.\n\n"
 
                     "## ACTIVE QUESTION EVALUATION\n"
                     "- Treat the active slot definition and question text as authoritative.\n"
@@ -2958,6 +3203,15 @@ def _normalize_length_or_width_value(value: Any) -> Any:
     return f"{feet:g} ft"
 
 
+def _normalize_roll_off_bin_size_as_length(value: Any) -> Any:
+    """Map a Roll Off bin's yard-size number directly to trailer feet."""
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:yd|yds|yard|yards)?", text, re.I)
+    if not match:
+        return value
+    return f"{float(match.group(1)):g} ft"
+
+
 def _dimension_shorthand_updates(text: str) -> dict[str, Any]:
     match = re.search(
         r"(?<!\d)(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?\s*[xX]\s*"
@@ -3035,6 +3289,8 @@ def _canonicalize_adjudicated_metadata(
             return None
         return key, hitch
     if key in {"length_ft", "width_ft", "height_ft"}:
+        if key == "length_ft" and normalize_category(category) == "Roll Off":
+            return key, _normalize_roll_off_bin_size_as_length(value)
         return key, _normalize_length_or_width_value(value)
     if key == "payload_lbs":
         return key, _normalize_payload_value(value)
@@ -3156,7 +3412,7 @@ def _extract_field_updates(
         "Return structured data only. Always return rejected_candidates as a JSON array ([] if none).\n\n"
 
         "## HARD RULES (apply before extracting anything)\n"
-        "1. CATEGORY ≠ HAUL ITEM. A category names the trailer type, not its cargo.\n"
+        "1. CRITICAL HAUL-ITEM RULE: CATEGORY ≠ HAUL ITEM. A category names the trailer type, not its cargo.\n"
         "   - 'I want an equipment trailer' → sets category only. haul_item/generic_haul_use = nothing.\n"
         "   - 'I need to haul equipment' → sets generic_haul_use='equipment'.\n"
         "   - A category-like term may answer an active haul-item question from the assistant.\n"
@@ -3187,6 +3443,19 @@ def _extract_field_updates(
         "- Weights and payloads → pounds with suffix 'lbs'. Convert tons, kg, etc.\n"
         "- payload_lbs is haul/carried weight — NOT GVWR unless user specifically says GVWR.\n"
         "- Side/wall height: '3 inch sides', '3 ft walls' → height_ft.\n\n"
+
+        "## AUTHORITATIVE ACTIVE-SLOT POLICY\n"
+        "- For a free-text active slot, extract any substantive direct answer even when broad or informal. "
+        "Do not overwrite it using text that answers a different active slot.\n"
+        "- Numeric fields require a digit or an unambiguous number written in words. Accept ranges and "
+        "approximations; for every range store only its smallest stated value ('5000-10000 lbs' -> '5000 lbs'). "
+        "Return no numeric update when no usable number exists.\n"
+        "- Compound dimensions must be separated: '16 by 7 feet' means length_ft='16 ft' and width_ft='7 ft'. "
+        "Never copy the complete compound phrase into both fields.\n"
+        "- For Roll Off bin_size, map the chosen numeric value directly into length_ft for Pinecone: "
+        "'15 yd' becomes length_ft='15 ft', not 45 ft. For ranges, use the smallest value.\n"
+        "- An already resolved category is stable during active Q&A. Cargo wording is not a category switch.\n"
+        "- Extract a make only from an explicitly named manufacturer; generic cargo language is never a make.\n\n"
 
         "## CONFIDENCE\n"
         "If confidence is low, leave updates empty and optionally set clarification_needed.\n"
@@ -4858,12 +5127,34 @@ def _apply_make_resolution(
     latest_message: str,
     category: str | None,
     metadata_filters: dict[str, Any],
+    recent_messages: list[dict[str, Any]] | None = None,
 ) -> tuple[str | None, list[str], str | None]:
     resolution = resolve_make_from_text(
         latest_message,
         use_llm_fallback=False,
     )
     if not resolution.make:
+        return category, [], None
+    verification = _verify_make_candidate(
+        candidate_make=resolution.make,
+        candidate_match_type=resolution.match_type,
+        latest_message=latest_message,
+        category=category,
+        recent_messages=recent_messages or [],
+    )
+    if not (
+        verification.approve_make
+        and verification.confidence in _CONFIDENT_CLASSIFICATIONS
+        and verification.verified_make == resolution.make
+    ):
+        logger.info(
+            "make_candidate_rejected | candidate=%r | match_type=%r | confidence=%r | evidence=%r | reason=%r",
+            resolution.make,
+            resolution.match_type,
+            verification.confidence,
+            verification.explicit_evidence,
+            verification.reason,
+        )
         return category, [], None
 
     existing_make = str(metadata_filters.get("make") or "").strip() or None
@@ -5233,6 +5524,48 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             or category_clarification_key
         )
     category_proposed = decision.get("trailer_category") or category_before
+    if (
+        category_before
+        and category_proposed
+        and category_proposed != category_before
+    ):
+        transition_slot = str(awaiting_slot or "").strip() or None
+        transition_question = (
+            str(state.get("active_question_text") or "").strip()
+            or _last_assistant_question(state.get("messages") or [])
+        )
+        transition = _reconcile_category_transition(
+            state=state,
+            persisted_category=str(category_before),
+            proposed_category=str(category_proposed),
+            active_slot=transition_slot,
+            active_question=transition_question,
+            latest_message=latest_message,
+        )
+        transition_approved = bool(
+            transition.approve_category_change
+            and transition.explicit_category_switch
+            and transition.confidence in _CONFIDENT_CLASSIFICATIONS
+            and transition.final_category == category_proposed
+        )
+        if not transition_approved:
+            logger.info(
+                "category_transition_rejected | persisted=%r | proposed=%r | confidence=%r | reason=%r",
+                category_before,
+                category_proposed,
+                transition.confidence,
+                transition.reason,
+            )
+            category_proposed = category_before
+            decision["trailer_category"] = category_before
+        else:
+            logger.info(
+                "category_transition_approved | persisted=%r | proposed=%r | confidence=%r | reason=%r",
+                category_before,
+                category_proposed,
+                transition.confidence,
+                transition.reason,
+            )
     category = category_proposed
     decision = _normalize_llm_field_mappings(decision, category)
 
@@ -5487,6 +5820,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         latest_message=latest_message,
         category=category,
         metadata_filters=metadata_filters,
+        recent_messages=state.get("messages") or [],
     )
     make_before = str(metadata_filters_before.get("make") or "").strip()
     make_after = str(metadata_filters.get("make") or "").strip()
@@ -5594,6 +5928,38 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             pending_questions=pending_source_for_turn,
             make_category_options=make_category_options,
         )
+        supplemental_slots, _supplemental_metadata, supplemental_features = _apply_explicit_filter_extraction(
+            state=state,
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            latest_message=latest_message,
+            awaiting_slot=active_qna_slot,
+            apply_slot_updates=True,
+        )
+        active_no_preference = classify_no_preference(
+            category=category,
+            user_message=latest_message,
+            awaiting_slot=active_qna_slot,
+            pending_questions=pending_source_for_turn,
+            slots_collected=slots,
+            metadata_filters_collected=metadata_filters,
+            allowed_category_slots=sorted(allowed_category_slots),
+            active_question=active_qna_question,
+        )
+        question_turn = _reconcile_active_question_turn(
+            state=state,
+            category=category,
+            active_slot=str(active_qna_slot),
+            active_question=active_qna_question,
+            latest_message=latest_message,
+            mind_decision=decision,
+            adjudicator_decision=question_turn,
+            extracted_slots=supplemental_slots,
+            extracted_metadata=_supplemental_metadata,
+            extracted_features=supplemental_features,
+            no_preference_decision=active_no_preference,
+        )
         normalized_question_turn = _normalize_llm_field_mappings(
             _model_dump(question_turn),
             category,
@@ -5642,19 +6008,9 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         active_qna_escalation_summary = question_turn.escalation_summary
         active_qna_unsupported_request = question_turn.unsupported_request
         active_qna_retry_question = question_turn.rephrased_question
-        # Search/skip flags are high-impact routing decisions. Only honor them
-        # when the user's own words contain an explicit immediate-search intent;
-        # an adjudicator hallucination must not bypass qualification.
-        explicit_immediate_search = bool(
-            category and _immediate_search_requested(latest_message)
-        )
-        active_qna_search_now = bool(
-            question_turn.search_now_requested and explicit_immediate_search
-        )
+        active_qna_search_now = bool(question_turn.search_now_requested and category)
         active_qna_skip_remaining = bool(
-            question_turn.skip_remaining_questions
-            and active_qna_search_now
-            and _skip_remaining_questions_requested(latest_message)
+            question_turn.skip_remaining_questions and active_qna_search_now
         )
         if question_turn.no_preference_for_active_question:
             active_question_was_resolved = True
@@ -5763,50 +6119,8 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             awaiting_slot = None
             pending_source_for_turn = []
             active_question_attempts.clear()
-        supplemental_slots, _supplemental_metadata, supplemental_features = _apply_explicit_filter_extraction(
-            state=state,
-            category=category,
-            slots=slots,
-            metadata_filters=metadata_filters,
-            latest_message=latest_message,
-            awaiting_slot=None,
-            apply_slot_updates=True,
-        )
         for key, value in supplemental_slots.items():
             if str(key) == str(active_qna_slot):
-                is_valid, reason = _validate_slot_value(key, value)
-                if not is_valid:
-                    logger.info(
-                        "slot_validation_failed | slot=%s | value=%r | reason=%s",
-                        key,
-                        value,
-                        reason,
-                    )
-                    continue
-                # A confidence-gated extraction that validly fills the active
-                # slot overrides an adjudicator's false "unanswered" result.
-                slots[key] = value
-                slots_skipped.discard(str(key))
-                awaiting_slot = None if awaiting_slot == active_qna_slot else awaiting_slot
-                active_question_attempts.pop(str(active_qna_slot), None)
-                active_question_was_resolved = True
-                active_question_was_unanswered = False
-                active_qna_unanswered = False
-                active_qna_reply = ""
-                active_qna_retry_question = ""
-                repeated_unanswered_escalation = False
-                skipped_unanswered_slot = None
-                for metadata_key, metadata_value in _slot_value_to_metadata_updates(
-                    str(active_qna_slot),
-                    value,
-                    category,
-                ).items():
-                    metadata_filters[metadata_key] = metadata_value
-                logger.info(
-                    "active_question_resolved_by_extraction | slot=%r | value=%r",
-                    active_qna_slot,
-                    value,
-                )
                 continue
             is_valid, reason = _validate_slot_value(key, value)
             if not is_valid:

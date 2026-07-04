@@ -169,7 +169,11 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         },
         answer_guidance={
             "package_scope": "Store whether the customer wants only the trailer, only bins, or the full trailer-and-bins package.",
-            "bin_size": "Store the requested bin size or capacity, including cubic-yard style answers such as 10 yd or 20 yd.",
+            "bin_size": (
+                "Store the requested bin size, including cubic-yard wording such as 10 yd or 20 yd. "
+                "For Pinecone, map its numeric value directly to trailer length_ft: 15 yd means length_ft='15 ft', "
+                "not 45 ft; for a range, use the smallest value."
+            ),
             "deck_style": "Store the preferred deck style such as step deck or standard deck.",
             "cdl_concern": "Store whether staying under CDL-related limits matters to the customer.",
         },
@@ -295,6 +299,35 @@ _DEFAULT_SPEC = TrailerFieldSpec(
     },
 )
 
+_NUMERIC_OR_MEASUREMENT_SLOTS = {
+    "haul_weight_lbs", "haul_length_ft", "vehicle_length_ft",
+    "trailer_length_ft", "trailer_size", "cargo_size", "bin_size",
+    "tank_capacity", "crew_size", "total_weight", "payload_need",
+}
+_FREE_TEXT_SLOTS = {
+    "haul_item", "haul_material", "vehicle_type", "use_case",
+    "fiber_use_case", "equipment_list",
+}
+
+
+def _loose_answer_guidance(slot: str) -> str:
+    if slot in _NUMERIC_OR_MEASUREMENT_SLOTS:
+        return (
+            "Loose-answer rule: accept digits, number words, ranges, or approximations; for every range store only "
+            "the smallest stated value (15–18 ft becomes 15 ft; 5,000–10,000 lbs becomes 5,000 lbs). "
+            "If a cooperative answer has no usable numeric value and is not a counter-question or another-field answer, skip this field as no preference; never invent or retry a value."
+        )
+    if slot in _FREE_TEXT_SLOTS:
+        return (
+            "Loose-answer rule: store any substantive wording the user gives for this field, however broad or informal. "
+            "Do not store it only when the user explicitly refuses/skips, asks a counter-question, or clearly answers another field."
+        )
+    return (
+        "Loose-answer rule: store a recognizable value for this field. "
+        "If the user is cooperative but vague/flexible and gives no usable field value, skip it as no preference; do not retry or invent a value."
+    )
+
+
 # Runtime note:
 # The LangGraph specialist may inject an additional required slot for width
 # (item_or_trailer_width_ft) when heavy-duty/large-dimension hauling is detected.
@@ -323,12 +356,22 @@ def get_trailer_fields_as_dict(trailer_type: str) -> dict:
     Suitable for injecting into LLM prompts or tool results.
     """
     spec = get_trailer_fields(trailer_type)
+    answer_guidance = {
+        slot: " ".join(
+            part for part in (
+                str(spec.answer_guidance.get(slot) or "").strip(),
+                _loose_answer_guidance(slot),
+            )
+            if part
+        )
+        for slot in dict.fromkeys(spec.required + spec.optional)
+    }
     return {
         "category": spec.category,
         "required_slots": spec.required,
         "optional_slots": spec.optional,
         "questions": spec.questions,
-        "answer_guidance": spec.answer_guidance,
+        "answer_guidance": answer_guidance,
         "notes": spec.notes,
     }
 

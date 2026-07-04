@@ -3,6 +3,14 @@ import inspect
 from src.chatbot import graph, make_resolver, mini_llm_classifier, prompts, service
 
 
+def test_roll_off_bin_yards_map_directly_to_trailer_length_feet():
+    assert graph._canonicalize_adjudicated_metadata(
+        key="length_ft",
+        value="15 yd",
+        category="Roll Off",
+    ) == ("length_ft", "15 ft")
+
+
 def test_all_existing_llm_prompts_forbid_category_as_implicit_haul_item():
     prompt_text = " ".join(
         [
@@ -2468,6 +2476,18 @@ def test_active_extraction_overrides_wrong_adjudicator_and_asks_next_question(mo
             confidence="low",
         ),
     )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="random things",
+            search_now_requested=False,
+            skip_remaining_questions=False,
+            confidence="high",
+            reason="llm_reconciled_free_text_answer",
+        ),
+    )
     state = _state("random things", category="Dump")
     state["awaiting_slot"] = "haul_material"
 
@@ -2477,6 +2497,190 @@ def test_active_extraction_overrides_wrong_adjudicator_and_asks_next_question(mo
     assert out["awaiting_slot"] == "haul_weight_lbs"
     assert out["mind_decision"]["action"] == "respond"
     assert out["assistant_text"] == "What's the rough haul weight per load?"
+
+
+def test_active_haul_answer_reconciles_before_category_change(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"haul_item": "assorted equipment"},
+    )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_category_transition",
+        lambda **kwargs: graph.CategoryTransitionDecision(
+            final_category="Utility",
+            approve_category_change=False,
+            explicit_category_switch=False,
+            confidence="high",
+            reason="Equipment describes cargo, not a trailer-category switch.",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="assorted equipment",
+            confidence="high",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="assorted equipment",
+            confidence="high",
+        ),
+    )
+    state = _state("Mostly assorted equipment.", category="Utility")
+    state["trailer_category"] = "Utility"
+    state["awaiting_slot"] = "haul_item"
+    state["mind_decision"]["trailer_category"] = "Equipment"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Utility"
+    assert out["slots_collected"]["haul_item"] == "assorted equipment"
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+
+
+def test_explicit_category_switch_is_applied_after_reconciliation(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_category_transition",
+        lambda **kwargs: graph.CategoryTransitionDecision(
+            final_category="Equipment",
+            approve_category_change=True,
+            explicit_category_switch=True,
+            confidence="high",
+            reason="The user explicitly requested Equipment instead.",
+        ),
+    )
+    state = _state("Actually switch me to an Equipment trailer instead.", category="Utility")
+    state["trailer_category"] = "Utility"
+    state["awaiting_slot"] = "haul_item"
+    state["mind_decision"]["trailer_category"] = "Equipment"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Equipment"
+
+
+def test_either_hitch_is_advisory_no_preference_to_reconciler(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="Bumper Pull",
+            confidence="medium",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "classify_no_preference",
+        lambda **kwargs: graph.PreferenceNullDecision(
+            has_no_preference=True,
+            target_slots=["hitch_type"],
+            confidence="high",
+            reason="Either allowed hitch is acceptable.",
+        ),
+    )
+
+    def _reconcile(**kwargs):
+        assert kwargs["no_preference_decision"].has_no_preference is True
+        return graph.QuestionTurnDecision(
+            no_preference_for_active_question=True,
+            confidence="high",
+            reason="Either A or B means no preference.",
+        )
+
+    monkeypatch.setattr(graph, "_reconcile_active_question_turn", _reconcile)
+    state = _state("Either bumper pull or gooseneck is fine.", category="Equipment")
+    state["trailer_category"] = "Equipment"
+    state["slots_collected"] = {
+        "haul_item": "skid steer",
+        "haul_weight_lbs": "5000 lbs",
+        "haul_length_ft": "16 ft",
+    }
+    state["awaiting_slot"] = "hitch_type"
+
+    out = graph._apply_mind_node(state)
+
+    assert "hitch_type" in out["slots_skipped"]
+    assert "hitch_type" not in out["slots_collected"]
+    assert "hitch_type" not in out["metadata_filters_collected"]
+
+
+def test_make_candidate_requires_llm_verification(monkeypatch):
+    monkeypatch.setattr(
+        graph,
+        "resolve_make_from_text",
+        lambda *args, **kwargs: make_resolver.MakeResolution(
+            make="Cargo Craft",
+            confidence="high",
+            match_type="partial",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_verify_make_candidate",
+        lambda **kwargs: graph.MakeVerificationDecision(
+            approve_make=False,
+            verified_make=None,
+            confidence="high",
+            reason="General cargo is not an explicit manufacturer request.",
+        ),
+    )
+    metadata = {}
+
+    category, options, question = graph._apply_make_resolution(
+        latest_message="general cargo and occasional work use",
+        category="Enclosed",
+        metadata_filters=metadata,
+        recent_messages=[],
+    )
+
+    assert category == "Enclosed"
+    assert options == []
+    assert question is None
+    assert "make" not in metadata
+
+
+def test_explicit_make_candidate_is_persisted_after_llm_verification(monkeypatch):
+    monkeypatch.setattr(
+        graph,
+        "resolve_make_from_text",
+        lambda *args, **kwargs: make_resolver.MakeResolution(
+            make="Cargo Craft",
+            confidence="high",
+            match_type="exact",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_verify_make_candidate",
+        lambda **kwargs: graph.MakeVerificationDecision(
+            approve_make=True,
+            verified_make="Cargo Craft",
+            explicit_evidence="I want Cargo Craft",
+            confidence="high",
+        ),
+    )
+    metadata = {}
+
+    category, _, _ = graph._apply_make_resolution(
+        latest_message="I want a Cargo Craft enclosed trailer",
+        category="Enclosed",
+        metadata_filters=metadata,
+        recent_messages=[],
+    )
+
+    assert category == "Enclosed"
+    assert metadata["make"] == "Cargo Craft"
 
 
 def test_active_question_skip_remaining_marks_questions_skipped_and_searches(monkeypatch):

@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.graph import build_chatbot_graph
@@ -63,6 +64,16 @@ _GENERAL_INTENT_RE = re.compile(
     r")\b",
     re.I,
 )
+
+
+def _create_or_get_conversation(db_session: Any, *, session_id: str, lead_id: str, conversation: list[dict[str, Any]]) -> ChatbotConversation:
+    """Atomically create a conversation, or return the row created elsewhere."""
+    db_session.execute(
+        pg_insert(ChatbotConversation)
+        .values(session_id=session_id, lead_id=lead_id, conversation=conversation)
+        .on_conflict_do_nothing(index_elements=[ChatbotConversation.session_id])
+    )
+    return db_session.get(ChatbotConversation, session_id)
 _METADATA_UPDATE_RE = re.compile(
     r"\b(?:gooseneck|bumper\s*[- ]?\s*pull|hitch|payload|capacity|under|below|max|budget|"
     r"length|long|width|wide|make\s+it|change\s+it|black|white|gray|grey|silver|red|blue|"
@@ -1784,13 +1795,14 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
                 lead_id = snapshot.get("lead_id")
                 if not lead_id:
                     raise RuntimeError("A durable conversation requires a lead")
-                row = ChatbotConversation(
+                row = _create_or_get_conversation(
+                    db_session,
                     session_id=request.session_id,
                     lead_id=lead_id,
                     conversation=_conversation_payload(snapshot),
                 )
-                db_session.add(row)
-                db_session.flush()
+                if row is None:
+                    raise RuntimeError("Conversation could not be created or reloaded")
             row.conversation = _conversation_payload(snapshot)
             row.state_snapshot = snapshot
             row.state_schema_version = 1
