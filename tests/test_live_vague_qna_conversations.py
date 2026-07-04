@@ -23,6 +23,17 @@ from src.models import ChatRequest
 
 _TEST_CATEGORIES = tuple(CANONICAL_CATEGORIES)
 
+_INTERRUPTION_SCENARIOS = {
+    "Utility": (
+        "counter_question",
+        "Before I answer that, what are utility trailers generally used for?",
+    ),
+    "Dump": (
+        "faq_email",
+        "Before I answer that, do you offer financing for trailers?",
+    ),
+}
+
 
 _VAGUE_ANSWERS = {
     "haul_item": "A bit of everything—tools, machines, and whatever else comes up.",
@@ -99,9 +110,16 @@ def test_live_vague_answers_for_every_category():
 
         completed = False
         awaiting_history = []
+        interruption = _INTERRUPTION_SCENARIOS.get(category)
+        interruption_sent = False
+        interruption_verified = False
+        interrupted_slot = None
         for turn in range(1, 10):
             response = _send(session_id, user_text)
             state = service._get_session(session_id)
+            response_tool_events = (
+                (response.thinking_context or {}).get("tool_events") or []
+            )
             awaiting_history.append(state.get("awaiting_slot"))
             print(json.dumps({
                 "category": category,
@@ -114,12 +132,30 @@ def test_live_vague_answers_for_every_category():
                 "slots_collected": state.get("slots_collected") or {},
                 "slots_skipped": state.get("slots_skipped") or [],
                 "metadata_filters": state.get("metadata_filters_collected") or {},
-                "tool_events": state.get("tool_events") or [],
+                "tool_events": response_tool_events,
             }, ensure_ascii=False, default=str))
+
+            if interruption_sent and not interruption_verified:
+                kind = interruption[0]
+                current_slot = str(state.get("awaiting_slot") or "").strip() or None
+                assert current_slot == interrupted_slot
+                if kind == "faq_email":
+                    assert any(
+                        event.get("tool") == "send_non_sales_faq_email"
+                        for event in response_tool_events
+                        if isinstance(event, dict)
+                    )
+                interruption_verified = True
+                print(json.dumps({
+                    "scenario": kind,
+                    "category": category,
+                    "active_slot_preserved": current_slot,
+                    "assistant": response.assistant_text,
+                }, ensure_ascii=False, default=str))
 
             if state.get("last_listings") or any(
                 event.get("tool") == "pinecone_search"
-                for event in (state.get("tool_events") or [])
+                for event in response_tool_events
                 if isinstance(event, dict)
             ):
                 completed = True
@@ -129,6 +165,11 @@ def test_live_vague_answers_for_every_category():
             if not slot:
                 completed = True
                 break
+            if interruption and not interruption_sent:
+                interrupted_slot = slot
+                user_text = interruption[1]
+                interruption_sent = True
+                continue
             user_text = _answer_for(slot, response.assistant_text)
 
         summaries.append({
@@ -143,12 +184,19 @@ def test_live_vague_answers_for_every_category():
                     service._get_session(session_id).get("metadata_filters_collected") or {}
                 ),
                 "awaiting_history": awaiting_history,
+                "interruption": interruption[0] if interruption else None,
+                "interruption_verified": interruption_verified,
             },
         })
 
     print("VAGUE_QNA_SUMMARY=" + json.dumps(summaries, ensure_ascii=False, default=str))
     assert [item["category"] for item in summaries] == list(_TEST_CATEGORIES)
     assert all(item["completed"] for item in summaries)
+    assert all(
+        item["final_state"]["interruption_verified"]
+        for item in summaries
+        if item["final_state"]["interruption"]
+    )
 
     by_category = {item["category"]: item["final_state"] for item in summaries}
 

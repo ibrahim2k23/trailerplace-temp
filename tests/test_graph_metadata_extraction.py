@@ -1616,6 +1616,109 @@ def test_qna_email_action_uses_llm_wording_and_resumes_active_question(monkeypat
     )
 
 
+def test_one_time_automatic_search_per_category_cycle(monkeypatch):
+    _mock_field_updates(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_category_transition",
+        lambda **kwargs: graph.CategoryTransitionDecision(
+            final_category="Dump",
+            approve_category_change=False,
+            explicit_category_switch=False,
+            confidence="high",
+            reason="Informational Utility question, not a category switch.",
+        ),
+    )
+
+    informational = _state("What is the use case of Utility trailers?", category="Utility")
+    informational.update(
+        {
+            "trailer_category": "Dump",
+            "slots_collected": {
+                "haul_material": "debris",
+                "haul_weight_lbs": "5000 lbs",
+            },
+            "has_shown_search_results": True,
+            "already_shown_listing_urls": ["https://example.test/first"],
+        }
+    )
+    informational["mind_decision"].update(
+        {
+            "action": "ask_trailer_category",
+            "assistant_text": "Utility trailers are versatile general-hauling trailers.",
+        }
+    )
+    info_out = graph._apply_mind_node(informational)
+    assert info_out["mind_decision"]["action"] == "respond"
+    assert info_out["assistant_text"] == "Utility trailers are versatile general-hauling trailers."
+
+    show_more = _state("show more results", category="Dump")
+    show_more.update(
+        {
+            "slots_collected": {
+                "haul_material": "debris",
+                "haul_weight_lbs": "5000 lbs",
+            },
+            "has_shown_search_results": True,
+            "already_shown_listing_urls": ["https://example.test/first"],
+        }
+    )
+    show_more["mind_decision"]["action"] = "pinecone_search"
+    more_out = graph._apply_mind_node(show_more)
+    assert more_out["mind_decision"]["action"] == "pinecone_search"
+    assert more_out["already_shown_listing_urls"] == ["https://example.test/first"]
+
+    final_answer = _state("5000 lbs", category="Dump")
+    final_answer.update(
+        {
+            "slots_collected": {"haul_material": "debris"},
+            "awaiting_slot": "haul_weight_lbs",
+            "has_shown_search_results": False,
+        }
+    )
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="5000 lbs",
+            confidence="high",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=True,
+            active_slot_value="5000 lbs",
+            confidence="high",
+        ),
+    )
+    first_results_out = graph._apply_mind_node(final_answer)
+    assert first_results_out["mind_decision"]["action"] == "pinecone_search"
+
+
+def test_initial_turn_completion_searches_despite_substantive_mind_response(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"trailer_length_ft": "20 ft"},
+        metadata_filters_update={"length_ft": "20 ft"},
+    )
+    state = _state("I am looking for a 20ft livestock trailer", category="Livestock")
+    state["mind_decision"].update(
+        {
+            "action": "respond",
+            "assistant_text": "What is your preferred payload capacity?",
+        }
+    )
+
+    out = graph._apply_mind_node(state)
+
+    assert out["trailer_category"] == "Livestock"
+    assert out["slots_collected"]["trailer_length_ft"] == "20 ft"
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
 def test_generic_haul_use_maps_to_utility_haul_item(monkeypatch):
     _mock_field_updates(monkeypatch)
     state = _state("a utility trailer", category=None)
@@ -2803,6 +2906,41 @@ def test_retry_fallback_preserves_direct_counterquestion_answer(monkeypatch):
         "Available hitch configurations include Bumper Pull and Gooseneck. "
         "What's the rough total weight of the load?"
     )
+
+
+def test_retry_repair_preserves_faq_email_action(monkeypatch):
+    class _ValidRepair:
+        def invoke(self, _messages):
+            return graph.QuestionTurnDecision(
+                reply_to_user=(
+                    "Yes, financing is available. "
+                    "What material will you be hauling?"
+                ),
+                rephrased_question="What material will you be hauling?",
+                retry_slot="haul_material",
+            )
+
+    monkeypatch.setattr(graph, "_question_turn_adjudicator_llm", lambda: _ValidRepair())
+    result = graph._repair_question_retry(
+        state={"messages": []},
+        decision=graph.QuestionTurnDecision(
+            email_action="send_non_sales_faq_email",
+            faq_category="financing",
+            faq_summary="Customer asked about financing.",
+            reply_to_user=(
+                "Yes, financing is available. "
+                "What material will you be hauling?"
+            ),
+        ),
+        active_slot="haul_material",
+        active_question="What material will you be hauling?",
+        latest_message="Do you offer financing?",
+    )
+
+    assert result.email_action == "send_non_sales_faq_email"
+    assert result.faq_category == "financing"
+    assert result.faq_summary == "Customer asked about financing."
+    assert result.retry_slot == "haul_material"
 
 
 def test_retry_validation_accepts_semantically_matching_different_wording():

@@ -239,9 +239,13 @@ SEARCH_RULES = """
 - You may ask a brief interest-focused follow-up about the shown trailers.
 - Do NOT ask for contact details at this stage.
 - "Show me more options" → `action=pinecone_search` with same filters (no new question).
+- Pure informational questions → answer only with `action=respond`; do not ask category or
+  qualification questions and do not search.
 
 ### Updating filters after results
-- Dimension/hitch/color/budget/payload updates → put category qualification fields in `slots_collected_update`, search-only fields in `metadata_filters_update`, then `action=pinecone_search`.
+- Dimension/hitch/color/budget/payload updates → store them in the appropriate update fields.
+- Search again only when the user also asks to refresh, update, show, or search the results.
+- A filter update by itself uses `action=respond`.
 
 ### Field mapping
 | User says | Maps to |

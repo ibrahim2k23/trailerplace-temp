@@ -3135,7 +3135,9 @@ def _repair_question_retry(
                         "Repair this unanswered qualification response. Answer the customer's counter-question "
                         "with a statement, then naturally rephrase the exact active qualification question. "
                         "Do not ask about the counter-question topic. The only question in reply_to_user must be "
-                        "rephrased_question, exactly once at the end. Set retry_slot exactly to active_slot."
+                        "rephrased_question, exactly once at the end. Set retry_slot exactly to active_slot. "
+                        "Repair wording fields only. Never change email actions, FAQ/escalation fields, "
+                        "slot decisions, extracted values, or any other adjudication semantics."
                     )
                 ),
                 HumanMessage(
@@ -3160,12 +3162,19 @@ def _repair_question_retry(
             _safe_json(_model_dump(candidate)),
         )
         if _valid_question_retry(candidate, active_slot):
+            repaired_decision = decision.model_copy(
+                update={
+                    "reply_to_user": candidate.reply_to_user,
+                    "rephrased_question": candidate.rephrased_question,
+                    "retry_slot": active_slot,
+                }
+            )
             logger.info(
                 "question_retry_source | source=repair_llm | slot=%r | output=%s",
                 active_slot,
-                _safe_json(_model_dump(candidate)),
+                _safe_json(_model_dump(repaired_decision)),
             )
-            return candidate
+            return repaired_decision
         logger.warning(
             "question_retry_validation_failed | source=repair_llm | slot=%r | errors=%s | output=%s",
             active_slot,
@@ -6522,21 +6531,55 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         or make_only_complete
         or generic_no_category_complete
     )
+    qualification_completed_this_turn = False
+    if category and required_complete:
+        if category_before != category:
+            qualification_completed_this_turn = True
+        else:
+            prior_missing, prior_invalid, _ = _required_slot_state(
+                category,
+                slots_before,
+                slots_skipped=slots_skipped_before,
+                required_slots=required_slots_override,
+                questions_override=dynamic_questions,
+            )
+            qualification_completed_this_turn = bool(prior_missing or prior_invalid)
     continue_search_after_email = bool(
         active_qna_email_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}
         and repeated_unanswered_escalation
         and required_complete
         and category
+        and not bool(state.get("has_shown_search_results"))
+    )
+    has_shown_results = bool(state.get("has_shown_search_results"))
+    explicit_search = bool(
+        action == "pinecone_search"
+        or active_qna_search_now
+    )
+    auto_search_first_results = bool(
+        required_complete
+        and not has_shown_results
+        and (
+            active_question_was_resolved
+            or qualification_completed_this_turn
+            or not original_mind_text
+        )
     )
     preserve_mind_response = bool(
-        state.get("has_shown_search_results")
-        and original_mind_action == "respond"
+        has_shown_results
         and original_mind_text
-        and action == "respond"
-        and not active_question_was_resolved
+        and original_mind_action != "pinecone_search"
+        and action not in {
+            "send_interested_listing_email",
+            "send_non_sales_faq_email",
+            "send_escalation_alert_email",
+        }
         and not active_qna_search_now
     )
     if preserve_mind_response:
+        action = "respond"
+        decision["action"] = action
+        decision["assistant_text"] = original_mind_text
         logger.info(
             "mind_response_preserved | action=%r | category=%r | required_complete=%s | active_question_resolved=%s",
             original_mind_action,
@@ -6544,18 +6587,33 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             required_complete,
             active_question_was_resolved,
         )
-    if required_complete and not preserve_mind_response and action not in {
+    if auto_search_first_results and not preserve_mind_response and action not in {
         "send_interested_listing_email",
         "send_non_sales_faq_email",
         "send_escalation_alert_email",
     }:
+        logger.info(
+            "auto_search_first_results | category=%r | active_question_resolved=%s | qualification_completed_this_turn=%s",
+            category,
+            active_question_was_resolved,
+            qualification_completed_this_turn,
+        )
         if action != "pinecone_search":
-            logger.info(
-                "action_corrected_to_search | previous_action=%s | category=%r",
-                action,
-                category,
-            )
+            decision["action"] = "pinecone_search"
         action = "pinecone_search"
+    elif has_shown_results and explicit_search:
+        logger.info("explicit_post_results_search | category=%r", category)
+    elif has_shown_results and required_complete and action not in {
+        "pinecone_search",
+        "send_interested_listing_email",
+        "send_non_sales_faq_email",
+        "send_escalation_alert_email",
+    }:
+        logger.info(
+            "post_results_auto_search_suppressed | action=%r | category=%r",
+            action,
+            category,
+        )
     should_ask = (
         not preserve_mind_response
         and not active_qna_search_now
@@ -6600,7 +6658,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             category,
             required_complete,
         )
-        if required_complete and category:
+        if auto_search_first_results and category:
             action = "pinecone_search"
         else:
             action = "respond"
