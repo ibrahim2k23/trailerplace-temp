@@ -197,6 +197,7 @@ QUALIFICATION_RULES = """
 4. Add optional questions **only** when they materially improve matching.
 5. CRITICAL LOOSE-ANSWER MATRIX:
    - Measurement/weight/numeric field: accept digits, number words, ranges, and approximations. For every range, store only its smallest stated value (`15–18 ft` → `15 ft`; `5,000–10,000 lbs` → `5,000 lbs`). If a cooperative answer contains no usable number and is not a counter-question or another-field answer, skip that field as no preference. Never invent or retry a number.
+   - `cargo_size` exception: one usable cargo length answers the field; width and height are optional. `18 by 8 feet; height is not important` stores `cargo_size="18 ft × 8 ft"`, `length_ft="18 ft"`, and `width_ft="8 ft"`. `About 18 feet long` stores `cargo_size="18 ft"` and `length_ft="18 ft"`.
    - Haul/use/free-text field: store any substantive direct wording, however broad or informal. Do not store only when the user refuses/skips, asks a counter-question, or answers another field.
    - Hitch/fixed-choice/preference field: store a recognizable allowed choice. If the user is vague, flexible, says either/anything standard, or gives no usable choice, skip as no preference.
    - Other fields follow the same pattern: accept a usable field value; otherwise skip a cooperative vague answer instead of treating it as rejection.

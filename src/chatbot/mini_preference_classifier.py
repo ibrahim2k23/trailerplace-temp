@@ -82,6 +82,8 @@ def classify_no_preference(
                         "- A counter-question or an answer clearly targeting another field is not no preference.\n"
                         "- A numeric range is a usable answer, not no preference; downstream normalization chooses "
                         "the smallest stated value.\n\n"
+                        "- For cargo_size, one usable length is a complete answer. Width and height are optional; "
+                        "never classify length-only or length-plus-width answers as no preference.\n\n"
                         "CATEGORY EXAMPLES: 'category doesn't matter' and 'any <make> trailer' mean no category "
                         "preference. A retained make or brand name is not a category choice; preserve it separately.\n\n"
                         "1. Use only active_question and user_answer. Do not infer from broader conversation.\n"

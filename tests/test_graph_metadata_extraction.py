@@ -2536,6 +2536,50 @@ def test_bare_length_answer_is_accepted_for_active_length_question(monkeypatch):
     assert out["metadata_filters_collected"]["length_ft"] == "12 ft"
 
 
+def test_cargo_size_current_length_overrides_reconciler_and_searches(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"cargo_size": "18 ft"},
+        metadata_filters_update={"length_ft": "18 ft", "width_ft": "8 ft"},
+    )
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=False,
+            reply_to_user="What's the rough cargo size?",
+            rephrased_question="What dimensions do you need?",
+            retry_slot="cargo_size",
+            confidence="low",
+        ),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=False,
+            reply_to_user="What's the rough cargo size?",
+            rephrased_question="What dimensions do you need?",
+            retry_slot="cargo_size",
+            confidence="low",
+        ),
+    )
+    state = _state(
+        "About 18 by 8 feet; height is not particularly important.",
+        category="Enclosed",
+    )
+    state["slots_collected"] = {"use_case": "general cargo"}
+    state["awaiting_slot"] = "cargo_size"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["cargo_size"] == "18 ft × 8 ft"
+    assert out["metadata_filters_collected"]["length_ft"] == "18 ft"
+    assert out["metadata_filters_collected"]["width_ft"] == "8 ft"
+    assert out["awaiting_slot"] is None
+    assert out["mind_decision"]["action"] == "pinecone_search"
+
+
 def test_mixed_active_answer_and_explicit_hitch_does_not_invent_weight(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     state = _state("a car. The trailer should be bumper pull", category="Equipment")

@@ -2808,6 +2808,10 @@ def _reconcile_active_question_turn(
                     "updates only when explicitly supported by the latest message.\n"
                     "6. Compound dimensions must be separated in metadata updates: '16 by 7 feet' means "
                     "length_ft='16 ft' and width_ft='7 ft'; never copy the whole phrase into both fields.\n"
+                    "6a. For active cargo_size, one usable cargo length fully answers the slot; width and height "
+                    "are optional. 'About 18 feet long' means active_slot_value='18 ft', length_ft='18 ft'. "
+                    "'18 by 8 feet; height is not important' means active_slot_value='18 ft × 8 ft', "
+                    "length_ft='18 ft', width_ft='8 ft'. Never repeat cargo_size for missing width or height.\n"
                     "7. A make requires an explicitly named manufacturer. Generic 'cargo' never means Cargo Craft.\n"
                     "8. search_now_requested and skip_remaining_questions are semantic intent decisions. Set them "
                     "only when the user's message actually expresses those intents.\n"
@@ -2967,6 +2971,9 @@ def _adjudicate_active_question_turn(
                     "- active_slot_value must be a scalar string, never an object or array. "
                     "For composite dimensions use a string such as '20 ft × 8 ft × 7 ft' and also put "
                     "individual dimensions in metadata_filters_update.\n"
+                    "- For active cargo_size, one usable length fully answers the question. Width and height are "
+                    "optional. '18 by 8 feet; height is not important' returns active_slot_value='18 ft × 8 ft', "
+                    "length_ft='18 ft', width_ft='8 ft'; 'about 18 feet long' returns active_slot_value='18 ft'.\n"
                     "- For multiple items or amenities, use one comma-separated string. "
                     "For yes/no fields, use the strings 'yes' or 'no', not JSON booleans.\n"
                     "- no_preference_for_active_question=true when the user says no preference for the active slot only — this does NOT trigger a search.\n"
@@ -3486,6 +3493,9 @@ def _extract_field_updates(
         "Return no numeric update when no usable number exists.\n"
         "- Compound dimensions must be separated: '16 by 7 feet' means length_ft='16 ft' and width_ft='7 ft'. "
         "Never copy the complete compound phrase into both fields.\n"
+        "- For active cargo_size, one usable length fully answers the field; width and height are optional. "
+        "'18 by 8 feet; height is not important' stores cargo_size='18 ft × 8 ft', length_ft='18 ft', "
+        "width_ft='8 ft'. 'About 18 feet long' stores cargo_size='18 ft', length_ft='18 ft'.\n"
         "- For Roll Off bin_size, map the chosen numeric value directly into length_ft for Pinecone: "
         "'15 yd' becomes length_ft='15 ft', not 45 ft. For ranges, use the smallest value.\n"
         "- An already resolved category is stable during active Q&A. Cargo wording is not a category switch.\n"
@@ -4418,6 +4428,57 @@ def _validate_slot_value(slot: str, value: Any) -> tuple[bool, str]:
     if is_length_slot and re.search(r"\b(lb|lbs|pound|pounds|kg|kilogram|ton|tons)\b", lower):
         return False, "weight_unit_in_length_slot"
     return True, ""
+
+
+def _apply_cargo_size_extraction_safeguard(
+    *,
+    decision: QuestionTurnDecision,
+    active_slot: str,
+    extracted_metadata: dict[str, Any],
+    no_preference_decision: PreferenceNullDecision,
+) -> QuestionTurnDecision:
+    """Accept current-turn cargo length when semantic reconciliation misses it."""
+    preference_data = _model_dump(no_preference_decision)
+    if (
+        active_slot != "cargo_size"
+        or decision.counter_question_topic != "none"
+        or decision.email_action != "none"
+        or decision.skip_remaining_questions
+        or (
+            preference_data.get("has_no_preference")
+            and preference_data.get("confidence") in _CONFIDENT_PREFERENCE_NULL
+        )
+    ):
+        return decision
+
+    length = str(extracted_metadata.get("length_ft") or "").strip()
+    if not length or not _validate_slot_value("trailer_length_ft", length)[0]:
+        return decision
+    width = str(extracted_metadata.get("width_ft") or "").strip()
+    if width and not _validate_slot_value("trailer_width_ft", width)[0]:
+        width = ""
+
+    value = f"{length} × {width}" if width else length
+    metadata_updates = dict(decision.metadata_filters_update or {})
+    metadata_updates["length_ft"] = length
+    if width:
+        metadata_updates["width_ft"] = width
+    slot_updates = dict(decision.slots_collected_update or {})
+    slot_updates["cargo_size"] = value
+    return decision.model_copy(
+        update={
+            "answered_active_question": True,
+            "no_preference_for_active_question": False,
+            "active_slot_value": value,
+            "metadata_filters_update": metadata_updates,
+            "slots_collected_update": slot_updates,
+            "reply_to_user": "",
+            "rephrased_question": "",
+            "retry_slot": None,
+            "confidence": "high",
+            "reason": "current_turn_cargo_length_extraction_answered",
+        }
+    )
 
 
 def _required_slot_state(
@@ -6003,6 +6064,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         )
         question_turn.metadata_filters_update = dict(
             normalized_question_turn.get("metadata_filters_update") or {}
+        )
+        question_turn = _apply_cargo_size_extraction_safeguard(
+            decision=question_turn,
+            active_slot=str(active_qna_slot),
+            extracted_metadata=_supplemental_metadata,
+            no_preference_decision=active_no_preference,
         )
         if question_turn.counter_question_topic != "none":
             # A counter-question cannot answer or skip the active qualification slot.
