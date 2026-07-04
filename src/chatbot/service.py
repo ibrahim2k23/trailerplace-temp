@@ -20,6 +20,8 @@ from src.chatbot.graph import build_chatbot_graph
 from src.chatbot.email_reply import compose_email_tool_reply
 from src.chatbot.inventory_matcher import search_trailers
 from src.chatbot.inventory_matcher import should_attempt_chat_lookup
+from src.chatbot.inventory_matcher import is_potential_direct_inventory_lookup
+from src.chatbot.inventory_matcher import validated_direct_inventory_extraction
 from src.chatbot.make_resolver import resolve_make_from_text
 from src.chatbot.prompts import (
     TRAILERPLACE_ACTION_SECTION,
@@ -1677,21 +1679,31 @@ def _inventory_lookup_response(
     user_message: str,
 ) -> ChatResponse | None:
     has_shown_results = bool(session.get("has_shown_search_results"))
-    if not has_shown_results and _has_trailer_search_context(session):
+    direct_candidate = is_potential_direct_inventory_lookup(user_message)
+    validated_extraction = (
+        validated_direct_inventory_extraction(user_message)
+        if direct_candidate
+        else None
+    )
+    if direct_candidate and validated_extraction is None:
         return None
-    if session.get("awaiting_slot") or session.get("pending_questions"):
-        return None
-    if has_shown_results and _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
-        return None
-    if not should_attempt_chat_lookup(
-        user_message,
-        last_listings=session.get("last_listings") or [],
-    ):
-        return None
+    if not validated_extraction:
+        if not has_shown_results and _has_trailer_search_context(session):
+            return None
+        if session.get("awaiting_slot") or session.get("pending_questions"):
+            return None
+        if has_shown_results and _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
+            return None
+        if not should_attempt_chat_lookup(
+            user_message,
+            last_listings=session.get("last_listings") or [],
+        ):
+            return None
     try:
         result = search_trailers(
             user_message,
             last_listings=session.get("last_listings") or [],
+            extraction=validated_extraction,
             for_chat=True,
         )
     except Exception:

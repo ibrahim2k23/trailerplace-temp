@@ -2671,21 +2671,35 @@ def _reconcile_category_transition(
         return _category_transition_llm().invoke(
             [
                 SystemMessage(content=(
-                    "You verify a proposed trailer-category transition before any category state is changed. "
-                    "Return structured data only.\n\n"
-                    "Preserve persisted_category unless the latest user message explicitly asks to switch trailer "
-                    "types. During active Q&A, a category-like word may answer the active cargo/use question: "
-                    "'assorted equipment' is cargo and must not switch Utility, Flatbed, or Tilt to Equipment. "
-                    "Approve explicit language such as 'actually switch to Equipment', 'Equipment instead', or "
-                    "'I want a different trailer type: Equipment'. Incidental mentions, recommendations, comparisons, "
-                    "and cargo descriptions are not switches. On doubt, reject the change and return persisted_category.\n\n"
-                    "## TRAILER TYPES & SYNONYM MAPPING\n"
-                    "(Map spelling mistakes and synonyms to canonical categories)\n"
-                    f"{category_prompt_block()}\n\n"
-                    "## TRAILER BRANDS / MAKES\n"
-                    "(Use for informational answers only — do NOT infer category from make)\n"
-                    f"{make_prompt_block()}"
-                )),
+    "You verify a proposed trailer-category transition before any category state is changed. "
+    "Return structured data only.\n\n"
+
+    "## APPROVE the transition when the latest message:\n"
+    "- Explicitly names a different canonical category with shopping intent, even with soft phrasing:\n"
+    "  'I am also looking for a dump trailer', 'now I need a dump trailer', 'I want a dump trailer too',\n"
+    "  'actually I want Equipment', 'Equipment instead', 'let's do Dump', 'switch to Enclosed'.\n"
+    "- Uses additive or sequential language ('also', 'now', 'too', 'as well', 'next') with a new category name.\n"
+    "- Clearly abandons the current category: 'forget Livestock, I want Dump', 'never mind, show me flatbeds'.\n\n"
+
+    "## REJECT the transition when the latest message:\n"
+    "- Uses a category-like word as cargo/haul context, not as a trailer request:\n"
+    "  'haul assorted equipment' (cargo) while on Utility must NOT switch to Equipment.\n"
+    "- Mentions a category incidentally: comparisons, recommendations, informational questions.\n"
+    "- Is ambiguous with no clear shopping intent for the new category.\n"
+    "- On any genuine doubt, reject and return persisted_category.\n\n"
+
+    "## KEY DISTINCTION\n"
+    "Shopping intent for a new trailer type = APPROVE.\n"
+    "Category word used as cargo description or incidental mention = REJECT.\n"
+    "Soft or additive phrasing ('also', 'now', 'too') + canonical category name = APPROVE.\n\n"
+
+    "## TRAILER TYPES & SYNONYM MAPPING\n"
+    f"{category_prompt_block()}\n\n"
+
+    "## TRAILER BRANDS / MAKES\n"
+    "(Informational only — do NOT infer category from make)\n"
+    f"{make_prompt_block()}"
+)),
                 HumanMessage(content=f"Verify this category transition:\n{_safe_json(context)}"),
             ]
         )
@@ -2800,6 +2814,10 @@ def _reconcile_active_question_turn(
                     "9. Prefer the best-supported interpretation across the three proposals; confidence reflects "
                     "the evidence. Treat the no-preference classifier as advisory evidence, not an automatic override. "
                     "The result is authoritative.\n"
+                    "9a. A counter-question is unresolved, not no preference. When counter_question_topic is not "
+                    "'none', set answered_active_question=false and no_preference_for_active_question=false, do not "
+                    "supply or update the active slot, answer the counter-question, and re-ask the same active question. "
+                    "Counter-questions count toward the existing unanswered-attempt limit.\n"
                     "10. For every numeric range, choose and store only the smallest stated value. Examples: "
                     "'15 to 18 ft' becomes '15 ft'; '5,000-10,000 lbs' becomes '5000 lbs'.\n"
                     "11. 'Either A or B', 'either is fine', and equivalent wording mean no preference for a fixed-choice "
@@ -2976,6 +2994,10 @@ def _adjudicate_active_question_turn(
                     "- When search_now_requested=true: leave rephrased_question and reply_to_user empty.\n\n"
 
                     "## COUNTER-QUESTION HANDLING\n"
+                    "A counter-question never answers or skips the active slot and never means no preference. "
+                    "Set answered_active_question=false and no_preference_for_active_question=false, preserve the "
+                    "active slot, answer the counter-question, then repeat the active question. It counts as an "
+                    "unanswered attempt; after the existing two-attempt limit, answer it and let the app advance.\n"
                     "Classify counter_question_topic by the noun being asked about. 'Type' alone ≠ trailer category.\n"
                     "| User asks | counter_question_topic | reply_to_user content |\n"
                     "|---|---|---|\n"
@@ -2985,6 +3007,9 @@ def _adjudicate_active_question_turn(
                     "If the user asks what types/makes are available, list them directly — do not say 'I can help with that'.\n\n"
 
                     "## EMAIL ACTIONS (priority over active question)\n"
+                    "An email-triggering request interrupts but never answers or skips the active qualification "
+                    "question. Set answered_active_question=false and no_preference_for_active_question=false. "
+                    "Provide a natural reply and let the app preserve or advance the question flow.\n"
                     "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
                     "- send_escalation_alert_email: unsupported actions — call me, email me, quote, invoice, hold/reserve, schedule, paperwork, arrival timing.\n"
                     "- Never set send_interested_listing_email during active qualification.\n"
@@ -5970,6 +5995,23 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         question_turn.metadata_filters_update = dict(
             normalized_question_turn.get("metadata_filters_update") or {}
         )
+        if question_turn.counter_question_topic != "none":
+            # A counter-question cannot answer or skip the active qualification slot.
+            # Preserve explicit updates for unrelated fields.
+            question_turn.answered_active_question = False
+            question_turn.no_preference_for_active_question = False
+            question_turn.active_slot_value = None
+            question_turn.slots_collected_update.pop(str(active_qna_slot), None)
+            for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
+                question_turn.metadata_filters_update.pop(str(key), None)
+        if question_turn.email_action != "none":
+            # Email requests interrupt qualification; they do not resolve the active slot.
+            question_turn.answered_active_question = False
+            question_turn.no_preference_for_active_question = False
+            question_turn.active_slot_value = None
+            question_turn.slots_collected_update.pop(str(active_qna_slot), None)
+            for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
+                question_turn.metadata_filters_update.pop(str(key), None)
         if (
             not question_turn.answered_active_question
             and not question_turn.no_preference_for_active_question
@@ -6079,7 +6121,6 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             active_question_attempts.pop(active_qna_slot, None)
             awaiting_slot = None
             active_qna_unanswered = False
-            active_qna_email_action = "none"
 
         for key, value in _slot_updates_from_decision(
             {"slots_collected_update": question_turn.slots_collected_update},
@@ -6481,6 +6522,12 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         or make_only_complete
         or generic_no_category_complete
     )
+    continue_search_after_email = bool(
+        active_qna_email_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}
+        and repeated_unanswered_escalation
+        and required_complete
+        and category
+    )
     preserve_mind_response = bool(
         state.get("has_shown_search_results")
         and original_mind_action == "respond"
@@ -6637,6 +6684,7 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         "mind_decision": decision,
         "repeated_unanswered_question_escalation": repeated_unanswered_escalation,
         "skipped_unanswered_slot": skipped_unanswered_slot,
+        "continue_search_after_email": continue_search_after_email,
         "active_question_was_unanswered": active_question_was_unanswered,
         "active_question_was_resolved": active_question_was_resolved,
         "active_question_slot": active_qna_slot,
@@ -6870,11 +6918,18 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
     )
     events = list(state.get("tool_events") or [])
     events.append({"tool": "send_non_sales_faq_email", "result": result})
-    return {
+    email_state = {
         **state,
         "assistant_text": assistant_text,
         "tool_events": events,
     }
+    if state.get("continue_search_after_email"):
+        search_state = _pinecone_search_node(email_state)
+        search_state["assistant_text"] = (
+            f"{assistant_text}\n\n{search_state.get('assistant_text') or ''}".strip()
+        )
+        return search_state
+    return email_state
 
 
 def _escalation_email_node(state: ChatbotState) -> ChatbotState:
@@ -6920,11 +6975,18 @@ def _escalation_email_node(state: ChatbotState) -> ChatbotState:
         next_question=str(state.get("active_question_text") or _active_question_followup(state)),
         fallback=_append_active_question_if_present(state, _ESCALATION_SENT_REPLY),
     )
-    return {
+    email_state = {
         **state,
         "assistant_text": assistant_text,
         "tool_events": events,
     }
+    if state.get("continue_search_after_email"):
+        search_state = _pinecone_search_node(email_state)
+        search_state["assistant_text"] = (
+            f"{assistant_text}\n\n{search_state.get('assistant_text') or ''}".strip()
+        )
+        return search_state
+    return email_state
 
 
 @lru_cache(maxsize=1)

@@ -1563,6 +1563,59 @@ def test_office_trailer_clarification_can_trigger_faq_and_preserve_question(monk
     assert out["category_clarification_key"] == "office_trailer_use"
 
 
+def test_qna_email_action_uses_llm_wording_and_resumes_active_question(monkeypatch):
+    _use_fallback_extractor(monkeypatch)
+    email_decision = graph.QuestionTurnDecision(
+        answered_active_question=False,
+        no_preference_for_active_question=True,
+        email_action="send_non_sales_faq_email",
+        faq_category="financing",
+        reply_to_user="Our finance team can help with financing.",
+        confidence="high",
+    )
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: email_decision,
+    )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_active_question_turn",
+        lambda **kwargs: email_decision,
+    )
+    state = _state("I want to finance a trailer", category="Utility")
+    state.update(
+        {
+            "awaiting_slot": "haul_weight_lbs",
+            "slots_collected": {"haul_item": "furniture"},
+            "customer_email": "ibrahim@esided.ai",
+            "customer_full_name": "Ibrahim",
+        }
+    )
+
+    applied = graph._apply_mind_node(state)
+
+    assert applied["awaiting_slot"] == "haul_weight_lbs"
+    assert "haul_weight_lbs" not in applied["slots_skipped"]
+    monkeypatch.setattr(graph, "_persist_email_transcript_snapshot", lambda _state: None)
+    monkeypatch.setattr(
+        graph,
+        "send_non_sales_faq_email",
+        lambda **kwargs: {"status": "queued"},
+    )
+
+    def _compose(**kwargs):
+        assert kwargs["next_question"] == "What's the rough total weight of your load?"
+        return "Our finance team can help. About how heavy is everything you plan to haul?"
+
+    monkeypatch.setattr(graph, "compose_email_tool_reply", _compose)
+    completed = graph._faq_email_node(applied)
+
+    assert completed["assistant_text"] == (
+        "Our finance team can help. About how heavy is everything you plan to haul?"
+    )
+
+
 def test_generic_haul_use_maps_to_utility_haul_item(monkeypatch):
     _mock_field_updates(monkeypatch)
     state = _state("a utility trailer", category=None)
@@ -2399,8 +2452,10 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
         graph,
         "_adjudicate_active_question_turn",
         lambda **kwargs: graph.QuestionTurnDecision(
-            answered_active_question=False,
-            no_preference_for_active_question=False,
+            answered_active_question=True,
+            active_slot_value="financing",
+            no_preference_for_active_question=True,
+            counter_question_topic="other",
             reply_to_user=(
                 "We do offer financing options. To narrow down the right dump trailer, "
                 "What kind of material do you expect to haul?"
@@ -2426,8 +2481,10 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
         "What kind of material do you expect to haul?"
     )
     assert out["mind_decision"]["action"] == "respond"
+    assert "haul_material" not in out["slots_skipped"]
+    assert out["active_question_attempts"]["haul_material"] == 1
 
-    state["active_question_unanswered_count"] = 1
+    state["active_question_attempts"] = out["active_question_attempts"]
     out = graph._apply_mind_node(state)
 
     assert out["repeated_unanswered_question_escalation"] is True

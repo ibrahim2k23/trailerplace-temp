@@ -54,4 +54,5 @@ class ChatbotState(TypedDict, total=False):
     active_question_slot: Optional[str]
     repeated_unanswered_question_escalation: bool
     skipped_unanswered_slot: Optional[str]
+    continue_search_after_email: bool
     pending_initial_user_message: Optional[str]

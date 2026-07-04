@@ -124,6 +124,9 @@ class TrailerQueryExtraction(BaseModel):
     user_wants_availability: bool = False
     user_wants_details: bool = False
     requested_features: list[str] = Field(default_factory=list)
+    should_lookup: bool = False
+    lookup_confidence: Literal["low", "medium", "high"] = "low"
+    lookup_reason: str = ""
     search_intent: Literal[
         "make",
         "year_make",
@@ -486,6 +489,11 @@ def extract_trailer_query(user_query: str) -> TrailerQueryExtraction:
                         "Put non-structured requested equipment features in requested_features, such as sliding gates, "
                         "side ramps, rear doors, mesh sides, tack rooms, ramp gates, escape doors, or removable fenders. "
                         "Only include requested_features explicitly stated by the user."
+                        "\n\nAlso decide whether this message is a direct inventory lookup. Set should_lookup=true "
+                        "only when the user explicitly wants availability, price, or details and supplies either "
+                        "make + model or year + make. Make-only, model-only, stock-only, vague shopping, and ordinary "
+                        "filter/category updates are not direct lookups. Use medium/high confidence only when both "
+                        "the lookup intent and required identifiers are clear."
                     )
                 ),
                 HumanMessage(content=user_query),
@@ -1482,17 +1490,45 @@ def should_attempt_chat_lookup(
     return False
 
 
+def is_potential_direct_inventory_lookup(user_query: str) -> bool:
+    """Cheap prefilter used before invoking the inventory validation LLM."""
+    return _is_direct_inventory_lookup(_fallback_extraction(user_query))
+
+
+def validated_direct_inventory_extraction(
+    user_query: str,
+) -> TrailerQueryExtraction | None:
+    """Return one LLM-validated direct lookup extraction, failing closed."""
+    if not is_potential_direct_inventory_lookup(user_query):
+        return None
+    extraction = extract_trailer_query(user_query)
+    approved = bool(
+        extraction.should_lookup
+        and extraction.lookup_confidence in {"medium", "high"}
+        and _is_direct_inventory_lookup(extraction)
+    )
+    logger.info(
+        "inventory_lookup_validation | approved=%s | confidence=%s | reason=%r | identifiers=%s",
+        approved,
+        extraction.lookup_confidence,
+        extraction.lookup_reason,
+        _requested_identifiers(extraction),
+    )
+    return extraction if approved else None
+
+
 def search_trailers(
     user_query: str,
     *,
     last_listings: list[dict[str, Any]] | None = None,
+    extraction: TrailerQueryExtraction | None = None,
     for_chat: bool = False,
     limit: int = 5,
 ) -> dict[str, Any]:
     context_answer = answer_from_last_listings(user_query, last_listings)
     if context_answer:
         return context_answer
-    extraction = extract_trailer_query(user_query)
+    extraction = extraction or extract_trailer_query(user_query)
     match_result = match_inventory(user_query, extraction, limit=limit)
     reply = generate_inventory_response(user_query, extraction, match_result)
     public_match = _public_match_result(match_result)

@@ -1196,6 +1196,49 @@ def test_inventory_lookup_works_after_results_for_ordinal_reference(monkeypatch)
     assert response.assistant_text == "Yes, that trailer is listed at $1."
 
 
+def test_validated_inventory_lookup_overrides_post_results_qna(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001118"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session.update(
+        {
+            "initial_contact_request_asked": True,
+            "has_shown_search_results": True,
+            "trailer_category": "Dump",
+            "awaiting_slot": "haul_weight_lbs",
+            "pending_questions": [{"slot": "haul_weight_lbs"}],
+            "last_listings": [{"title": "Old Dump"}],
+        }
+    )
+    validated = object()
+    captured = {}
+    monkeypatch.setattr(service, "is_potential_direct_inventory_lookup", lambda _text: True)
+    monkeypatch.setattr(service, "validated_direct_inventory_extraction", lambda _text: validated)
+    monkeypatch.setattr(
+        service,
+        "search_trailers",
+        lambda *_args, **kwargs: captured.update(kwargs) or {
+            "reply": "I found matching Diamond C FMAX trailers.",
+            "entity_type": "MODEL_SEARCH",
+            "confidence": 1.0,
+            "top_matches": [{"title": "Diamond C FMAX"}],
+            "extraction": {"should_lookup": True},
+        },
+    )
+    monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
+
+    response = service._inventory_lookup_response(
+        session,
+        _req(session_id, "Is Diamond C FMAX available?"),
+        "Is Diamond C FMAX available?",
+    )
+
+    assert response is not None
+    assert captured["extraction"] is validated
+    assert session["awaiting_slot"] == "haul_weight_lbs"
+    assert session["pending_questions"] == [{"slot": "haul_weight_lbs"}]
+
+
 def test_inventory_results_send_silent_notification_with_completed_turn(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001127"
     service.reset_session(session_id)
