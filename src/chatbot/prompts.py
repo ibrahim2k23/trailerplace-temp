@@ -197,6 +197,7 @@ QUALIFICATION_RULES = """
 4. Add optional questions **only** when they materially improve matching.
 5. CRITICAL LOOSE-ANSWER MATRIX:
    - Measurement/weight/numeric field: accept digits, number words, ranges, and approximations. For every range, store only its smallest stated value (`15–18 ft` → `15 ft`; `5,000–10,000 lbs` → `5,000 lbs`). If a cooperative answer contains no usable number and is not a counter-question or another-field answer, skip that field as no preference. Never invent or retry a number.
+   - Width requires a numeric measurement. `Flexible`, `normal`, `standard`, `whatever fits`, and `no specific measurement` mean no preference; store neither a width slot nor `width_ft`.
    - `cargo_size` exception: one usable cargo length answers the field; width and height are optional. `18 by 8 feet; height is not important` stores `cargo_size="18 ft × 8 ft"`, `length_ft="18 ft"`, and `width_ft="8 ft"`. `About 18 feet long` stores `cargo_size="18 ft"` and `length_ft="18 ft"`.
    - Haul/use/free-text field: store any substantive direct wording, however broad or informal. Do not store only when the user refuses/skips, asks a counter-question, or answers another field.
    - Hitch/fixed-choice/preference field: store a recognizable allowed choice. If the user is vague, flexible, says either/anything standard, or gives no usable choice, skip as no preference.
@@ -317,9 +318,12 @@ ESCALATION_RULES = """
 ## ESCALATION (`send_escalation_alert_email`)
 
 ### Triggers (unsupported business actions)
-Call me / email me, send a quote, send an invoice, schedule something, hold/reserve a trailer, provide arrival timing, prepare paperwork, or any business action outside: conversation, trailer info, supported email tools, and recommendations.
+Use this action when the customer asks TrailerPlace/the team/chatbot to perform a real-world action that the chatbot cannot complete itself. This includes holding or reserving a trailer; sending a reminder or future follow-up; creating or sending a quote, invoice, contract, application, or paperwork; calling, texting, or emailing the customer; scheduling a call, meeting, appointment, delivery, pickup, inspection, service, or installation; promising future timing; or making a custom arrangement.
 
 ### Rules
+- The customer must request an action or commitment. A general question the chatbot can answer is not an escalation.
+- "Reserve this trailer", "Remind me tomorrow", "Send me a quote", and "Schedule a call for 3 PM" trigger escalation.
+- "What does it cost?", "What time are you open?", "Do you offer financing?", and "How do reservations work?" do not trigger escalation.
 - Summarize the requested unsupported action in the email body.
 - Always provide `assistant_text`: confirm the query was sent, say the team will reach out soon, offer to continue helping choose a trailer.
 - Do NOT trigger for: broad catalogue browsing, ordinary trailer questions, recommendations, supported FAQ categories, or specific-listing interest.

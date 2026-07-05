@@ -172,6 +172,14 @@ class ListingReferenceDecision(BaseModel):
     reason: str = ""
 
 
+class ListingReferenceIntentDecision(BaseModel):
+    has_explicit_listing_reference: bool = False
+    reference_kind: Literal["ordinal", "identifier", "demonstrative", "none"] = "none"
+    reference_intent: Literal["interest", "details", "none"] = "none"
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+
+
 def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -1214,14 +1222,18 @@ def _is_unsupported_business_action_turn(session: dict[str, Any], user_message: 
                         "Classify whether the latest user message should be routed to the trailer-planner graph "
                         "because it may require the Escalation Alert email tool. Return structured fields only.\n\n"
                         "Set should_route_graph=true when the customer asks TrailerPlace/the team to perform a "
-                        "business action the chatbot cannot complete directly, such as calling or emailing the "
-                        "customer, sending a quote/invoice/paperwork, scheduling something, holding/reserving a "
-                        "trailer, providing future-arrival timing, or making a custom arrangement.\n\n"
+                        "real-world action or commitment the chatbot cannot complete directly: hold/reserve a trailer; "
+                        "send a reminder or future follow-up; create/send a quote, invoice, contract, application, or "
+                        "paperwork; call/text/email the customer; schedule a call, meeting, appointment, delivery, "
+                        "pickup, inspection, service, or installation; promise future timing; or make a custom arrangement.\n\n"
                         "Set should_route_graph=false for broad catalogue browsing, ordinary trailer information, "
                         "recommendations/search requests, supported FAQ topics like financing/trade-in/service/"
                         "store info, simple smalltalk, and direct questions the assistant can answer without a tool.\n\n"
                         "Examples that must be false: 'I want one to haul raw materials for construction', "
                         "'what trailer should I use for heavy items', and other normal trailer recommendation turns.\n\n"
+                        "Action requests are true: 'Reserve this trailer', 'Remind me tomorrow', 'Send me a quote', "
+                        "and 'Schedule a call for 3 PM'. Information questions are false: 'What does it cost?', "
+                        "'What time are you open?', 'Do you offer financing?', and 'How do reservations work?'.\n\n"
                         "Do not decide which tool to call. Only decide whether this turn must be routed into the graph."
                     )
                 ),
@@ -1691,14 +1703,6 @@ def _resolve_listing_reference(
     listings = list(session.get("last_listings") or [])
     if not listings:
         return ListingReferenceDecision(reason="no_current_listing_set")
-    latest_assistant = next(
-        (
-            str(item.get("content") or "")
-            for item in reversed(session.get("messages") or [])
-            if item.get("role") == "assistant"
-        ),
-        "",
-    )
     context_listings = [
         {
             "index": index,
@@ -1710,6 +1714,48 @@ def _resolve_listing_reference(
         }
         for index, item in enumerate(listings, 1)
     ]
+    try:
+        gate = _listing_reference_intent_llm().invoke(
+            [
+                SystemMessage(content=(
+                    "Decide whether LATEST_MESSAGE explicitly refers to one item in CURRENT_IDENTIFIERS. "
+                    "Use only these inputs; do not infer a reference from prior conversation. Approve only: "
+                    "(1) an ordinal/number such as first, #2, second, or last; "
+                    "(2) a displayed title, model, or stock number; or "
+                    "(3) a demonstrative such as that one or the gray one. "
+                    "Generic quote, financing, reservation, delivery, category-shopping, and trailer-use "
+                    "questions are not listing references, even when they mention a trailer category. "
+                    "Set reference_intent=interest only when the latest message expresses interest in a "
+                    "specific referenced item; use details for a question about one. Return structured output."
+                )),
+                HumanMessage(content=json.dumps({
+                    "latest_message": user_message,
+                    "current_identifiers": context_listings,
+                }, default=str)),
+            ]
+        )
+    except Exception:
+        logger.exception("listing_reference_intent_gate_failed")
+        return ListingReferenceDecision(reason="listing_reference_intent_gate_failed")
+
+    logger.info(
+        "listing_reference_intent_gate | explicit=%s | kind=%s | intent=%s | confidence=%s | reason=%r",
+        gate.has_explicit_listing_reference,
+        gate.reference_kind,
+        gate.reference_intent,
+        gate.confidence,
+        gate.reason,
+    )
+    if (
+        not gate.has_explicit_listing_reference
+        or gate.reference_kind == "none"
+        or gate.reference_intent == "none"
+        or gate.confidence not in {"medium", "high"}
+    ):
+        return ListingReferenceDecision(
+            reason=gate.reason or "no_explicit_current_turn_listing_reference"
+        )
+
     try:
         proposed = _listing_reference_llm().invoke(
             [
@@ -1731,9 +1777,7 @@ def _resolve_listing_reference(
                 HumanMessage(content=json.dumps({
                     "latest_message": user_message,
                     "current_listings": context_listings,
-                    "latest_assistant_response": latest_assistant,
-                    "recent_messages": (session.get("messages") or [])[-6:],
-                    "previous_trailer_category": session.get("trailer_category"),
+                    "intent_gate": _model_dump(gate),
                 }, default=str)),
             ]
         )
@@ -1779,6 +1823,14 @@ def _resolve_listing_reference(
     selected = listings[index - 1]
     title = str(selected.get("title") or "")
     url = str(selected.get("url") or "")
+    if str(proposed.selected_title or "") != title or str(proposed.selected_url or "") != url:
+        logger.warning(
+            "listing_reference_validation_failed | index=%s | proposed_title=%r | proposed_url=%r",
+            index,
+            proposed.selected_title,
+            proposed.selected_url,
+        )
+        return ListingReferenceDecision(reason="selected_listing_identity_mismatch")
     resolved = proposed.model_copy(update={
         "selected_title": title,
         "selected_url": url,
@@ -1801,6 +1853,7 @@ def _listing_reference_response(
 ) -> ChatResponse | None:
     if not decision.is_listing_selection:
         return None
+    tool_events: list[dict[str, Any]] = []
     confident = (
         decision.confidence in {"medium", "high"}
         and decision.selected_index is not None
@@ -1839,6 +1892,10 @@ def _listing_reference_response(
                 phone=session.get("customer_phone") or "",
                 item_name=title,
             )
+            tool_events.append({
+                "tool": "send_interested_listing_email",
+                "result": result,
+            })
             logger.info(
                 "listing_reference_field_extraction_bypassed | index=%s | title=%r | email_result=%s",
                 decision.selected_index,
@@ -1864,7 +1921,10 @@ def _listing_reference_response(
         contact_status=session.get("contact_status"),
         main_prior_messages=session.get("messages") or [],
         listings=[],
-        thinking_context={"listing_reference": _model_dump(decision)},
+        thinking_context={
+            "listing_reference": _model_dump(decision),
+            "tool_events": tool_events,
+        },
     )
 
 
@@ -1967,6 +2027,14 @@ def _listing_reference_llm():
     model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
     return ChatOpenAI(model=model, temperature=0).with_structured_output(
         ListingReferenceDecision,
+        method="function_calling",
+    )
+
+
+def _listing_reference_intent_llm():
+    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
+        ListingReferenceIntentDecision,
         method="function_calling",
     )
 

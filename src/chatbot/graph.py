@@ -2419,7 +2419,7 @@ def _adjudicate_office_trailer_clarification_turn(
             },
             "tool_rules": {
                 "send_non_sales_faq_email": "Use for contact/human help, financing, trade-in, service/parts, or store/location info.",
-                "send_escalation_alert_email": "Use when the customer asks TrailerPlace/the team to perform an unsupported business action such as calling them, emailing them, sending a quote, invoice, paperwork, scheduling, holds, reservations, or future-arrival timing.",
+                "send_escalation_alert_email": "Use when the customer asks TrailerPlace/the team to perform an unsupported real-world action: hold/reserve; send a reminder/follow-up; create/send a quote, invoice, contract, application, or paperwork; call/text/email them; schedule a call, meeting, appointment, delivery, pickup, service, or installation; or make a future timing commitment. General information questions do not qualify.",
             },
         }
         try:
@@ -2800,6 +2800,9 @@ def _reconcile_active_question_turn(
                     "3. Numeric slots require a digit or an unambiguous number written in words. Accept ranges and "
                     "approximations. If there is no usable number, set no_preference_for_active_question=true and "
                     "do not invent or retry a value.\n"
+                    "3a. Width specifically requires a numeric measurement. 'Flexible', 'normal', 'standard', "
+                    "'whatever fits', and 'no specific measurement' mean no preference: return no active value and "
+                    "no width_ft update.\n"
                     "4. For choice/preference slots, 'either', 'anything standard', 'whatever works', and flexible "
                     "wording mean no preference.\n"
                     "4a. For every other constrained field, accept a recognizable field value; otherwise a "
@@ -2827,7 +2830,12 @@ def _reconcile_active_question_turn(
                     "11. 'Either A or B', 'either is fine', and equivalent wording mean no preference for a fixed-choice "
                     "field; store neither option.\n"
                     "12. Roll Off bin_size maps its numeric value directly to trailer length_ft for Pinecone. "
-                    "'15 yd' means length_ft='15 ft', never 45 ft; use the smallest number in a range."
+                    "'15 yd' means length_ft='15 ft', never 45 ft; use the smallest number in a range.\n"
+                    "13. Email actions outrank active-slot resolution. Use send_escalation_alert_email when the user "
+                    "asks the business to perform an unsupported real-world action: for example reserve/holding a trailer or an item, send a reminder or "
+                    "future follow-up, create/send a quote/invoice/paperwork, call/text/email them, schedule a call/"
+                    "meeting/appointment/delivery/pickup/service, or make a future timing commitment. Such a request "
+                    "does not answer or skip the active slot. Do not escalate ordinary informational questions."
                 )),
                 HumanMessage(content=f"Reconcile this active turn:\n{_safe_json(context)}"),
             ]
@@ -2954,6 +2962,8 @@ def _adjudicate_active_question_turn(
                     "or an unambiguous number written in words. Accept ranges and approximations; for every range "
                     "store only its smallest stated value ('15 to 18 ft' -> '15 ft'). If no usable "
                     "number is present, set no_preference_for_active_question=true; never retry or invent a value.\n"
+                    "- For width, 'flexible', 'normal', 'standard', 'whatever fits', and 'no specific measurement' "
+                    "mean no preference. Return no active-slot value and no width_ft update.\n"
                     "- Roll Off bin_size is a search proxy for trailer length: copy its chosen numeric value directly "
                     "to length_ft ('15 yd' -> length_ft='15 ft'), without converting yards to feet.\n"
                     "- Free-text haul/use fields accept any substantive direct answer, including 'random things', "
@@ -3018,7 +3028,12 @@ def _adjudicate_active_question_turn(
                     "question. Set answered_active_question=false and no_preference_for_active_question=false. "
                     "Provide a natural reply and let the app preserve or advance the question flow.\n"
                     "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
-                    "- send_escalation_alert_email: unsupported actions — call me, email me, quote, invoice, hold/reserve, schedule, paperwork, arrival timing.\n"
+                    "- send_escalation_alert_email: requests that the business perform an unsupported real-world action "
+                    "— hold/reserve; send a reminder/follow-up; create/send a quote, invoice, contract, application, "
+                    "or paperwork; call/text/email the customer; schedule a call, meeting, appointment, delivery, "
+                    "pickup, service, or installation; or make a future timing commitment.\n"
+                    "- Escalate action requests, not ordinary questions. 'Remind me tomorrow' and 'schedule a call at "
+                    "3 PM' escalate; 'what time are you open?' and 'how do reservations work?' do not.\n"
                     "- Never set send_interested_listing_email during active qualification.\n"
                     "- Do not set any email action for broad catalogue browsing.\n"
                     "Examples: 'How do I contact you?' → send_non_sales_faq_email, faq_category=contact_human. "
@@ -3491,6 +3506,8 @@ def _extract_field_updates(
         "- Numeric fields require a digit or an unambiguous number written in words. Accept ranges and "
         "approximations; for every range store only its smallest stated value ('5000-10000 lbs' -> '5000 lbs'). "
         "Return no numeric update when no usable number exists.\n"
+        "- Width requires a numeric measurement. Never extract 'flexible', 'normal', 'standard', 'whatever fits', "
+        "or 'no specific measurement' as width_ft.\n"
         "- Compound dimensions must be separated: '16 by 7 feet' means length_ft='16 ft' and width_ft='7 ft'. "
         "Never copy the complete compound phrase into both fields.\n"
         "- For active cargo_size, one usable length fully answers the field; width and height are optional. "
@@ -4481,6 +4498,85 @@ def _apply_cargo_size_extraction_safeguard(
     )
 
 
+def _apply_active_slot_extraction_safeguard(
+    *,
+    decision: QuestionTurnDecision,
+    active_slot: str,
+    extracted_slots: dict[str, Any],
+    extracted_metadata: dict[str, Any],
+    no_preference_decision: PreferenceNullDecision,
+) -> QuestionTurnDecision:
+    """Resolve an active slot from valid current-turn extraction evidence."""
+    preference_data = _model_dump(no_preference_decision)
+    if (
+        decision.answered_active_question
+        or decision.no_preference_for_active_question
+        or decision.counter_question_topic != "none"
+        or decision.email_action != "none"
+        or decision.search_now_requested
+        or decision.skip_remaining_questions
+        or (
+            preference_data.get("has_no_preference")
+            and preference_data.get("confidence") in _CONFIDENT_PREFERENCE_NULL
+        )
+    ):
+        return decision
+
+    value = extracted_slots.get(active_slot)
+    if value in (None, "") or not _validate_slot_value(active_slot, value)[0]:
+        return decision
+
+    slot_updates = dict(decision.slots_collected_update or {})
+    slot_updates[active_slot] = value
+    metadata_updates = dict(decision.metadata_filters_update or {})
+    for key in _SLOT_METADATA_FILTER_MAP.get(active_slot, ()):
+        extracted_value = extracted_metadata.get(key)
+        if extracted_value not in (None, ""):
+            metadata_updates[key] = extracted_value
+    logger.info(
+        "active_slot_extraction_recovered | slot=%r | value=%r",
+        active_slot,
+        value,
+    )
+    return decision.model_copy(
+        update={
+            "answered_active_question": True,
+            "no_preference_for_active_question": False,
+            "active_slot_value": value,
+            "slots_collected_update": slot_updates,
+            "metadata_filters_update": metadata_updates,
+            "reply_to_user": "",
+            "rephrased_question": "",
+            "retry_slot": None,
+            "confidence": "high",
+            "reason": "current_turn_active_slot_extraction_answered",
+        }
+    )
+
+
+def _enforce_skipped_slot_invariants(
+    *,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    slots_skipped: set[str],
+) -> None:
+    """No-preference/skip state has final priority over every update source."""
+    for slot in slots_skipped:
+        removed_slot = slots.pop(slot, None)
+        removed_filters = {
+            key: metadata_filters.pop(key)
+            for key in _SLOT_METADATA_FILTER_MAP.get(slot, ())
+            if key in metadata_filters
+        }
+        if removed_slot is not None or removed_filters:
+            logger.info(
+                "skipped_slot_cleanup_applied | slot=%r | removed_slot=%r | removed_filters=%s",
+                slot,
+                removed_slot,
+                json.dumps(removed_filters, default=str),
+            )
+
+
 def _required_slot_state(
     category: str,
     slots: dict[str, Any],
@@ -5121,8 +5217,11 @@ def _classify_non_recommendation_turn(
                         "'Where are you located?' means send_non_sales_faq_email/store_info; "
                         "'Can you call me tomorrow?' means send_escalation_alert_email, not contact_human.\n\n"
                         "Choose send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported "
-                        "business action such as contacting them, emailing them, sending a quote/invoice/paperwork, scheduling, "
-                        "holding/reserving a trailer, future-arrival timing, buying trailers from the customer, or custom arrangements.\n\n"
+                        "real-world action or commitment: for example hold/reserving a trailer or an item; send a reminder or future follow-up; create/send "
+                        "a quote, invoice, contract, application, or paperwork; call/text/email them; schedule a call, "
+                        "meeting, appointment, delivery, pickup, inspection, service, or installation; promise future "
+                        "timing; buy a trailer from the customer; or make a custom arrangement. The user must request "
+                        "an action. Ordinary questions about price, hours, financing, or reservation policy do not qualify.\n\n"
                         "Choose continue_recommendation_flow when normal trailer QnA/search should continue and existing field extraction "
                         "should handle freeform details. Set should_store_freeform_fields=true only for clear trailer-shopping constraints "
                         "or active question answers. Do not infer inventory details from listings.\n\n"
@@ -6071,6 +6170,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             extracted_metadata=_supplemental_metadata,
             no_preference_decision=active_no_preference,
         )
+        question_turn = _apply_active_slot_extraction_safeguard(
+            decision=question_turn,
+            active_slot=str(active_qna_slot),
+            extracted_slots=supplemental_slots,
+            extracted_metadata=_supplemental_metadata,
+            no_preference_decision=active_no_preference,
+        )
         if question_turn.counter_question_topic != "none":
             # A counter-question cannot answer or skip the active qualification slot.
             # Preserve explicit updates for unrelated fields.
@@ -6472,6 +6578,13 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         classification=haul_classification,
         defaulted_fields=defaulted_metadata_filters,
     )
+    _enforce_skipped_slot_invariants(
+        slots=slots,
+        metadata_filters=metadata_filters,
+        slots_skipped=slots_skipped,
+    )
+    if invalid_required_slot in slots_skipped:
+        invalid_required_slot = None
     if awaiting_slot and awaiting_slot in slots:
         awaiting_slot = None
     logger.info(

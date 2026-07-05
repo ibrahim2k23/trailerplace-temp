@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from src.chatbot import graph, service
 from src.models import ChatRequest
 
@@ -1317,11 +1319,23 @@ def test_inventory_batch_becomes_reference_set_and_second_interest_bypasses_grap
     second = service._inventory_lookup_response(session, second_request, second_request.message)
     assert second is not None
     assert sent[0]["item_name"] == "FMAX Two"
+    assert second.thinking_context["tool_events"] == [
+        {
+            "tool": "send_interested_listing_email",
+            "result": {"status": "queued"},
+        }
+    ]
     assert session["trailer_category"] == "Dump"
     assert session["metadata_filters_collected"] == {"hitch_type": "Gooseneck"}
 
 
 def test_new_category_request_is_not_a_listing_selection(monkeypatch):
+    class _NoReferenceGate:
+        def invoke(self, _messages):
+            return service.ListingReferenceIntentDecision(
+                reason="New category shopping request has no explicit listing reference."
+            )
+
     class _WrongSelectionLLM:
         def invoke(self, _messages):
             return service.ListingReferenceDecision(
@@ -1335,6 +1349,9 @@ def test_new_category_request_is_not_a_listing_selection(monkeypatch):
                 reason="User is shopping for another trailer category, not selecting a shown item.",
             )
 
+    monkeypatch.setattr(
+        service, "_listing_reference_intent_llm", lambda: _NoReferenceGate()
+    )
     monkeypatch.setattr(service, "_listing_reference_llm", lambda: _WrongSelectionLLM())
     decision = service._resolve_listing_reference(
         {
@@ -1352,6 +1369,59 @@ def test_new_category_request_is_not_a_listing_selection(monkeypatch):
     assert decision.is_listing_selection is False
     assert decision.reference_intent == "none"
     assert decision.selected_index is None
+
+
+def test_listing_reference_gate_rejects_unrelated_turn_after_interest(monkeypatch):
+    class _Gate:
+        def invoke(self, messages):
+            latest = json.loads(messages[-1].content)["latest_message"]
+            explicit = latest == "I am interested in the first trailer."
+            return service.ListingReferenceIntentDecision(
+                has_explicit_listing_reference=explicit,
+                reference_kind="ordinal" if explicit else "none",
+                reference_intent="interest" if explicit else "none",
+                confidence="high",
+                reason="current message only",
+            )
+
+    class _Resolver:
+        calls = 0
+
+        def invoke(self, _messages):
+            self.calls += 1
+            return service.ListingReferenceDecision(
+                is_listing_selection=True,
+                has_explicit_listing_reference=True,
+                reference_intent="interest",
+                selected_index=1,
+                selected_title="Trailer One",
+                selected_url="https://example.test/one",
+                confidence="high",
+            )
+
+    resolver = _Resolver()
+    monkeypatch.setattr(service, "_listing_reference_intent_llm", lambda: _Gate())
+    monkeypatch.setattr(service, "_listing_reference_llm", lambda: resolver)
+    session = {
+        "trailer_category": "Equipment",
+        "messages": [
+            {"role": "assistant", "content": "Your interest in Trailer One has been logged."}
+        ],
+        "last_listings": [
+            {"title": "Trailer One", "url": "https://example.test/one"}
+        ],
+    }
+
+    selected = service._resolve_listing_reference(
+        session, "I am interested in the first trailer."
+    )
+    unrelated = service._resolve_listing_reference(
+        session, "What are equipment trailers commonly used for?"
+    )
+
+    assert selected.is_listing_selection is True
+    assert unrelated.is_listing_selection is False
+    assert resolver.calls == 1
 
 
 def test_inventory_results_send_silent_notification_with_completed_turn(monkeypatch):

@@ -3307,6 +3307,65 @@ def test_no_fixed_size_answer_skips_active_width_question(monkeypatch):
     assert out["mind_decision"]["action"] == "respond"
 
 
+def test_active_extraction_advances_and_skipped_width_cannot_reappear(monkeypatch):
+    _mock_field_updates(
+        monkeypatch,
+        slots_collected_update={"haul_length_ft": "18 ft"},
+        metadata_filters_update={"length_ft": "18 ft"},
+    )
+    _mock_haul_classifier(monkeypatch)
+    _mock_preference_classifier(monkeypatch)
+    _mock_pre_generic_classifier(monkeypatch)
+    unresolved = graph.QuestionTurnDecision(
+        answered_active_question=False,
+        reply_to_user="What is the rough total weight?",
+        rephrased_question="What is the rough total weight?",
+        retry_slot="haul_length_ft",
+        confidence="low",
+    )
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: unresolved,
+    )
+    monkeypatch.setattr(
+        graph,
+        "_reconcile_active_question_turn",
+        lambda **kwargs: unresolved,
+    )
+    state = _state("Maybe eighteen to twenty-four feet should do.", category="Equipment")
+    state["slots_collected"] = {
+        "haul_item": "tractor",
+        "haul_weight_lbs": "8000 lbs",
+    }
+    state["metadata_filters_collected"] = {"payload_lbs": "8000 lbs"}
+    state["awaiting_slot"] = "haul_length_ft"
+    state["pending_questions"] = [{
+        "slot": "haul_length_ft",
+        "question": "About how long is the load (or what deck length do you need)?",
+        "required": True,
+    }]
+    state["mind_decision"]["assistant_text"] = "What is the rough total weight?"
+
+    out = graph._apply_mind_node(state)
+
+    assert out["slots_collected"]["haul_length_ft"] == "18 ft"
+    assert out["metadata_filters_collected"]["length_ft"] == "18 ft"
+    assert out["awaiting_slot"] == "hitch_type"
+    assert out["assistant_text"] == "Do you prefer a bumper pull or gooseneck hitch?"
+
+    for _category in ("Car Hauler", "Tilt"):
+        slots = {"item_or_trailer_width_ft": "flexible"}
+        filters = {"width_ft": "flexible"}
+        graph._enforce_skipped_slot_invariants(
+            slots=slots,
+            metadata_filters=filters,
+            slots_skipped={"item_or_trailer_width_ft"},
+        )
+        assert slots == {}
+        assert filters == {}
+
+
 def test_no_preference_skips_equipment_weight(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     _mock_preference_classifier(
