@@ -39,6 +39,7 @@ from src.chatbot.constants import (
     compact_listings,
     compact_recent_messages,
 )
+from src.chatbot.llm import make_llm, safe_invoke
 from src.chatbot.prompts import MIND_SYSTEM_PROMPT, TRAILERPLACE_KNOWLEDGE_SECTION
 from src.chatbot.state import ChatbotState, QuestionItem
 from src.models import TrailerListing
@@ -508,14 +509,9 @@ def _mind_llm():
 
 @lru_cache(maxsize=1)
 def _category_filter_confirmation_llm():
-    model = (
-        os.getenv("CATEGORY_FILTER_CONFIRMATION_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        CategoryFilterConfirmationDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="CATEGORY_FILTER_CONFIRMATION_MODEL",
+        structured_output=CategoryFilterConfirmationDecision,
     )
 
 
@@ -599,40 +595,25 @@ def _active_turn_reconciler_llm():
 
 @lru_cache(maxsize=1)
 def _category_transition_llm():
-    model = (
-        os.getenv("CATEGORY_TRANSITION_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        CategoryTransitionDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="CATEGORY_TRANSITION_MODEL",
+        structured_output=CategoryTransitionDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _make_verification_llm():
-    model = (
-        os.getenv("MAKE_VERIFICATION_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        MakeVerificationDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="MAKE_VERIFICATION_MODEL",
+        structured_output=MakeVerificationDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _office_trailer_clarification_llm():
-    model = (
-        os.getenv("OFFICE_TRAILER_CLARIFICATION_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        OfficeTrailerClarificationDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="OFFICE_TRAILER_CLARIFICATION_MODEL",
+        structured_output=OfficeTrailerClarificationDecision,
     )
 
 
@@ -2802,28 +2783,30 @@ def _verify_make_candidate(
         "current_category": category,
         "recent_messages": recent_messages[-6:],
     }
-    try:
-        return _make_verification_llm().invoke(
-            [
-                SystemMessage(content=(
-                    "Verify whether the user explicitly requested the deterministic manufacturer candidate. "
-                    "Return structured data only. Approve only when the latest message uses the candidate as a "
-                    "trailer brand/make. Reject lexical collisions and ordinary descriptions: 'general cargo' is "
-                    "not Cargo Craft, 'diamond plate' is not Diamond C, and generic iron/aluminum wording is not a make. "
-                    "verified_make must equal the supplied candidate when approved. On uncertainty, reject.\n\n"
-                    "## TRAILER TYPES & SYNONYM MAPPING\n"
-                    "(Map spelling mistakes and synonyms to canonical categories)\n"
-                    f"{category_prompt_block()}\n\n"
-                    "## TRAILER BRANDS / MAKES\n"
-                    "(Use for informational answers only — do NOT infer category from make)\n"
-                    f"{make_prompt_block()}"
-                )),
-                HumanMessage(content=f"Verify this make candidate:\n{_safe_json(context)}"),
-            ]
-        )
-    except Exception:
-        logger.exception("make_verification_llm_failed; rejecting make candidate")
-        return MakeVerificationDecision(reason="make_verification_llm_failed")
+    # safe_invoke centralizes the fallback: any error (including a pydantic
+    # ValidationError from an off-schema enum) rejects the candidate rather than
+    # crashing the turn.
+    return safe_invoke(
+        _make_verification_llm(),
+        [
+            SystemMessage(content=(
+                "Verify whether the user explicitly requested the deterministic manufacturer candidate. "
+                "Return structured data only. Approve only when the latest message uses the candidate as a "
+                "trailer brand/make. Reject lexical collisions and ordinary descriptions: 'general cargo' is "
+                "not Cargo Craft, 'diamond plate' is not Diamond C, and generic iron/aluminum wording is not a make. "
+                "verified_make must equal the supplied candidate when approved. On uncertainty, reject.\n\n"
+                "## TRAILER TYPES & SYNONYM MAPPING\n"
+                "(Map spelling mistakes and synonyms to canonical categories)\n"
+                f"{category_prompt_block()}\n\n"
+                "## TRAILER BRANDS / MAKES\n"
+                "(Use for informational answers only — do NOT infer category from make)\n"
+                f"{make_prompt_block()}"
+            )),
+            HumanMessage(content=f"Verify this make candidate:\n{_safe_json(context)}"),
+        ],
+        fallback=MakeVerificationDecision(reason="make_verification_llm_failed"),
+        role="make_verification",
+    )
 
 
 def _reconcile_active_question_turn(

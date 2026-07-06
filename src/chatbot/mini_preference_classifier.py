@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from functools import lru_cache
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+
+from src.chatbot.llm import make_llm
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +23,9 @@ class PreferenceNullDecision(BaseModel):
 
 @lru_cache(maxsize=1)
 def _preference_classifier_llm():
-    model = (
-        os.getenv("PREFERENCE_CLASSIFIER_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        PreferenceNullDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="PREFERENCE_CLASSIFIER_MODEL",
+        structured_output=PreferenceNullDecision,
     )
 
 
