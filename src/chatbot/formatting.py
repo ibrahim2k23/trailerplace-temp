@@ -33,6 +33,16 @@ _FULL_MATCH_LANGUAGE_RE = re.compile(
     r"|\bperfect\s+for\s+(?:your\s+)?(?:specifications|requirements|needs|livestock needs|hauling needs)\b",
     re.I,
 )
+# Softer superlative match-claims ("strong/best/closest match"). These overclaim
+# fit on a listing that is not a confirmed full match, so we hold the per-listing
+# sales blurb to the same standard the intro validator (_invalid_pinecone_intro)
+# applies to the batch intro text.
+_STRONG_MATCH_LANGUAGE_RE = re.compile(
+    r"\b(?:strong|clear|close|closest|best|top|solid)\s+match(?:es)?\b"
+    r"|\bclosely\s+match(?:es)?\b"
+    r"|\bbest-fitting\b",
+    re.I,
+)
 def _first_value(listing: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = listing.get(key)
@@ -129,7 +139,9 @@ def _safe_sales_blurb(
         if str(x).strip()
     ]
     low_clean = clean.lower()
-    if match_level != "full" and _FULL_MATCH_LANGUAGE_RE.search(clean):
+    if match_level != "full" and (
+        _FULL_MATCH_LANGUAGE_RE.search(clean) or _STRONG_MATCH_LANGUAGE_RE.search(clean)
+    ):
         return fallback_line
     for feature in requested:
         if feature and feature in low_clean and not any(feature in c or c in feature for c in confirmed):

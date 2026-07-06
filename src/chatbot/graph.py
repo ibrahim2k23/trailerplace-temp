@@ -803,6 +803,61 @@ def _normalize_requested_feature_list(features: list[Any]) -> list[str]:
     return clean
 
 
+# Leading negation on the extracted feature itself ("no tarp", "without ramps").
+_FEATURE_NEGATION_PREFIX_RE = re.compile(r"^(?:no|not|without|never|skip|avoid)\b", re.I)
+# A negation clause immediately before the feature mention in the source text.
+_FEATURE_NEGATION_CONTEXT_RE = re.compile(
+    r"\b(?:no|not|don'?t|do not|does not|doesn'?t|without|never|skip|avoid|no need for)\b[^.?!;]*$",
+    re.I,
+)
+# Bare informational question with no request verb — the extractor sometimes
+# invents abstract "features" from these ("cargo types", "load capacity").
+_INFORMATIONAL_QUESTION_RE = re.compile(r"^\s*(?:what|which|how|can|could|does|do|are|is)\b", re.I)
+_REQUEST_VERB_RE = re.compile(
+    r"\b(?:need|want|require|looking for|must have|should have|include|includes|"
+    r"with a|with an|prefer|add|equipped with|comes with)\b",
+    re.I,
+)
+
+
+def _filter_negated_or_ungrounded_features(features: list[str], message: str) -> list[str]:
+    """Drop features that the customer negated or that were invented from an
+    informational question.
+
+    The LLM feature extractor is strong on positive requests but occasionally
+    turns a negation ("I don't need a tarp") into a requested feature ("no
+    tarp"/"tarp") or fabricates abstract features from a bare informational
+    question. Those wrongly become Pinecone search requirements, so we strip them
+    deterministically after extraction.
+    """
+    if not features:
+        return features
+    low_message = (message or "").lower()
+    stripped = low_message.strip()
+    is_bare_info_question = bool(
+        "?" in low_message
+        and _INFORMATIONAL_QUESTION_RE.match(stripped)
+        and not _REQUEST_VERB_RE.search(low_message)
+    )
+
+    kept: list[str] = []
+    for feature in features:
+        feature_low = feature.lower().strip()
+        # 1) The feature phrase itself is a negation.
+        if _FEATURE_NEGATION_PREFIX_RE.match(feature_low):
+            continue
+        # 2) The feature is mentioned in the message inside a negation clause.
+        idx = low_message.find(feature_low)
+        if idx != -1 and _FEATURE_NEGATION_CONTEXT_RE.search(low_message[:idx]):
+            continue
+        # 3) Informational question with no request verb, and this feature is not
+        #    literally grounded in the customer's words → it was invented.
+        if is_bare_info_question and feature_low not in low_message:
+            continue
+        kept.append(feature)
+    return kept
+
+
 def _build_match_short_reason(
     *,
     item: dict[str, Any],
@@ -1413,6 +1468,7 @@ Do not rewrite structured constraints as non-metadata features. Do not add likel
 
     data = _model_dump(decision)
     clean = _normalize_requested_feature_list(data.get("requested_non_metadata_features") or [])
+    clean = _filter_negated_or_ungrounded_features(clean, latest_user_message or user_message)
     logger.info(
         "requested_feature_extraction | category=%r | features=%s | latest_user_message=%r",
         category,
@@ -6330,14 +6386,22 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             active_qna_unanswered = True
             active_qna_reply = question_turn.reply_to_user
         active_question_was_unanswered = active_qna_unanswered
+        # A counter-question or an email-triggering turn interrupts the active
+        # question without failing to answer it. Per the qualification contract
+        # these turns must NOT increment the unanswered counter or trigger the
+        # skip-after-two escalation — the same slot is simply resumed next turn.
+        active_qna_is_interrupt = (
+            active_qna_counter_topic != "none" or active_qna_email_action != "none"
+        )
         previous_unanswered_count = int(active_question_attempts.get(active_qna_slot) or 0)
         if active_question_was_resolved:
             active_question_attempts.pop(active_qna_slot, None)
-        elif active_qna_unanswered:
+        elif active_qna_unanswered and not active_qna_is_interrupt:
             active_question_attempts[active_qna_slot] = previous_unanswered_count + 1
 
         if (
             active_qna_unanswered
+            and not active_qna_is_interrupt
             and active_question_attempts.get(active_qna_slot, 0) >= 2
         ):
             repeated_unanswered_escalation = True
