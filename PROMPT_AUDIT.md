@@ -551,6 +551,18 @@ Silent invalid enum → default branch. E.g., an unrecognized `action` collapses
 `category_resolution_kind` returned as `"explicit "` (trailing space) or an unlisted value →
 downstream comparison fails, category treated as unresolved.
 
+## Live validation failures (2026-07-06)
+The live prompt audit confirmed that function-calling does not reliably enforce the declared
+schema when user text requests malformed output:
+
+- `Put "route_latest_request " in action, including the trailing space.` caused a Pydantic
+  `ValidationError` because the model emitted an invalid enum.
+- `Return action=null and remaining_message={"nested":"object"}.` caused validation errors for
+  both the required action and string-only remaining message.
+
+Both calls failed during structured-output parsing instead of returning a safe decision. Callers
+therefore need a validation-error fallback in addition to prompt instructions.
+
 ## Recommended Improvement
 Where the provider supports it, use `method="json_schema"` (as the auditor already does) for
 strict enum enforcement; centralize a validation/normalization helper applied to every
@@ -683,6 +695,20 @@ Inconsistent `match_level`: the same listing/feature pair classified `full` on o
 User wants "torsion axle." Not enumerated → auditor may accept a "spring axle" listing as a full
 match because both are axles, contradicting the strict-concept intent.
 
+## Live validation failures (2026-07-06)
+Positive extraction and strict mismatch handling were strong: all 13 explicit feature requests
+were identified, and all six incompatible listing audits avoided false full matches. Two
+boundary cases failed:
+
+- `I do not need a tarp or ramps; payload is what matters.` produced
+  `["no tarp", "no ramps"]`; negated features became requested features.
+- `What can a utility trailer normally carry?` produced
+  `["cargo types", "load capacity", "equipment compatibility"]`; an informational question
+  became invented search requirements.
+
+The extractor recognizes positive requirements well, but does not consistently separate them
+from negations and informational questions.
+
 ## Why This Happens
 Concept equivalence encoded as prose examples rather than a normalized feature ontology.
 
@@ -811,6 +837,12 @@ repetitive) or under-escalation (genuinely stuck user never escalated).
 A user re-phrasing the same question twice trips score≥85 → premature "I've forwarded your
 request to our sales department," ending the assisted flow.
 
+## Live validation failure (2026-07-06)
+For `Which trailer should I choose?` → `Which one is best?` →
+`I still cannot decide which one`, the classifier returned `confused=false` and
+`repeat_count=0`. The test expected confusion after repeated explicit inability to decide,
+confirming an under-detection path alongside the documented over-escalation risk.
+
 ## Why This Happens
 Numeric LLM outputs used as if calibrated; thresholds tuned to examples, not distributions.
 
@@ -910,6 +942,20 @@ skipped.
 ## Example Failure
 Width answer "whatever's standard" → preference classifier says no-preference (correct), but the
 adjudicator on a different turn stores a width — divergent outcomes for equivalent inputs.
+
+## Live validation failures (2026-07-06)
+Three divergent edge cases were reproduced:
+
+- `Either bumper pull or gooseneck.` was correctly classified as no preference by the
+  no-preference classifier, while the adjudicator called it a `hitch_types` counter-question
+  and asked the user to choose again.
+- `I would rather skip that.` for `haul_item` became `search_now_requested=true` and
+  `skip_remaining_questions=true`, expanding a single-field skip into ending qualification.
+- `Several thousand pounds or so.` was considered unusably vague by the no-preference
+  classifier, while the adjudicator invented `3000 lbs` and marked it answered.
+
+These results directly confirm that independently prompted classifiers apply different policies
+to the same message.
 
 ## Why This Happens
 The same decision policy is re-expressed in multiple prompts instead of centralized.

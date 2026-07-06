@@ -76,7 +76,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
     "Utility": TrailerFieldSpec(
         category="Utility",
         required=["haul_item", "haul_weight_lbs"],
-        optional=["trailer_size", "sides_gate_storage"],
+        optional=["trailer_size"],
         questions={
             "haul_item":           "What will you be hauling on the utility trailer?",
             "haul_weight_lbs":     "What's the rough total weight of your load?",
@@ -87,7 +87,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
             "haul_item": "Store the cargo, equipment, or use case the customer says they need the utility trailer for.",
             "haul_weight_lbs": "Store the rough total load weight or payload requirement using weight units only.",
             "trailer_size": "Store the preferred trailer dimensions. Accept length, width, or combined size notation such as AxB or AxBxC when clearly giving size.",
-            "sides_gate_storage": "Store requested utility-trailer features such as side rails, rear gate, or tool storage.",
+            #"sides_gate_storage": "Store requested utility-trailer features such as side rails, rear gate, or tool storage.",
         },
         notes="Utility-only: lightweight haul handling is decided by the assistant agent (not used for other categories).",
     ),

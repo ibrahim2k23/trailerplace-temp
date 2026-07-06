@@ -628,33 +628,24 @@ def _enforce_contact_response_policy(
 ) -> str:
     if session.get("contact_status") != "contact_declined" or _contact_request_allowed(session):
         return assistant_text
-    try:
-        decision = _contact_policy_validator_llm().invoke([
-            SystemMessage(content=(
-                "Determine whether the assistant response asks for, encourages, or discusses collecting "
-                "the customer's name, email, phone number, callback details, or other contact information. "
-                "The customer declined contact collection, so any such content violates policy. "
-                "Return structured output only."
-            )),
-            HumanMessage(content=f"Assistant response:\n{assistant_text}"),
-        ])
-        if not decision.violates_contact_policy:
-            return assistant_text
-        rewrite = _contact_policy_rewriter_llm().invoke([
-            SystemMessage(content=(
-                "Rewrite the response without requesting or discussing contact details. Preserve its useful "
-                "answer and continue the trailer conversation. Preserve the active qualification question "
-                "exactly when supplied. Return structured output only."
-            )),
-            HumanMessage(content=(
-                f"Response:\n{assistant_text}\n\nActive qualification question:\n{active_question or ''}"
-            )),
-        ])
-        clean = str(rewrite.assistant_text or "").strip()
-        if clean:
-            return clean
-    except Exception:
-        logger.exception("contact_response_policy_enforcement_failed")
+    email_address = r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
+    us_phone = (
+        r"(?<!\d)(?:\+?1[\s.-]?)?"
+        r"(?:\([2-9]\d{2}\)|[2-9]\d{2})[\s.-]?"
+        r"\d{3}[\s.-]?\d{4}(?!\d)"
+    )
+    contact_request = (
+        r"\b(?:provide|share|send|give|enter|confirm|need|collect|request|ask\s+for)\b"
+        r"[^.!?\n]{0,80}\b(?:e-?mail(?:\s+address)?|phone(?:\s+number)?|"
+        r"contact\s+(?:details?|information|info)|callback\s+(?:details?|number))\b"
+    )
+    if not re.search(
+        rf"(?:{email_address})|(?:{us_phone})|(?:{contact_request})",
+        str(assistant_text or ""),
+        flags=re.IGNORECASE,
+    ):
+        return assistant_text
+    logger.warning("contact_response_policy_regex_blocked")
     return str(active_question or "What type of trailer are you looking for?").strip()
 
 
