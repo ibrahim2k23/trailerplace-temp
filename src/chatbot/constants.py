@@ -19,6 +19,14 @@ RECENT_WINDOW = 8
 # degrading instruction adherence on the hot path.
 RECENT_CHAR_CAP = 500
 
+# Categories for which the dynamic "how wide is the item?" question is never
+# added. Single source of truth so the haul-classifier prompt, its deterministic
+# fallback, and the graph gate cannot drift apart (they previously disagreed:
+# the prompt listed only 3 while the code gate excluded 6).
+DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = frozenset(
+    {"utility", "enclosed", "livestock", "aluminum", "flatbed", "dump"}
+)
+
 
 def compact_recent_messages(
     messages: list[dict[str, Any]] | None,

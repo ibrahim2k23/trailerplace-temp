@@ -10,7 +10,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
+from src.chatbot.constants import DYNAMIC_WIDTH_EXCLUDED_CATEGORIES
+
 logger = logging.getLogger(__name__)
+
+# Human-readable, capitalized rendering of the shared exclusion set for prompts.
+_WIDTH_EXCLUDED_LABEL = ", ".join(
+    sorted(c.title() for c in DYNAMIC_WIDTH_EXCLUDED_CATEGORIES)
+)
 
 LIGHTWEIGHT_KEYWORDS: tuple[str, ...] = (
     "golf cart", "golf carts", "golf equipment",
@@ -107,7 +114,7 @@ def fallback_haul_classification(
         )
 
     heavy = _contains_keyword(text, HEAVY_DUTY_KEYWORDS)
-    if cat not in {"utility", "enclosed", "flatbed"} and heavy:
+    if cat not in DYNAMIC_WIDTH_EXCLUDED_CATEGORIES and heavy:
         return HaulClassificationDecision(
             is_lightweight_utility_load=False,
             needs_width_question=True,
@@ -152,9 +159,9 @@ def classify_haul_requirements(
         "- Gooseneck and Bumper Pull are strictly hitch types. Never return either as matched_item and do not use "
         "either to infer a trailer category or haul item.\n"
         "- For Utility only, mark is_lightweight_utility_load when the haul item is likely 1500 lbs or less.\n"
-        "- For categories except Utility, Enclosed, and Flatbed, mark needs_width_question when "
+        f"- For categories except {_WIDTH_EXCLUDED_LABEL}, mark needs_width_question when "
         "the item is very large, wide, heavy-duty, or a vehicle such as a car or tractor.\n"
-        "- Do not request a width question for Utility, Enclosed, or Flatbed.\n"
+        f"- Do not request a width question for {_WIDTH_EXCLUDED_LABEL}.\n"
         "- Use medium or high confidence only when the item is clear."
     )
     try:

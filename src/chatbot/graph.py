@@ -34,7 +34,11 @@ from src.chatbot.mini_preference_classifier import (
 )
 from src.chatbot.make_inventory import categories_for_make, make_prompt_block
 from src.chatbot.make_resolver import resolve_make_from_text
-from src.chatbot.constants import compact_listings, compact_recent_messages
+from src.chatbot.constants import (
+    DYNAMIC_WIDTH_EXCLUDED_CATEGORIES,
+    compact_listings,
+    compact_recent_messages,
+)
 from src.chatbot.prompts import MIND_SYSTEM_PROMPT, TRAILERPLACE_KNOWLEDGE_SECTION
 from src.chatbot.state import ChatbotState, QuestionItem
 from src.models import TrailerListing
@@ -1831,7 +1835,7 @@ _CONFIDENT_CLASSIFICATIONS = {"medium", "high"}
 _CONFIDENT_PREFERENCE_NULL = {"medium", "high"}
 _DYNAMIC_WIDTH_SLOT = "item_or_trailer_width_ft"
 _DYNAMIC_WIDTH_QUESTION = "About how wide is the load, or what trailer width do you need?"
-_DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = {"utility", "enclosed", "livestock", "aluminum", "flatbed", "dump"}
+_DYNAMIC_WIDTH_EXCLUDED_CATEGORIES = DYNAMIC_WIDTH_EXCLUDED_CATEGORIES
 _FLATBED_DEFAULT_WIDTH_FT = "8 ft"
 _CATEGORY_CLARIFICATION_SLOT = "category_clarification"
 _GENERIC_CATEGORY_CHOICE_SLOT = "generic_category_choice"

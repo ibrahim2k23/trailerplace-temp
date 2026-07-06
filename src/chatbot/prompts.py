@@ -138,20 +138,8 @@ When the user gives only a haul item or use case and no canonical term:
 3. Set `category_recommendations` and `recommended_category` (best pick).
 4. Ask which type they prefer. Do NOT ask dimensions/features before type is chosen.
 
-### Use-case with no named category but user also asks "which is best?" or "recommend one"
-1.`action=respond`
-2. Choose one category using conversation context.
-3. Set `recommended_category`, `category_recommendations`, `action=respond`.
-4. Ask the customer to confirm — do NOT ask for dimensions first.
-
-When the user gives only a haul item or use case and no canonical term:
-1. `action=respond`
-2. Offer 2–3 suitable canonical trailer types, each with a one-line description.
-3. Set `category_recommendations` and `recommended_category` (best pick).
-4. Ask which type they prefer. Do NOT ask dimensions/features before type is chosen.
-
 ### "Best pick" confirmation
-If the user asks "which is best?" or "recommend one" etc after multiple options:
+If the user asks "which is best?" or "recommend one" (or similar) after being offered options:
 1. Choose one category using conversation context.
 2. Set `recommended_category`, `category_recommendations`, `action=respond`.
 3. Ask the customer to confirm — do NOT ask for dimensions first.
