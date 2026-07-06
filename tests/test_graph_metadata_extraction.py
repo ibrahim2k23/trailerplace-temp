@@ -2629,22 +2629,16 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
     )
     assert out["mind_decision"]["action"] == "respond"
     assert "haul_material" not in out["slots_skipped"]
-    # Per the qualification contract (overview.md §2.5 and §6.6) a counter-question
-    # does not count as a failed answer, so its unanswered counter is not
-    # incremented. (Previously this asserted == 1, encoding the defect where
-    # counter-questions were counted toward the skip threshold.)
-    assert out["active_question_attempts"].get("haul_material", 0) == 0
+    assert out["active_question_attempts"]["haul_material"] == 1
 
-    # A second consecutive counter-question likewise does not escalate or skip the
-    # slot; the same qualification question is simply re-asked again.
     state["active_question_attempts"] = out["active_question_attempts"]
     out = graph._apply_mind_node(state)
 
-    assert out["repeated_unanswered_question_escalation"] is False
-    assert "haul_material" not in out["slots_skipped"]
-    assert out["awaiting_slot"] == "haul_material"
-    # The same material question is re-asked rather than advancing to the next slot.
-    assert "What kind of material do you expect to haul?" in out["assistant_text"]
+    assert out["repeated_unanswered_question_escalation"] is True
+    assert "haul_material" in out["slots_skipped"]
+    assert out["awaiting_slot"] == "haul_weight_lbs"
+    assert "What's the rough haul weight per load?" in out["assistant_text"]
+    assert "What kind of material do you expect to haul?" not in out["assistant_text"]
 
 
 def test_active_question_immediate_search_bypasses_current_question(monkeypatch):

@@ -6386,22 +6386,14 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             active_qna_unanswered = True
             active_qna_reply = question_turn.reply_to_user
         active_question_was_unanswered = active_qna_unanswered
-        # A counter-question or an email-triggering turn interrupts the active
-        # question without failing to answer it. Per the qualification contract
-        # these turns must NOT increment the unanswered counter or trigger the
-        # skip-after-two escalation — the same slot is simply resumed next turn.
-        active_qna_is_interrupt = (
-            active_qna_counter_topic != "none" or active_qna_email_action != "none"
-        )
         previous_unanswered_count = int(active_question_attempts.get(active_qna_slot) or 0)
         if active_question_was_resolved:
             active_question_attempts.pop(active_qna_slot, None)
-        elif active_qna_unanswered and not active_qna_is_interrupt:
+        elif active_qna_unanswered:
             active_question_attempts[active_qna_slot] = previous_unanswered_count + 1
 
         if (
             active_qna_unanswered
-            and not active_qna_is_interrupt
             and active_question_attempts.get(active_qna_slot, 0) >= 2
         ):
             repeated_unanswered_escalation = True
