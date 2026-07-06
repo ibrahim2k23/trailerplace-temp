@@ -39,6 +39,10 @@ _INTERRUPTION_SCENARIOS = {
         "faq_email",
         "Before I answer that, do you offer financing for trailers?",
     ),
+    "Livestock": (
+        "skip_questions",
+        "Can you please stop asking questions and just show me the results?",
+    ),
 }
 
 _POST_RESULTS_SCENARIOS = {
@@ -59,32 +63,32 @@ _POST_RESULTS_SCENARIOS = {
 
 
 _VAGUE_ANSWERS = {
-    "haul_item": "A bit of everything—tools, machines, and whatever else comes up.",
-    "haul_material": "Usually cleanup waste, branches, and mixed jobsite stuff.",
-    "haul_weight_lbs": "I'd guess between six and eight thousand pounds.",
-    "haul_length_ft": "Maybe eighteen to twenty-four feet should do.",
-    "vehicle_type": "Mostly regular sedans and the occasional small SUV.",
-    "vehicle_length_ft": "They are likely somewhere between 14 and 17 feet long.",
-    "item_or_trailer_width_ft": "A normal flexible width should be fine; I have no specific measurement.",
-    "trailer_length_ft": "Around eighteen feet sounds right, though I can adjust.",
-    "hitch_type": "Either hitch works for me; I don't lean one way.",
-    "loading_style": "Whichever setup makes loading less of a headache.",
-    "open_vs_covered": "Open or covered is fine—I can make either work.",
-    "trailer_size": "Nothing huge, perhaps about 18 by 8.",
-    "sides_gate_storage": "Some practical storage or side rails would be handy.",
-    "dump_mechanism": "I have no strong preference as long as it dumps reliably.",
-    "tilt_style": "Any common tilt arrangement should be alright.",
-    "use_case": "Mostly moving supplies, with some light workshop use now and then.",
-    "cargo_size": "About 18 by 8 feet; height is not particularly important.",
-    "ac_windows_cabinets": "A few useful comforts would be nice, but none are essential.",
-    "finished_interior": "Either unfinished or simply finished would suit me.",
-    "gate_preferences": "Whatever gate is easiest for normal day-to-day use.",
-    "package_scope": "I need the trailer together with a few bins, ideally.",
+    "haul_item": "Farm gear, toolboxes, and assorted things that change week to week.",
+    "haul_material": "Broken concrete, yard waste, and whatever debris the job produces.",
+    "haul_weight_lbs": "Probably seven to nine thousand pounds, roughly.",
+    "haul_length_ft": "Somewhere from nineteen to twenty-three feet ought to work.",
+    "vehicle_type": "A mix of compact cars and midsize crossovers.",
+    "vehicle_length_ft": "Approximately 15 to 18 feet long.",
+    "item_or_trailer_width_ft": "Whatever standard width you recommend; I do not know a measurement.",
+    "trailer_length_ft": "Maybe nineteen to twenty-two feet, give or take.",
+    "hitch_type": "Bumper pull or gooseneck—either one is acceptable.",
+    "loading_style": "I am flexible as long as loading is straightforward.",
+    "open_vs_covered": "Either open or enclosed could work for me.",
+    "trailer_size": "A moderate size, perhaps 19 by 8 feet.",
+    "sides_gate_storage": "Useful rails and somewhere to secure loose gear would help.",
+    "dump_mechanism": "No particular mechanism; dependable operation matters most.",
+    "tilt_style": "I am open to whichever tilt design fits the load.",
+    "use_case": "General deliveries plus an occasional mobile workspace.",
+    "cargo_size": "Roughly 19 by 8 feet; the height can be flexible.",
+    "ac_windows_cabinets": "Basic power and storage would be useful, but I can be flexible.",
+    "finished_interior": "A simple finish is fine, though unfinished could also work.",
+    "gate_preferences": "Any practical everyday gate arrangement is acceptable.",
+    "package_scope": "The trailer and several bins together would be ideal.",
     "bin_size": "A medium bin, perhaps around 15 to 20 yards.",
-    "deck_style": "A step deck or regular deck would both be acceptable.",
+    "deck_style": "Either a step deck or standard deck would suit the work.",
     "cdl_concern": "Staying below CDL limits would be helpful, but I am flexible.",
     "fuel_type": "It will mainly carry diesel, possibly other fuel occasionally.",
-    "tank_capacity": "Somewhere in the 400 to 600 gallon neighborhood.",
+    "tank_capacity": "Approximately 450 to 650 gallons.",
     "fiber_use_case": "Primarily field splicing, with a little desk work sometimes.",
     "crew_size": "Usually two to five people depending on the job.",
     "fiber_amenities": "Just practical basics—cooling, power, and a decent work surface.",
@@ -107,14 +111,20 @@ def _answer_for(slot: str | None, question: str) -> str:
     return "Something fairly standard and flexible; I am open to suitable options."
 
 
-def _send(session_id: str, message: str):
+def _send(
+    session_id: str,
+    message: str,
+    *,
+    name: str | None = None,
+    email: str | None = None,
+):
     return service.handle_chat(
         ChatRequest(
             session_id=session_id,
             sales_phase="main",
             message=message,
-            customer_full_name="Ibrahim",
-            customer_email="ibrahim@esided.ai",
+            customer_full_name=name,
+            customer_email=email,
         )
     )
 
@@ -125,12 +135,32 @@ def test_live_vague_answers_for_every_category(category: str):
         pytest.skip("Set RUN_LIVE_VAGUE_QNA=1 to run real LLM/Pinecone conversations")
 
     session_id = str(uuid.uuid4())
-    user_text = (
-        f"My name is Ibrahim and my email is ibrahim@esided.ai. "
-        f"I am looking for a {category} trailer."
-    )
+    request_text = f"I am looking for a {category} trailer."
     if category in _DYNAMIC_WIDTH_CARGO:
-        user_text = f"{user_text} {_DYNAMIC_WIDTH_CARGO[category]}"
+        request_text = f"{request_text} {_DYNAMIC_WIDTH_CARGO[category]}"
+    prefetched_response = None
+    if category in {"Aluminum", "Car Hauler"}:
+        initial_contact = _send(session_id, request_text)
+        assert "Before we get started" in initial_contact.assistant_text
+        partial_text = (
+            "My name is Ibrahim"
+            if category == "Aluminum"
+            else "My email is ibrahim@esided.ai"
+        )
+        partial = _send(session_id, partial_text)
+        expected_missing = (
+            "email address or phone number"
+            if category == "Aluminum"
+            else "your name"
+        )
+        assert expected_missing in partial.assistant_text
+        assert "Before we get started" not in partial.assistant_text
+        user_text = "I would rather not provide anything else."
+        prefetched_response = _send(session_id, user_text)
+    else:
+        user_text = (
+            f"My name is Ibrahim and my email is ibrahim@esided.ai. {request_text}"
+        )
 
     completed = False
     awaiting_history = []
@@ -139,7 +169,8 @@ def test_live_vague_answers_for_every_category(category: str):
     interruption_verified = False
     interrupted_slot = None
     for turn in range(1, 10):
-        response = _send(session_id, user_text)
+        response = prefetched_response or _send(session_id, user_text)
+        prefetched_response = None
         state = service._get_session(session_id)
         response_tool_events = (response.thinking_context or {}).get("tool_events") or []
         awaiting_history.append(state.get("awaiting_slot"))
@@ -160,7 +191,20 @@ def test_live_vague_answers_for_every_category(category: str):
         if interruption_sent and not interruption_verified:
             kind = interruption[0]
             current_slot = str(state.get("awaiting_slot") or "").strip() or None
-            assert current_slot == interrupted_slot
+            if kind == "skip_questions":
+                assert current_slot is None
+                assert any(
+                    event.get("tool") == "pinecone_search"
+                    for event in response_tool_events
+                    if isinstance(event, dict)
+                )
+                assert not any(
+                    event.get("tool") == "send_escalation_alert_email"
+                    for event in response_tool_events
+                    if isinstance(event, dict)
+                )
+            else:
+                assert current_slot == interrupted_slot
             if kind == "faq_email":
                 assert any(
                     event.get("tool") == "send_non_sales_faq_email"
@@ -202,6 +246,21 @@ def test_live_vague_answers_for_every_category(category: str):
 
     interest_message = "I am interested in the first trailer."
     interest_response = _send(session_id, interest_message)
+    initial_interest_events = (interest_response.thinking_context or {}).get("tool_events") or []
+    if any(
+        event.get("tool") == "send_interested_listing_email"
+        and (event.get("result") or {}).get("status") == "deferred_missing_contact"
+        for event in initial_interest_events
+        if isinstance(event, dict)
+    ):
+        assert "Before we get started" not in interest_response.assistant_text
+        saved = service._get_session(session_id)
+        missing_contact = (
+            "ibrahim@esided.ai"
+            if saved.get("customer_full_name")
+            else "My name is Ibrahim"
+        )
+        interest_response = _send(session_id, missing_contact)
     interest_state = service._get_session(session_id)
     interest_tool_events = (interest_response.thinking_context or {}).get("tool_events") or []
     interest_tools = {
@@ -277,7 +336,7 @@ def test_live_vague_answers_for_every_category(category: str):
         assert "hitch_type" not in final_state["metadata_filters"]
     if category == "Enclosed":
         assert "make" not in final_state["metadata_filters"]
-        assert final_state["metadata_filters"].get("length_ft") == "18 ft"
+        assert final_state["metadata_filters"].get("length_ft") == "19 ft"
         assert final_state["metadata_filters"].get("width_ft") == "8 ft"
         assert awaiting_history.count("cargo_size") == 1
     if category == "Roll Off":
@@ -286,8 +345,8 @@ def test_live_vague_answers_for_every_category(category: str):
         assert "trailer" in package_scope
         assert "bin" in package_scope
     if category == "Car Hauler":
-        assert final_state["slots"].get("vehicle_length_ft") == "14 ft"
-        assert final_state["metadata_filters"].get("length_ft") == "14 ft"
+        assert final_state["slots"].get("vehicle_length_ft") == "15 ft"
+        assert final_state["metadata_filters"].get("length_ft") == "15 ft"
     if category in _DYNAMIC_WIDTH_CARGO:
         assert "item_or_trailer_width_ft" in awaiting_history
         assert "item_or_trailer_width_ft" in final_state["skipped"]

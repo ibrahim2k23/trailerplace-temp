@@ -271,6 +271,7 @@ def _new_session(session_id: str) -> dict[str, Any]:
         "confusion_escalated": False,
         "confusion_signal_count": 0,
         "initial_contact_request_asked": False,
+        "initial_contact_followup_asked": False,
         "awaiting_initial_contact_reply": False,
         "pending_contact_action": None,
         "pending_contact_actions": [],
@@ -763,6 +764,18 @@ def _initial_contact_request_text(session: dict[str, Any]) -> str:
     )
 
 
+def _initial_contact_followup_text(session: dict[str, Any]) -> str:
+    if session.get("customer_full_name"):
+        return (
+            "Thanks, I've saved your name. Could I also get either your email address or phone number? "
+            "Sharing it is optional, and I can continue with your trailer search either way."
+        )
+    return (
+        "Thanks, I've saved that contact method. Could I also get your name? "
+        "Sharing it is optional, and I can continue with your trailer search either way."
+    )
+
+
 def _is_contact_refusal(message: str) -> bool:
     text = (message or "").strip().lower()
     return bool(
@@ -975,10 +988,12 @@ def _append_active_question_if_present(session: dict[str, Any], text: str) -> st
     return base
 
 
-def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None:
+def _send_one_pending_contact_action_if_ready(
+    session: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
     action = session.get("pending_contact_action")
     if not action or not _has_contact(session):
-        return None
+        return None, None
     action_type = action.get("type")
     if action_type == "interest":
         item_name = str(action.get("item_name") or "that trailer").strip()
@@ -996,12 +1011,13 @@ def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | 
             f"Thanks, I saved your contact information and sent your interest in \"{item_name}\" "
             "to our team so they can follow up."
         )
-        return compose_email_tool_reply(
+        reply = compose_email_tool_reply(
             email_purpose=f"customer interest in {item_name}",
             latest_message=str((session.get("messages") or [{}])[-1].get("content") or ""),
             conversation_context=_email_context_summary(session),
             fallback=fallback,
         )
+        return reply, {"tool": "send_interested_listing_email", "result": result}
     if action_type == "faq":
         category = str(action.get("faq_category") or "contact_human")
         summary = str(action.get("summary") or "")
@@ -1018,12 +1034,13 @@ def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | 
         )
         logger.info("deferred_contact_action_sent | type=faq | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return compose_email_tool_reply(
+        reply = compose_email_tool_reply(
             email_purpose=summary or category,
             latest_message=str((session.get("messages") or [{}])[-1].get("content") or ""),
             conversation_context=_email_context_summary(session),
             fallback="Thanks, I saved your contact information and sent that request to our team so they can help.",
         )
+        return reply, {"tool": "send_non_sales_faq_email", "result": result}
     if action_type == "escalation_alert":
         _persist_email_transcript_snapshot(session)
         result = send_escalation_alert_email(
@@ -1037,38 +1054,44 @@ def _send_one_pending_contact_action_if_ready(session: dict[str, Any]) -> str | 
         )
         logger.info("deferred_contact_action_sent | type=escalation_alert | result=%s", json.dumps(result, default=str))
         session["pending_contact_action"] = None
-        return compose_email_tool_reply(
+        reply = compose_email_tool_reply(
             email_purpose=str(action.get("summary") or "customer escalation request"),
             latest_message=str((session.get("messages") or [{}])[-1].get("content") or ""),
             conversation_context=_email_context_summary(session),
             fallback=_ESCALATION_SENT_REPLY,
         )
+        return reply, {"tool": "send_escalation_alert_email", "result": result}
     session["pending_contact_action"] = None
-    return None
+    return None, None
 
 
-def _send_pending_contact_action_if_ready(session: dict[str, Any]) -> str | None:
+def _send_pending_contact_action_if_ready(
+    session: dict[str, Any],
+) -> tuple[str | None, list[dict[str, Any]]]:
     actions = list(session.get("pending_contact_actions") or [])
     legacy = session.get("pending_contact_action")
     if legacy and legacy not in actions:
         actions.append(legacy)
     if not actions or not _has_contact(session):
-        return None
+        return None, []
     session["pending_contact_actions"] = []
     session["pending_contact_action"] = None
     replies: list[str] = []
+    tool_events: list[dict[str, Any]] = []
     for action in actions:
         session["pending_contact_action"] = action
-        reply = _send_one_pending_contact_action_if_ready(session)
+        reply, tool_event = _send_one_pending_contact_action_if_ready(session)
         if reply and reply not in replies:
             replies.append(reply)
+        if tool_event:
+            tool_events.append(tool_event)
     combined = "\n\n".join(replies) if replies else None
     if combined:
         combined = _append_active_question_if_present(session, combined)
     tracker = dict(session.get("active_question_tracker") or {})
     if combined and tracker.get("confusion_sent"):
         combined = _strip_repeated_question(combined, str(tracker.get("question") or ""))
-    return combined
+    return combined, tool_events
 
 
 def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
@@ -1229,6 +1252,9 @@ def _is_unsupported_business_action_turn(session: dict[str, Any], user_message: 
                         "Set should_route_graph=false for broad catalogue browsing, ordinary trailer information, "
                         "recommendations/search requests, supported FAQ topics like financing/trade-in/service/"
                         "store info, simple smalltalk, and direct questions the assistant can answer without a tool.\n\n"
+                        "Requests to stop or skip qualification questions and requests to show results, options, "
+                        "listings, trailers, or inventory are supported search-control requests, not escalation actions. "
+                        "They must be false here even when phrased urgently.\n\n"
                         "Examples that must be false: 'I want one to haul raw materials for construction', "
                         "'what trailer should I use for heavy items', and other normal trailer recommendation turns.\n\n"
                         "Action requests are true: 'Reserve this trailer', 'Remind me tomorrow', 'Send me a quote', "
@@ -2246,9 +2272,12 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
     session["sales_phase"] = "main"
 
     _send_pending_results_notification_if_ready(session)
-    deferred_text = _send_pending_contact_action_if_ready(session)
-    deferred_email_prefix = deferred_text if had_expiring_email else None
-    if deferred_text and not had_expiring_email:
+    deferred_text, deferred_tool_events = _send_pending_contact_action_if_ready(session)
+    resume_after_deferred_email = bool(
+        deferred_text and (session.get("awaiting_slot") or session.get("pending_questions"))
+    )
+    deferred_email_prefix = deferred_text if (had_expiring_email or resume_after_deferred_email) else None
+    if deferred_text and not had_expiring_email and not resume_after_deferred_email:
         assistant_text = deferred_text
         _update_active_question_tracker(
             session,
@@ -2271,6 +2300,7 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
             contact_status=session.get("contact_status"),
             main_prior_messages=session.get("messages") or [],
             listings=[],
+            thinking_context={"tool_events": deferred_tool_events},
         )
     if had_expiring_email and not _has_contact(session):
         session["pending_contact_actions"] = [
@@ -2317,19 +2347,23 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
         contact_reply_decision = _classify_contact_prompt_reply(session, request.message)
         if contact_reply_decision.action == "decline_contact_details":
             session["contact_status"] = "contact_declined"
-        if contact_reply_decision.action in {
-            "route_latest_request", "resume_saved_request_with_update"
-        } and not _has_contact(session):
-            for key, value in contact_before_turn.items():
-                session[key] = value
-            _sync_contact_status(session)
-            contact_changed_this_turn = False
-            _persist_contact(session)
-        if contact_changed_this_turn and not _has_contact(session):
+        if (
+            contact_changed_this_turn
+            and not _has_contact(session)
+            and not session.get("initial_contact_followup_asked")
+            and contact_reply_decision.action != "decline_contact_details"
+        ):
+            session["initial_contact_followup_asked"] = True
             session["awaiting_initial_contact_reply"] = True
-            assistant_text = _initial_contact_request_text(session)
+            assistant_text = _initial_contact_followup_text(session)
             session["messages"].append({"role": "assistant", "content": assistant_text})
             _persist(session)
+            logger.info(
+                "partial_contact_followup | session_id=%s | has_name=%s | has_contact_method=%s",
+                request.session_id,
+                bool(session.get("customer_full_name")),
+                bool(session.get("customer_email") or session.get("customer_phone")),
+            )
             _log_chat_turn(request.session_id, request.message, assistant_text)
             return ChatResponse(
                 assistant_text=assistant_text,
@@ -2342,6 +2376,14 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
                 main_prior_messages=session.get("messages") or [],
                 listings=[],
             )
+        if contact_reply_decision.action in {
+            "route_latest_request", "resume_saved_request_with_update"
+        } and not _has_contact(session):
+            for key, value in contact_before_turn.items():
+                session[key] = value
+            _sync_contact_status(session)
+            contact_changed_this_turn = False
+            _persist_contact(session)
         if pending_initial and contact_reply_decision.action in {
             "acknowledge_contact_details", "decline_contact_details"
         }:
@@ -2496,7 +2538,10 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
     if repeated_question_escalation:
         session["active_question_tracker"] = None
         session["active_question_unanswered_count"] = 0
-    tool_events = result.get("tool_events") or []
+    tool_events = [
+        *deferred_tool_events,
+        *(result.get("tool_events") or []),
+    ]
     if any(
         e.get("tool") == "pinecone_search" and int(e.get("result_count") or 0) > 0
         for e in tool_events
@@ -2613,6 +2658,6 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
             "category": session.get("trailer_category"),
             "slots": session.get("slots_collected") or {},
             "metadata_filters": session.get("metadata_filters_collected") or {},
-            "tool_events": result.get("tool_events") or [],
+            "tool_events": tool_events,
         },
     )

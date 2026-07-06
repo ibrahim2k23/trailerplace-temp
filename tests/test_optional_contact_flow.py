@@ -14,6 +14,56 @@ def _decision(action: str, remaining_message: str | None = None) -> service.Cont
     return service.ContactPromptReplyDecision(action=action, remaining_message=remaining_message)
 
 
+def test_partial_contact_gets_one_followup_then_resumes_saved_request(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001198"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session.update(
+        initial_contact_request_asked=True,
+        awaiting_initial_contact_reply=True,
+        pending_initial_user_message="I am looking for a dump trailer",
+    )
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **_kwargs: "lead")
+    monkeypatch.setattr(
+        service,
+        "_extract_contact",
+        lambda text, *_args: {
+            "full_name": "Ibrahim" if "Ibrahim" in text else None,
+            "email": None,
+            "phone": None,
+            "name_confidence": "high" if "Ibrahim" in text else "none",
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_classify_contact_prompt_reply",
+        lambda _session, text: _decision(
+            "acknowledge_contact_details" if "Ibrahim" in text else "resume_saved_request"
+        ),
+    )
+    monkeypatch.setattr(service, "_contact_prompt_bridge_text", lambda **_kwargs: "Okay, let's continue.")
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args: True)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda _session, message, _shown: {
+            "assistant_text": f"Continuing: {message}",
+            "tool_events": [],
+            "last_listings": [],
+        },
+    )
+
+    first = service.handle_chat(_req(session_id, "my name is Ibrahim"))
+    second = service.handle_chat(_req(session_id, "I'd rather not share that"))
+
+    assert "email address or phone number" in first.assistant_text
+    assert "Before we get started" not in first.assistant_text
+    assert second.assistant_text.endswith("Continuing: I am looking for a dump trailer")
+    assert service._get_session(session_id)["customer_full_name"] == "Ibrahim"
+
+
 def test_contact_plus_message_continues_with_clean_routing_context(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001099"
     service.reset_session(session_id)
@@ -1080,6 +1130,9 @@ def test_pending_interest_sends_once_after_contact(monkeypatch):
         }
     ]
     assert response.contact_status == "contact_available"
+    assert (response.thinking_context or {}).get("tool_events") == [
+        {"tool": "send_interested_listing_email", "result": {"status": "sent"}}
+    ]
     assert service._get_session(session_id)["pending_contact_action"] is None
 
 

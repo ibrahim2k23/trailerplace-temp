@@ -1736,14 +1736,17 @@ def _missing_contact_request(state: ChatbotState, reason: str) -> str:
     clean_reason = str(reason or "this request").strip()
     if state.get("customer_full_name"):
         return (
-            "Could you please share your email address and phone number so our team can "
-            f"contact you? Either one is enough to continue."
+            f"To send {clean_reason} to our team, could you share either an email address "
+            "or phone number? Sharing it is optional, and we can keep working on your trailer search."
         )
     if state.get("customer_phone") or state.get("customer_email"):
-        return f"Could you please share your name so our team can contact you?"
+        return (
+            f"To send {clean_reason} to our team, could you share your name? "
+            "Sharing it is optional, and we can keep working on your trailer search."
+        )
     return (
-        "Could you please share your name and either your phone number or email address so our team can "
-        f"contact you?"
+        f"To send {clean_reason} to our team, could you share your name and either an email "
+        "address or phone number? Sharing them is optional, and we can keep working on your trailer search."
     )
 
 
@@ -2477,6 +2480,8 @@ def _skip_remaining_questions_requested(text: str) -> bool:
         re.search(
             r"\b(?:don['\u2019]?t|do\s+not|won['\u2019]?t|will\s+not)\s+"
             r"(?:want\s+to\s+)?answer\b[^.?!]*(?:more|any\s+more|additional|remaining)\s+questions?\b"
+            r"|\b(?:don['\u2019]?t|do\s+not|stop)\b[^.?!]*\bask(?:ing)?\b[^.?!]*"
+            r"(?:more|any\s+more|additional|remaining)\s+questions?\b"
             r"|\b(?:skip|stop)\b[^.?!]*(?:the\s+)?(?:rest|remaining|questions?)\b"
             r"|\b(?:that['\u2019]?s|that\s+is)\s+enough\s+questions?\b",
             text or "",
@@ -2831,7 +2836,9 @@ def _reconcile_active_question_turn(
                     "field; store neither option.\n"
                     "12. Roll Off bin_size maps its numeric value directly to trailer length_ft for Pinecone. "
                     "'15 yd' means length_ft='15 ft', never 45 ft; use the smallest number in a range.\n"
-                    "13. Email actions outrank active-slot resolution. Use send_escalation_alert_email when the user "
+                    "13. Explicit requests to stop/skip questions or show results are supported search controls, "
+                    "never email actions; set search_now_requested=true and, for stop/skip requests, "
+                    "skip_remaining_questions=true. Otherwise use send_escalation_alert_email when the user "
                     "asks the business to perform an unsupported real-world action: for example reserve/holding a trailer or an item, send a reminder or "
                     "future follow-up, create/send a quote/invoice/paperwork, call/text/email them, schedule a call/"
                     "meeting/appointment/delivery/pickup/service, or make a future timing commitment. Such a request "
@@ -6678,7 +6685,28 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         decision["assistant_text"] = ""
         action = "ask_next_question"
         decision["action"] = action
-    if active_qna_email_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
+    explicit_immediate_search = bool(
+        category and _immediate_search_requested(str(state.get("user_message") or ""))
+    )
+    if (active_qna_search_now or explicit_immediate_search) and category:
+        if active_qna_email_action:
+            logger.info(
+                "search_override_escalation | email_action=%r | category=%r | skip_remaining=%s",
+                active_qna_email_action,
+                category,
+                active_qna_skip_remaining,
+            )
+        action = "pinecone_search"
+        decision["action"] = action
+        awaiting_slot = None
+        active_qna_unanswered = False
+        active_question_was_unanswered = False
+        if active_qna_skip_remaining or _skip_remaining_questions_requested(
+            str(state.get("user_message") or "")
+        ):
+            active_qna_skip_remaining = True
+            pending = []
+    elif active_qna_email_action in {"send_non_sales_faq_email", "send_escalation_alert_email"}:
         action = active_qna_email_action
         decision["action"] = action
         if active_qna_faq_category:
@@ -6689,14 +6717,6 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             decision["escalation_summary"] = active_qna_escalation_summary
         if active_qna_unsupported_request:
             decision["unsupported_request"] = active_qna_unsupported_request
-    elif active_qna_search_now and category:
-        action = "pinecone_search"
-        decision["action"] = action
-        awaiting_slot = None
-        active_qna_unanswered = False
-        active_question_was_unanswered = False
-        if active_qna_skip_remaining:
-            pending = []
     elif active_qna_slot and action == "send_interested_listing_email":
         action = "respond"
         decision["action"] = action

@@ -327,6 +327,7 @@ Use this action when the customer asks TrailerPlace/the team/chatbot to perform 
 - Summarize the requested unsupported action in the email body.
 - Always provide `assistant_text`: confirm the query was sent, say the team will reach out soon, offer to continue helping choose a trailer.
 - Do NOT trigger for: broad catalogue browsing, ordinary trailer questions, recommendations, supported FAQ categories, or specific-listing interest.
+- Do NOT trigger when the customer says to stop/skip qualification questions or asks to see results, options, listings, trailers, or inventory. Those are supported search-control requests and must continue to Pinecone search.
 """.strip()
 
 

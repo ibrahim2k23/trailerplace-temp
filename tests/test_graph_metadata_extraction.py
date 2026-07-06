@@ -2929,12 +2929,15 @@ def test_active_question_skip_remaining_marks_questions_skipped_and_searches(mon
         lambda **kwargs: graph.QuestionTurnDecision(
             search_now_requested=True,
             skip_remaining_questions=True,
+            email_action="send_escalation_alert_email",
+            escalation_summary="Incorrect escalation proposal.",
             confidence="high",
             reason="user_refused_more_questions",
         ),
     )
     state = _state("I don't want more questions; show me what you have", category="Dump")
     state["awaiting_slot"] = "haul_material"
+    state["mind_decision"]["action"] = "send_escalation_alert_email"
 
     out = graph._apply_mind_node(state)
 
