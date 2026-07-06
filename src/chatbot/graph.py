@@ -34,6 +34,7 @@ from src.chatbot.mini_preference_classifier import (
 )
 from src.chatbot.make_inventory import categories_for_make, make_prompt_block
 from src.chatbot.make_resolver import resolve_make_from_text
+from src.chatbot.constants import compact_listings, compact_recent_messages
 from src.chatbot.prompts import MIND_SYSTEM_PROMPT, TRAILERPLACE_KNOWLEDGE_SECTION
 from src.chatbot.state import ChatbotState, QuestionItem
 from src.models import TrailerListing
@@ -4826,7 +4827,9 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         },
         "current_category": state.get("trailer_category"),
         "deterministic_category_hint": deterministic_hint,
-        "listing_model_fields": sorted(TrailerListing.model_fields.keys()),
+        # D4: send a compact listing projection (index/title/url/price) instead of
+        # full listing objects, and drop the full TrailerListing field list — both
+        # were pure bloat/distraction on the planner's hot path (audit issue #5).
         "slots_collected": state.get("slots_collected") or {},
         "metadata_filters_collected": state.get("metadata_filters_collected") or {},
         "awaiting_slot": state.get("awaiting_slot"),
@@ -4834,9 +4837,9 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         "pending_category_change": state.get("pending_category_change"),
         "pending_category_suggestion": state.get("pending_category_suggestion"),
         "asked_questions": state.get("asked_questions") or [],
-        "last_listings": state.get("last_listings") or [],
+        "last_listings": compact_listings(state.get("last_listings")),
         "already_shown_listing_urls": state.get("already_shown_listing_urls") or [],
-        "recent_messages": (state.get("messages") or [])[-8:],
+        "recent_messages": compact_recent_messages(state.get("messages")),
     }
     try:
         decision = _mind_llm().invoke(

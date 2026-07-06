@@ -182,23 +182,17 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 
 def _should_save_initial_message_for_resume(message: str) -> bool:
+    # D1: Deterministic replacement for what used to be an LLM call on every first
+    # turn. Preserve any non-empty opening message so the customer's request is
+    # never lost behind the contact prompt; only a bare greeting (no other intent)
+    # is not worth resuming. This removes one hot-path LLM call and the failure
+    # mode where a transient outage dropped the saved request.
     text = (message or "").strip()
     if not text:
         return False
-    try:
-        decision = _initial_message_preservation_llm().invoke([
-            SystemMessage(content=(
-                "Decide whether the message contains any meaningful non-contact intent that should be resumed "
-                "after an optional contact-details prompt. This includes any question, request, answer, preference, "
-                "correction, business inquiry, trailer inquiry, FAQ, or conversational intent beyond a greeting "
-                "and contact details. A greeting at the start does not erase later intent. Return structured output."
-            )),
-            HumanMessage(content=f"User message:\n{text}"),
-        ])
-        return bool(decision.has_meaningful_non_contact_intent)
-    except Exception:
-        logger.exception("initial_message_preservation_llm_failed; preserving message")
-        return True
+    if _GREETING_RE.match(text):
+        return False
+    return True
 
 
 def _format_recent_message_transcript(messages: list[dict[str, Any]], limit: int = 4) -> str:
