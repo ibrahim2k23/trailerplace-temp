@@ -1097,18 +1097,14 @@ if not st.session_state.auth_ok:
     st.stop()
 
 
-if "chat_session_id" not in st.session_state:
-    st.session_state.chat_session_id = st.query_params.get("chat_session") or str(uuid.uuid4())
+requested_chat_session = st.query_params.get("chat_session")
+if (
+    "chat_session_id" not in st.session_state
+    or (requested_chat_session and requested_chat_session != st.session_state.chat_session_id)
+):
+    st.session_state.chat_session_id = requested_chat_session or str(uuid.uuid4())
     st.query_params["chat_session"] = st.session_state.chat_session_id
-if "durable_session_restored" not in st.session_state:
-    restored = _restore_api_session(st.session_state.chat_session_id)
-    if restored and restored.get("exists") and not restored.get("closed"):
-        st.session_state.messages = restored.get("messages") or []
-        st.session_state.sales_phase = restored.get("sales_phase") or "main"
-        for key in ("customer_full_name", "customer_email", "customer_phone"):
-            if restored.get(key) is not None:
-                st.session_state[key] = restored[key]
-    st.session_state.durable_session_restored = True
+    st.session_state.pop("durable_session_restored", None)
 if "backend_ready_status" not in st.session_state:
     _start_backend_initialization()
 backend_ready_future = st.session_state.get("backend_ready_future")
@@ -1121,6 +1117,35 @@ if (
     st.session_state.backend_ready_status = backend_ready_result.get("status", "error")
     st.session_state.backend_ready_error = backend_ready_result.get("error", "")
     st.session_state.backend_ready_future = None
+
+# A sleeping server must be awake before durable state is requested. Do not
+# render an empty/stale chatroom while initialization or restoration is still
+# in progress.
+if st.session_state.get("backend_ready_status") == "initializing":
+    st.markdown(
+        '<div class="tp-init-status"><span class="tp-init-spinner"></span>'
+        '<span>Loading conversation…</span></div>',
+        unsafe_allow_html=True,
+    )
+    time.sleep(1)
+    st.rerun()
+
+if (
+    st.session_state.get("backend_ready_status") == "ready"
+    and not st.session_state.get("durable_session_restored")
+):
+    restored = _restore_api_session(st.session_state.chat_session_id)
+    if restored is None:
+        st.session_state.backend_ready_status = "error"
+        st.session_state.backend_ready_error = "Conversation could not be restored."
+        st.rerun()
+    if restored.get("exists") and not restored.get("closed"):
+        st.session_state.messages = restored.get("messages") or []
+        st.session_state.sales_phase = restored.get("sales_phase") or "main"
+        for key in ("customer_full_name", "customer_email", "customer_phone"):
+            if restored.get(key) is not None:
+                st.session_state[key] = restored[key]
+    st.session_state.durable_session_restored = True
 if "last_thinking_result" not in st.session_state:
     st.session_state.last_thinking_result = None
 if "thinking_status" not in st.session_state:
@@ -1219,6 +1244,7 @@ with st.sidebar:
                 del st.session_state[k]
         st.session_state.chat_session_id = str(uuid.uuid4())
         st.query_params["chat_session"] = st.session_state.chat_session_id
+        st.session_state.pop("durable_session_restored", None)
         st.session_state.last_thinking_result = None
         st.session_state.thinking_status = "idle"
         st.session_state.thinking_future = None
