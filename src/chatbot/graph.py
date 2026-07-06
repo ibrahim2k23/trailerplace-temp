@@ -9,7 +9,6 @@ from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -500,11 +499,7 @@ class PineconeMatchFramingDecision(BaseModel):
 
 @lru_cache(maxsize=1)
 def _mind_llm():
-    model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        MindDecision,
-        method="function_calling",
-    )
+    return make_llm(structured_output=MindDecision)
 
 
 @lru_cache(maxsize=1)
@@ -517,79 +512,49 @@ def _category_filter_confirmation_llm():
 
 @lru_cache(maxsize=1)
 def _filter_extractor_llm():
-    model = (
-        os.getenv("FILTER_EXTRACTOR_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        FilterExtractionDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="FILTER_EXTRACTOR_MODEL",
+        structured_output=FilterExtractionDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _requested_feature_extractor_llm():
-    model = (
-        os.getenv("REQUESTED_FEATURE_EXTRACTOR_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        RequestedFeatureExtractionDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="REQUESTED_FEATURE_EXTRACTOR_MODEL",
+        structured_output=RequestedFeatureExtractionDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _field_extraction_adjudicator_llm():
-    model = (
-        os.getenv("FIELD_EXTRACTION_ADJUDICATOR_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        FieldExtractionAdjudicationDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="FIELD_EXTRACTION_ADJUDICATOR_MODEL",
+        structured_output=FieldExtractionAdjudicationDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _non_recommendation_turn_llm():
-    model = (
-        os.getenv("NON_RECOMMENDATION_TURN_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        NonRecommendationTurnDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="NON_RECOMMENDATION_TURN_MODEL",
+        structured_output=NonRecommendationTurnDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _question_turn_adjudicator_llm():
-    model = (
-        os.getenv("QUESTION_TURN_ADJUDICATOR_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        QuestionTurnDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="QUESTION_TURN_ADJUDICATOR_MODEL",
+        structured_output=QuestionTurnDecision,
     )
 
 
 @lru_cache(maxsize=1)
 def _active_turn_reconciler_llm():
-    model = (
-        os.getenv("ACTIVE_TURN_RECONCILER_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        QuestionTurnDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="ACTIVE_TURN_RECONCILER_MODEL",
+        structured_output=QuestionTurnDecision,
     )
 
 
@@ -638,15 +603,14 @@ def _pinecone_audit_model_name() -> str:
 
 @lru_cache(maxsize=1)
 def _pinecone_match_audit_llm():
-    model = _pinecone_audit_model_name()
-
-    return ChatOpenAI(
-        model=model,
+    # Reasoning model with strict JSON schema; its model resolution deliberately
+    # does not fall back to OPENAI_MODEL, so pass the resolved name explicitly.
+    return make_llm(
+        model=_pinecone_audit_model_name(),
         temperature=None,
         use_responses_api=True,
         reasoning={"effort": "minimal"},
-    ).with_structured_output(
-        PineconeMatchFramingDecision,
+        structured_output=PineconeMatchFramingDecision,
         method="json_schema",
     )
 

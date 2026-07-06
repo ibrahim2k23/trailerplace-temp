@@ -39,6 +39,7 @@ def resolve_model(model_env: str | None = None, *, default: str = DEFAULT_MODEL)
 
 def make_llm(
     *,
+    model: str | None = None,
     model_env: str | None = None,
     default_model: str = DEFAULT_MODEL,
     temperature: float | None = 0.0,
@@ -48,11 +49,16 @@ def make_llm(
 ):
     """Build a ChatOpenAI client (optionally with structured output).
 
+    Pass ``model`` to use a pre-resolved model name verbatim (bypassing the
+    env-var resolution) — needed for sites like the match auditor whose fallback
+    chain deliberately does not consult ``OPENAI_MODEL``. Otherwise the model is
+    resolved from ``model_env`` -> ``OPENAI_MODEL`` -> ``default_model``.
+
     Passing ``temperature=None`` leaves it unset (used by reasoning models that
     reject an explicit temperature). Extra ``client_kwargs`` (e.g.
     ``use_responses_api``, ``reasoning``) are forwarded unchanged.
     """
-    model = resolve_model(model_env, default=default_model)
+    model = model or resolve_model(model_env, default=default_model)
     kwargs: dict[str, Any] = dict(client_kwargs)
     if temperature is not None:
         kwargs["temperature"] = temperature

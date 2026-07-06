@@ -4,7 +4,8 @@ import os
 import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+
+from src.chatbot.llm import make_llm
 
 
 # The single most safety-critical facts in a dealership reply are the phone
@@ -94,10 +95,7 @@ def compose_email_tool_reply(
     if not os.getenv("OPENAI_API_KEY"):
         return fallback
     try:
-        response = ChatOpenAI(
-            model=(os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip(),
-            temperature=0,
-        ).invoke(
+        response = make_llm().invoke(
             [
                 SystemMessage(
                     content=(

@@ -11,12 +11,12 @@ from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.chatbot.categories import resolve_category_from_text
 from src.chatbot.graph import build_chatbot_graph
+from src.chatbot.llm import make_llm
 from src.chatbot.email_reply import compose_email_tool_reply
 from src.chatbot.inventory_matcher import search_trailers
 from src.chatbot.inventory_matcher import should_attempt_chat_lookup
@@ -325,67 +325,46 @@ def reset_session(session_id: str) -> None:
     close_session(session_id)
 
 
+# Note: some contact classifiers pin gpt-4o-mini directly (model=_CHAT_MODEL) and
+# deliberately do not consult OPENAI_MODEL; others resolve OPENAI_MODEL first.
+# Both behaviors are preserved exactly through make_llm.
 def _contact_llm():
-    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
-        ContactExtraction,
-        method="function_calling",
-    )
+    return make_llm(model=_CHAT_MODEL, structured_output=ContactExtraction)
 
 
 def _confusion_llm():
-    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
-        ConfusionDetectionDecision,
-        method="function_calling",
-    )
+    return make_llm(model=_CHAT_MODEL, structured_output=ConfusionDetectionDecision)
 
 
 def _contact_prompt_reply_llm():
-    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        ContactPromptReplyDecision,
-        method="function_calling",
-    )
+    return make_llm(structured_output=ContactPromptReplyDecision)
 
 
 def _contact_prompt_bridge_llm():
-    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
     # temperature 0: this reply has hard content constraints (must not ask a
     # trailer question, must not repeat the saved request); determinism keeps it
     # on-policy and testable.
-    return ChatOpenAI(model=model, temperature=0)
+    return make_llm()
+
 
 def _contact_policy_validator_llm():
-    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
-        ContactPolicyDecision, method="function_calling"
-    )
+    return make_llm(model=_CHAT_MODEL, structured_output=ContactPolicyDecision)
 
 
 def _contact_policy_rewriter_llm():
-    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
-        ContactPolicyRewrite, method="function_calling"
-    )
+    return make_llm(model=_CHAT_MODEL, structured_output=ContactPolicyRewrite)
 
 
 def _initial_message_preservation_llm():
-    return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
-        InitialMessagePreservationDecision, method="function_calling"
-    )
+    return make_llm(model=_CHAT_MODEL, structured_output=InitialMessagePreservationDecision)
 
 
 def _catalogue_overview_llm():
-    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        CatalogueOverviewDecision,
-        method="function_calling",
-    )
+    return make_llm(structured_output=CatalogueOverviewDecision)
 
 
 def _unsupported_business_action_router_llm():
-    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        UnsupportedBusinessActionRoutingDecision,
-        method="function_calling",
-    )
+    return make_llm(structured_output=UnsupportedBusinessActionRoutingDecision)
 
 
 def _regex_contact(message: str) -> dict[str, Optional[str]]:
@@ -1088,7 +1067,7 @@ def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
         # prompt has hard constraints (no greeting, no contact ask). 0.4 was high
         # enough to leak those constraints; 0.2 keeps some warmth while staying
         # on-policy.
-        response = ChatOpenAI(model=_CHAT_MODEL, temperature=0.2).invoke(
+        response = make_llm(model=_CHAT_MODEL, temperature=0.2).invoke(
             [
                 SystemMessage(
                     content=(
@@ -1317,7 +1296,7 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
         return False
 
     try:
-        response = ChatOpenAI(model=_CHAT_MODEL, temperature=0).invoke(
+        response = make_llm(model=_CHAT_MODEL).invoke(
             [
                 SystemMessage(
                     content=(
@@ -2042,19 +2021,11 @@ def _inventory_lookup_response(
 
 
 def _listing_reference_llm():
-    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        ListingReferenceDecision,
-        method="function_calling",
-    )
+    return make_llm(structured_output=ListingReferenceDecision)
 
 
 def _listing_reference_intent_llm():
-    model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        ListingReferenceIntentDecision,
-        method="function_calling",
-    )
+    return make_llm(structured_output=ListingReferenceIntentDecision)
 
 
 def _legacy_messages(conversation: list[dict[str, Any]] | None) -> list[dict[str, Any]]:

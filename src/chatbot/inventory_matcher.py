@@ -12,10 +12,10 @@ from typing import Any, Literal, Optional
 import pandas as pd
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
+from src.chatbot.llm import make_llm
 from src.chatbot.make_resolver import resolve_make_from_text
 from src.normalizer import clean_dealer_notes
 
@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LISTINGS_FILE = _ROOT / "listings_final_v5.xlsx"
-_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
 _MAKE_ONLY = "MAKE_SEARCH"
 _YEAR_MAKE = "YEAR_MAKE_SEARCH"
@@ -283,10 +282,7 @@ def prepared_inventory() -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def _extractor_llm():
-    return ChatOpenAI(model=_MODEL, temperature=0).with_structured_output(
-        TrailerQueryExtraction,
-        method="function_calling",
-    )
+    return make_llm(structured_output=TrailerQueryExtraction)
 
 
 def _inventory_reply_llm_enabled() -> bool:
@@ -303,7 +299,7 @@ def _inventory_reply_llm():
     # temperature 0: the reply must not contradict the authoritative match_status
     # (post-hoc guardrails already revert contradictions); determinism reduces how
     # often those guardrails must fire.
-    return ChatOpenAI(model=_MODEL, temperature=0)
+    return make_llm()
 
 
 def _inventory_feature_framing_llm_enabled() -> bool:
@@ -317,17 +313,12 @@ def _inventory_feature_framing_llm_enabled() -> bool:
 
 @lru_cache(maxsize=1)
 def _inventory_feature_framing_llm():
-    model = (
-        os.getenv("INVENTORY_FEATURE_FRAMING_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or _MODEL
-    ).strip()
     # temperature 0: feature-framing has hard grounding constraints (must not
     # claim unconfirmed features, must not solicit contact); determinism keeps it
     # on-policy and testable.
-    return ChatOpenAI(model=model, temperature=0).with_structured_output(
-        InventoryFeatureFramingDecision,
-        method="function_calling",
+    return make_llm(
+        model_env="INVENTORY_FEATURE_FRAMING_MODEL",
+        structured_output=InventoryFeatureFramingDecision,
     )
 
 
