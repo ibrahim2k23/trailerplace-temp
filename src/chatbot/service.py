@@ -2153,8 +2153,19 @@ def handle_chat(request: ChatRequest) -> ChatResponse:
         ) from exc
 
 
-def _invoke_graph(session: dict[str, Any], user_message: str, already_shown: list[str]) -> dict[str, Any]:
+def _invoke_graph(
+    session: dict[str, Any],
+    user_message: str,
+    already_shown: list[str],
+    *,
+    suppress_active_question_progress: bool = False,
+) -> dict[str, Any]:
     graph_state = {
+        # When True, the active qualification question is frozen for this turn:
+        # the user is providing/declining the contact details we need to send a
+        # deferred email, so their reply is not a failed answer and must not
+        # advance the unanswered counter or trigger the skip-after-two escalation.
+        "suppress_active_question_progress": suppress_active_question_progress,
         "session_id": session["session_id"],
         "user_message": user_message,
         "messages": session.get("messages") or [],
@@ -2486,6 +2497,10 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
         context_session,
         effective_message,
         request.already_shown_listing_urls,
+        # A pending contact action at the start of this turn means we are
+        # collecting the missing name/phone/email needed to send a deferred email.
+        # Freeze the active qualification question's counter for such turns.
+        suppress_active_question_progress=had_pending_contact_action,
     )
     logger.info(
         "graph_result | session_id=%s | action=%r | category=%r | tool_events=%s",

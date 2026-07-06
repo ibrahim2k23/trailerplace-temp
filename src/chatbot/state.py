@@ -56,3 +56,6 @@ class ChatbotState(TypedDict, total=False):
     skipped_unanswered_slot: Optional[str]
     continue_search_after_email: bool
     pending_initial_user_message: Optional[str]
+    # Set by the service for a turn that is collecting the contact details needed
+    # to send a deferred email; freezes the active question's unanswered counter.
+    suppress_active_question_progress: bool

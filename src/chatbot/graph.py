@@ -6389,14 +6389,24 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             active_qna_unanswered = True
             active_qna_reply = question_turn.reply_to_user
         active_question_was_unanswered = active_qna_unanswered
+        # While the service is collecting the missing contact details required to
+        # send a deferred email, the active qualification question is frozen: the
+        # user's contact reply is not a failed answer, so it does not increment the
+        # unanswered counter or trigger the skip-after-two escalation. The hold
+        # releases once contact is provided (email sent) or declined, after which
+        # the next question's counter advances normally.
+        suppress_active_question_progress = bool(
+            state.get("suppress_active_question_progress")
+        )
         previous_unanswered_count = int(active_question_attempts.get(active_qna_slot) or 0)
         if active_question_was_resolved:
             active_question_attempts.pop(active_qna_slot, None)
-        elif active_qna_unanswered:
+        elif active_qna_unanswered and not suppress_active_question_progress:
             active_question_attempts[active_qna_slot] = previous_unanswered_count + 1
 
         if (
             active_qna_unanswered
+            and not suppress_active_question_progress
             and active_question_attempts.get(active_qna_slot, 0) >= 2
         ):
             repeated_unanswered_escalation = True

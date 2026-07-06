@@ -2641,6 +2641,39 @@ def test_active_counterquestion_replies_and_repeats_same_question(monkeypatch):
     assert "What kind of material do you expect to haul?" not in out["assistant_text"]
 
 
+def test_contact_collection_turn_freezes_active_question_counter(monkeypatch):
+    # When the service is collecting the missing contact details needed to send a
+    # deferred email (suppress_active_question_progress=True), a non-answer turn
+    # must NOT increment the unanswered counter or escalate — the user is
+    # answering the contact request, not failing the qualification question.
+    _use_fallback_extractor(monkeypatch)
+    monkeypatch.setattr(
+        graph,
+        "_adjudicate_active_question_turn",
+        lambda **kwargs: graph.QuestionTurnDecision(
+            answered_active_question=False,
+            no_preference_for_active_question=False,
+            reply_to_user="Thanks — could I get your name and a phone number or email?",
+            rephrased_question="What kind of material do you expect to haul?",
+            retry_slot="haul_material",
+            confidence="high",
+            reason="providing_contact_not_answer",
+        ),
+    )
+    state = _state("My name is Alex, phone 555-123-4567", category="Dump")
+    state["awaiting_slot"] = "haul_material"
+    state["active_question_attempts"] = {"haul_material": 1}
+    state["suppress_active_question_progress"] = True
+
+    out = graph._apply_mind_node(state)
+
+    # Counter frozen at its prior value; no escalation/skip while collecting contact.
+    assert out["active_question_attempts"].get("haul_material") == 1
+    assert out["repeated_unanswered_question_escalation"] is False
+    assert "haul_material" not in out["slots_skipped"]
+    assert out["awaiting_slot"] == "haul_material"
+
+
 def test_active_question_immediate_search_bypasses_current_question(monkeypatch):
     _use_fallback_extractor(monkeypatch)
     monkeypatch.setattr(
