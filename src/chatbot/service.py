@@ -97,16 +97,11 @@ _RESULT_NAV_CONFUSION_REPEAT_THRESHOLD = 3
 _CONFUSION_HISTORY_WINDOW = 6
 _CONFUSION_SCORE_THRESHOLD = 85
 _CONFUSION_SIMILARITY_THRESHOLD = 0.86
-_UNANSWERED_QUESTION_REPEAT_THRESHOLD = 2
 _CONTACT_ONLY_ACK = (
     "Thanks for sharing your contact details. I've saved them. "
     "How can I help you today?"
 )
 _CONTACT_CONTINUE_ACK = "Thanks for sharing your contact details. I've saved them."
-_INITIAL_CONTACT_REQUEST = (
-    "Thank you for contacting TrailerPlace. Before we get started, could I get your name, "
-    "email, and phone number? Sharing contact details is optional, and I can still help with your trailer search."
-)
 
 
 class ContactExtraction(BaseModel):
@@ -360,7 +355,10 @@ def _contact_prompt_reply_llm():
 
 def _contact_prompt_bridge_llm():
     model = (os.getenv("OPENAI_MODEL") or _CHAT_MODEL).strip()
-    return ChatOpenAI(model=model, temperature=0.3)
+    # temperature 0: this reply has hard content constraints (must not ask a
+    # trailer question, must not repeat the saved request); determinism keeps it
+    # on-policy and testable.
+    return ChatOpenAI(model=model, temperature=0)
 
 def _contact_policy_validator_llm():
     return ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
@@ -865,7 +863,23 @@ def _classify_contact_prompt_reply(session: dict[str, Any], latest_message: str)
             reason=str(decision.get("reason") or ""),
         )
     except Exception:
-        logger.exception("Contact prompt reply LLM failed; routing latest message")
+        logger.exception("Contact prompt reply LLM failed; using deterministic fallback")
+        # Deterministic recovery so a transient LLM outage never discards the
+        # customer's saved original request. If they refused/skipped contact,
+        # resume the saved request; if they clearly stated a new actionable
+        # request, route that; otherwise default to resuming (never lose intent).
+        if pending and _is_contact_refusal(latest_message):
+            return ContactPromptReplyDecision(
+                action="resume_saved_request", reason="LLM unavailable; refusal detected, resuming saved request."
+            )
+        if _has_actionable_intent(latest_message):
+            return ContactPromptReplyDecision(
+                action="route_latest_request", reason="LLM unavailable; latest message looks actionable."
+            )
+        if pending:
+            return ContactPromptReplyDecision(
+                action="resume_saved_request", reason="LLM unavailable; resuming saved request by default."
+            )
         return ContactPromptReplyDecision(action="route_latest_request", reason="LLM unavailable.")
 
 
@@ -925,17 +939,6 @@ def _contact_prompt_bridge_text(
         if action == "answer_contact_question":
             return _contact_explanation_text()
         return "No problem, you do not have to share contact details. I can keep helping here."
-
-
-def _message_for_routing(session: dict[str, Any], latest_message: str) -> str:
-    pending = str(session.get("pending_initial_user_message") or "").strip()
-    if not pending:
-        return latest_message
-    if _should_resume_pending_after_contact_ask(session, latest_message):
-        session["pending_initial_user_message"] = None
-        return pending
-    session["pending_initial_user_message"] = None
-    return latest_message
 
 
 def _without_latest_user_message(messages: list[dict[str, Any]], latest_message: str) -> list[dict[str, Any]]:
@@ -1087,7 +1090,11 @@ def _send_pending_contact_action_if_ready(
 
 def _main_smalltalk_response(session: dict[str, Any], user_message: str) -> str:
     try:
-        response = ChatOpenAI(model=_CHAT_MODEL, temperature=0.4).invoke(
+        # temperature 0.2: smalltalk allows a little phrasing variety, but the
+        # prompt has hard constraints (no greeting, no contact ask). 0.4 was high
+        # enough to leak those constraints; 0.2 keeps some warmth while staying
+        # on-policy.
+        response = ChatOpenAI(model=_CHAT_MODEL, temperature=0.2).invoke(
             [
                 SystemMessage(
                     content=(

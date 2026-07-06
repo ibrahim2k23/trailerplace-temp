@@ -300,7 +300,10 @@ def _inventory_reply_llm_enabled() -> bool:
 
 @lru_cache(maxsize=1)
 def _inventory_reply_llm():
-    return ChatOpenAI(model=_MODEL, temperature=0.3)
+    # temperature 0: the reply must not contradict the authoritative match_status
+    # (post-hoc guardrails already revert contradictions); determinism reduces how
+    # often those guardrails must fire.
+    return ChatOpenAI(model=_MODEL, temperature=0)
 
 
 def _inventory_feature_framing_llm_enabled() -> bool:
@@ -319,7 +322,10 @@ def _inventory_feature_framing_llm():
         or os.getenv("OPENAI_MODEL")
         or _MODEL
     ).strip()
-    return ChatOpenAI(model=model, temperature=0.25).with_structured_output(
+    # temperature 0: feature-framing has hard grounding constraints (must not
+    # claim unconfirmed features, must not solicit contact); determinism keeps it
+    # on-policy and testable.
+    return ChatOpenAI(model=model, temperature=0).with_structured_output(
         InventoryFeatureFramingDecision,
         method="function_calling",
     )

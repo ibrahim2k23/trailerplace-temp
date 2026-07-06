@@ -247,6 +247,10 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         },
     ),
 
+    # NOTE: "Welding" is NOT a canonical category (see categories.CANONICAL_CATEGORIES)
+    # and is never advertised or resolved to by the category resolver. This spec is
+    # currently unreachable via normal qualification; kept only for the ingest-side
+    # normalizer mapping. Promote it into CANONICAL_CATEGORIES before relying on it.
     "Welding": TrailerFieldSpec(
         category="Welding",
         required=["equipment_list"],

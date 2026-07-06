@@ -640,13 +640,19 @@ def _pinecone_match_framing_llm_enabled() -> bool:
     }
 
 
-@lru_cache(maxsize=1)
-def _pinecone_match_audit_llm():
-    model = (
+def _pinecone_audit_model_name() -> str:
+    # Single source of truth for the auditor model name so the diagnostic log
+    # (below) can never drift from the model actually invoked.
+    return (
         os.getenv("PINECONE_MATCH_AUDIT_MODEL")
         or os.getenv("PINECONE_MATCH_FRAMING_MODEL")
         or "gpt-5-mini"
     ).strip()
+
+
+@lru_cache(maxsize=1)
+def _pinecone_match_audit_llm():
+    model = _pinecone_audit_model_name()
 
     return ChatOpenAI(
         model=model,
@@ -1428,13 +1434,19 @@ def _pinecone_match_audit(
     requested_non_metadata_features: list[str],
 ) -> dict[str, Any]:
     listings = search_result.listings or []
+    # Scenario boundaries below are relative to the actual number of listings
+    # shown, not a hardcoded 6. The previous magic constant was tied to
+    # SEARCH_MAX_RECOMMENDATIONS (default 5), so Scenario C either never fired or
+    # misfired whenever that knob changed.
+    listing_count = len(listings)
+    max_partial_count = max(listing_count - 1, 1)
     audit_user_message = _audit_sanitize_text(user_message)
     audit_latest_message = _audit_sanitize_text(latest_user_message or user_message)
     audit_slots = _audit_sanitize_mapping(slots)
     audit_metadata_filters = _audit_sanitize_mapping(metadata_filters)
     audit_messages = [
         SystemMessage(
-                content="""You are an internal trailer match auditor. Return structured audit data only.
+                content=f"""You are an internal trailer match auditor. Return structured audit data only.
 
 Classify each supplied Pinecone result as full, partial, or alternative against the user's complete active request.
 
@@ -1468,18 +1480,18 @@ Say that the exact requested combination is not currently shown. Then describe t
 Never use these words/phrases here: strong match, close match, best match, top match, closest match, best-fitting, exact match.
 Example: "We don't have that exact combination right now, but here are some practical options worth comparing."
 
-SCENARIO B — full_match_count is 1 to 5:
+SCENARIO B — full_match_count is 1 to {max_partial_count}:
 Say that confirmed fits are shown first, followed by other relevant options worth comparing.
 Example: "Your confirmed fits are listed first, followed by other relevant trailers worth comparing."
 
-SCENARIO C — full_match_count = 6:
-Confidently state that every trailer shown is a confirmed match for exactly what the customer asked for. End with a short, confident line that this is a ready-to-compare lineup built for their exact request. Write it like an upbeat, confident marketer — not a flat confirmation.
-Example: "Every trailer below is a confirmed match for exactly what you're looking for — a ready-to-compare lineup built around your exact request."
+SCENARIO C — full_match_count = {listing_count} (every shown listing is a full match):
+Confidently state that every trailer shown matches the trailer type and features the customer asked for. End with a short, confident line that this is a ready-to-compare lineup built for their request. Write it like an upbeat, confident marketer — not a flat confirmation. Do NOT claim it matches "exactly" or that it meets their exact dimensions or specifications, because dimensions are audited separately and are not part of this check.
+Example: "Every trailer below matches the trailer type and features you asked for — a ready-to-compare lineup built around your request."
 
 Rules for ALL scenarios:(extremely important — follow these carefully)
 - Never mention dimensions, payload capacity, GVWR, or other weights.
 - Never list specific mismatches.
-- Never say "all results meet your needs/request/specifications/criteria" unless full_match_count = 6.
+- Never say "all results meet your needs/request/specifications/criteria" unless full_match_count = {listing_count}.
 
 * requested_non_metadata_features: user-requested features not represented by normal structured filters.
 * per_listing_match for every supplied listing position.
@@ -1515,14 +1527,10 @@ Rules for ALL scenarios:(extremely important — follow these carefully)
         "pinecone_match_audit_input_json | %s",
         _safe_json(
             {
-                "model": (
-                    os.getenv("PINECONE_MATCH_AUDIT_MODEL")
-                    or os.getenv("PINECONE_MATCH_FRAMING_MODEL")
-                    or "gpt-5.4-mini"
-                ).strip(),
+                "model": _pinecone_audit_model_name(),
                 "temperature": None,
                 "use_responses_api": True,
-                "reasoning": {"effort": "none"},
+                "reasoning": {"effort": "minimal"},
                 "structured_output_method": "json_schema",
                 "structured_output_schema": output_schema,
                 "messages": [
@@ -4749,6 +4757,7 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
         }
 
     deterministic_hint = resolution.category
+    deterministic_hint_tier = resolution.match_tier
 
     context = {
         "user_message": state.get("user_message"),
@@ -4800,10 +4809,37 @@ def _mind_node(state: ChatbotState) -> ChatbotState:
             state.get("user_message"),
         )
         decision.trailer_category = None
+    # The deterministic hint is advisory, not an unconditional override. The old
+    # code stamped the hint as explicit/high even when it came from a cargo word
+    # that beat the customer's explicitly named type, defeating a correct LLM
+    # proposal. Now: trust the hint when the LLM is silent or agrees, or when the
+    # hint is a naming-tier (explicitly named type) match; otherwise keep the
+    # LLM's own canonical category but lower confidence so the downstream
+    # category-transition reconciler still guards the change.
     if deterministic_hint:
-        decision.trailer_category = deterministic_hint
-        decision.category_resolution_kind = "explicit"
-        decision.category_confidence = "high"
+        llm_category = decision.trailer_category
+        if not llm_category or llm_category == deterministic_hint:
+            decision.trailer_category = deterministic_hint
+            decision.category_resolution_kind = "explicit"
+            decision.category_confidence = "high"
+        elif deterministic_hint_tier == "naming":
+            logger.info(
+                "category_hint_disagreement | hint=%r tier=%r llm=%r | preferring naming-tier hint",
+                deterministic_hint,
+                deterministic_hint_tier,
+                llm_category,
+            )
+            decision.trailer_category = deterministic_hint
+            decision.category_resolution_kind = "explicit"
+            decision.category_confidence = "high"
+        else:
+            logger.info(
+                "category_hint_disagreement | hint=%r tier=%r llm=%r | keeping LLM category at medium confidence",
+                deterministic_hint,
+                deterministic_hint_tier,
+                llm_category,
+            )
+            decision.category_confidence = "medium"
     pending_suggestion = dict(state.get("pending_category_suggestion") or {})
     if pending_suggestion:
         latest_choice_text = _normalize_choice_text(state.get("user_message") or "")

@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from src.chatbot.categories import category_prompt_block
+from src.chatbot.categories import advertised_categories_line, category_prompt_block
 from src.chatbot.make_inventory import make_prompt_block
 
 
@@ -16,9 +16,11 @@ Tone: helpful, confident, concise, positive sales focus.
 """.strip()
 
 
-KNOWLEDGE = """
+# Catalogue line is derived from the canonical category list (single source of
+# truth) so the advertised types can never diverge from what the system supports.
+KNOWLEDGE = f"""
 ## BUSINESS KNOWLEDGE
-- Trailer types carried: Utility, Dump, Equipment, Flatbed, Car Hauler, Livestock, Enclosed, Tilt, Roll-Off, Aluminum.
+- Trailer types carried: {advertised_categories_line()}.
 - Hitch configurations: Bumper Pull, Gooseneck (hitch types only — never trailer categories or makes).
 - Website: https://trailerplace.com | Phone: 979-532-1486 | Location: Wharton, TX
 - Services: financing, trade-ins, delivery, service, spare parts.

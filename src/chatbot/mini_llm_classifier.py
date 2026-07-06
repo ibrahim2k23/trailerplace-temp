@@ -177,9 +177,12 @@ def classify_haul_requirements(
                     SystemMessage(
                         content=(
                             system_prompt
-                            + "\nThe first classification was incomplete. Re-evaluate the conversation "
-                            "and return a corrected, fully consistent classification. Do not invent an "
-                            "item; when cargo is explicitly stated, matched_item is required."
+                            + "\nThe first classification set a flag without a matched_item. Re-evaluate. "
+                            "If the conversation does NOT explicitly state a specific cargo/item, return "
+                            "matched_item=null AND is_lightweight_utility_load=false AND "
+                            "needs_width_question=false with low confidence — that is the correct, expected "
+                            "answer, not a failure. Only when a specific item is explicitly stated should "
+                            "matched_item contain it."
                         )
                     ),
                     HumanMessage(
@@ -192,6 +195,16 @@ def classify_haul_requirements(
                     ),
                 ]
             )
+        # Deterministic invariant: a flag without a concrete cargo item is not
+        # actionable and previously came from the model inventing an item under
+        # retry pressure. If matched_item is still empty, clear the flags rather
+        # than let a fabricated item flow into the qualification slots/filters.
+        if not str(decision.matched_item or "").strip() and (
+            decision.is_lightweight_utility_load or decision.needs_width_question
+        ):
+            decision.is_lightweight_utility_load = False
+            decision.needs_width_question = False
+            decision.confidence = "low"
         return decision
     except Exception:
         logger.exception("Haul classifier LLM failed; returning an unclassified result")

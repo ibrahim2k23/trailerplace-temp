@@ -7,6 +7,45 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 
+# The single most safety-critical facts in a dealership reply are the phone
+# number and website. The LLM is only asked to "preserve" them, and generative
+# rewriting can transpose digits or drop the number. We therefore treat these as
+# constants and deterministically verify/repair the generated text against them
+# rather than trusting the model to reproduce them bit-for-bit.
+TRAILERPLACE_PHONE = "979-532-1486"
+TRAILERPLACE_URL = "https://trailerplace.com"
+
+# Matches any US-style phone token (e.g. 979-532-1486, 979.532.1486, 9795321486).
+_PHONE_TOKEN_RE = re.compile(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b")
+# Matches trailerplace.com with an optional scheme/path so a mangled URL variant
+# can be normalized back to the canonical form.
+_URL_TOKEN_RE = re.compile(r"(?:https?://)?(?:www\.)?trailerplace\.com\S*", re.IGNORECASE)
+
+
+def _enforce_contact_facts(text: str, fallback: str) -> str:
+    """Guarantee the canonical phone/website appear correctly in the reply.
+
+    Only enforced when the deterministic ``fallback`` already carried the fact,
+    so we never inject the dealership phone into a reply where it does not belong
+    (e.g. a reply that merely echoed a customer-supplied number).
+    """
+    result = text
+
+    if TRAILERPLACE_PHONE in fallback:
+        phones = _PHONE_TOKEN_RE.findall(result)
+        if phones:
+            # Repair any transposed/incorrect number to the canonical one.
+            result = _PHONE_TOKEN_RE.sub(TRAILERPLACE_PHONE, result)
+        elif result:
+            result = f"{result} You can reach our team at {TRAILERPLACE_PHONE}."
+
+    if "trailerplace.com" in fallback.lower():
+        if _URL_TOKEN_RE.search(result):
+            result = _URL_TOKEN_RE.sub(TRAILERPLACE_URL, result)
+
+    return result
+
+
 EDITABLE_CUSTOMER_RESPONSE_GUIDANCE = """
 CUSTOMER RESPONSE GUIDANCE:
 
@@ -101,6 +140,7 @@ def compose_email_tool_reply(
                 for part in re.split(r"(?<=[.!?])\s+", text)
                 if part.strip() and not part.strip().endswith("?")
             ).strip()
+        text = _enforce_contact_facts(text, fallback)
         return text or fallback
     except Exception:
         return fallback
