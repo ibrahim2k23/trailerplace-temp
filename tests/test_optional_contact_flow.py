@@ -48,7 +48,7 @@ def test_partial_contact_gets_one_followup_then_resumes_saved_request(monkeypatc
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -82,7 +82,7 @@ def test_contact_plus_message_continues_with_clean_routing_context(monkeypatch):
     )
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args: (False, 0))
     monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args: True)
-    def invoke(context, message, _shown):
+    def invoke(context, message, _shown, **_kwargs):
         captured.update(message=message, messages=context["messages"])
         return {"assistant_text": "Yes, financing is available.", "tool_events": [], "last_listings": []}
     monkeypatch.setattr(service, "_invoke_graph", invoke)
@@ -100,18 +100,10 @@ def test_contact_refusal_policy_and_authoritative_category_resolution(monkeypatc
     session = service._new_session("policy-category")
     session["contact_status"] = "contact_declined"
 
-    class _Validator:
-        def invoke(self, _messages):
-            return service.ContactPolicyDecision(violates_contact_policy=True)
-
-    class _Rewriter:
-        def invoke(self, _messages):
-            return service.ContactPolicyRewrite(
-                assistant_text="What will you be hauling on the utility trailer?"
-            )
-
-    monkeypatch.setattr(service, "_contact_policy_validator_llm", lambda: _Validator())
-    monkeypatch.setattr(service, "_contact_policy_rewriter_llm", lambda: _Rewriter())
+    # The contact-response policy is now enforced purely by the deterministic
+    # regex guard in _enforce_contact_response_policy (the old validator/rewriter
+    # LLMs were removed as dead code). A prompt that asks for email/phone while
+    # contact is declined is rewritten to the active question.
     cleaned = service._enforce_contact_response_policy(
         session,
         "Please provide your email or phone number.",
@@ -175,7 +167,7 @@ def test_meaningful_initial_message_resumes_after_contact_refusal(monkeypatch):
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args: (False, 0))
     monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args: True)
     monkeypatch.setattr(service, "_enforce_contact_response_policy", lambda _s, text, *_a: text)
-    monkeypatch.setattr(service, "_invoke_graph", lambda _s, message, _shown: {
+    monkeypatch.setattr(service, "_invoke_graph", lambda _s, message, _shown, **_kwargs: {
         "assistant_text": f"Answering: {message}", "tool_events": [], "last_listings": []
     })
 
@@ -241,7 +233,7 @@ def test_simple_catalogue_question_resumes_after_contact(monkeypatch):
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": "TrailerPlace carries utility, dump, equipment, enclosed, flatbed, car hauler, livestock, tilt, roll-off, and more.",
             "tool_events": [],
             "last_listings": [],
@@ -414,7 +406,7 @@ def test_refusal_after_initial_contact_request_continues_original_request(monkey
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing with: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -453,7 +445,7 @@ def test_new_actionable_request_after_contact_refusal_replaces_original_request(
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing with: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -486,7 +478,7 @@ def test_contact_ignored_requirement_refines_saved_request(monkeypatch):
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing with: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -516,7 +508,7 @@ def test_unclear_reply_after_initial_contact_request_continues_original_request(
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing with: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -544,7 +536,7 @@ def test_contact_reason_question_is_answered_then_saved_request_continues(monkey
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing with: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -570,7 +562,7 @@ def test_resumed_graph_does_not_receive_contact_reply_as_recent_context(monkeypa
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
     monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: True)
 
-    def _invoke_graph(session, message, _shown):
+    def _invoke_graph(session, message, _shown, **_kwargs):
         graph_messages.extend(session.get("messages") or [])
         return {
             "assistant_text": f"What type of trailer are you looking for? ({message})",
@@ -616,7 +608,7 @@ def test_contact_resume_and_selective_category_filter_carryover(monkeypatch):
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
     monkeypatch.setattr(service, "_should_route_to_graph", lambda *_args, **_kwargs: True)
 
-    def _capture_resumed_request(_session, message, _shown):
+    def _capture_resumed_request(_session, message, _shown, **_kwargs):
         resumed_messages.append(message)
         return {
             "assistant_text": "Continuing your trailer search.",
@@ -757,7 +749,7 @@ def test_category_clarification_state_survives_after_contact_resume(monkeypatch)
     monkeypatch.setattr(service, "_contact_prompt_bridge_text", _bridge)
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
 
-    def _invoke_graph(session, message, _shown):
+    def _invoke_graph(session, message, _shown, **_kwargs):
         if message == "I am looking for an office trailer":
             return {
                 "assistant_text": "Will this be for fiber/telecom work specifically, or a more general office trailer?",
@@ -1036,7 +1028,7 @@ def test_opportunistic_contact_capture_fills_missing_fields_during_normal_flow(m
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Continuing with: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -1800,7 +1792,7 @@ def test_contact_plus_listing_interest_routes_to_graph(monkeypatch):
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Graph handled: {message}",
             "tool_events": [{"tool": "send_interested_listing_email", "status": "sent"}],
             "last_listings": session["last_listings"],
@@ -1834,7 +1826,7 @@ def test_contact_plus_new_trailer_request_routes_to_graph(monkeypatch):
     monkeypatch.setattr(
         service,
         "_invoke_graph",
-        lambda _session, message, _shown: {
+        lambda _session, message, _shown, **_kwargs: {
             "assistant_text": f"Graph handled: {message}",
             "tool_events": [],
             "last_listings": [],
@@ -2710,7 +2702,7 @@ def test_result_interest_followup_is_deterministic():
         ],
     )
 
-    assert text == "Want to compare any of these side by side?"
+    assert text == "Do any of these trailers interest you?"
 
 
 def test_metadata_only_followups_route_to_graph_with_search_context():
@@ -2820,7 +2812,9 @@ def test_business_overview_smalltalk_prompt_guides_llm(monkeypatch):
 
             return _Response()
 
-    monkeypatch.setattr(service, "ChatOpenAI", _OverviewLLM)
+    # Smalltalk now builds its client through the central make_llm factory
+    # (E2) rather than constructing ChatOpenAI directly.
+    monkeypatch.setattr(service, "make_llm", lambda *_args, **_kwargs: _OverviewLLM())
 
     response = service._main_smalltalk_response(session, "what services do you guys offer?")
 
