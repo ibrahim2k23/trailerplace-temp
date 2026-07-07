@@ -1332,8 +1332,6 @@ else:
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            for j, listing in enumerate(msg.get("listings") or [], 1):
-                render_card(listing, j)
             if msg.get("role") == "assistant":
                 prev_fb = msg.get("user_feedback")
                 if isinstance(prev_fb, dict):
@@ -1536,8 +1534,6 @@ def _process_assistant_reply(prompt: str) -> bool:
             })
             assistant_message_index = len(st.session_state.messages) - 1
         st.markdown(response_text)
-        for i, listing in enumerate(listings or [], 1):
-            render_card(listing, i)
 
     if thinking_agent_enabled() and thinking_context is not None:
         st.session_state.last_thinking_payload = thinking_context

@@ -1288,6 +1288,9 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     LLM-first routing for the main phase.
     This prevents regex misses (for example "I like the 4th one") from falling into smalltalk.
     """
+    if _has_store_or_contact_info_question(user_message):
+        return True
+
     if not _has_contact(session) and _is_contact_only_message(user_message):
         return False
 
@@ -2333,7 +2336,16 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
     contact_reply_action: str | None = None
     contact_reply_latest_message = ""
     contact_reply_saved_request = ""
-    if was_awaiting_initial_contact or contact_became_available:
+    route_contact_info_question = (
+        was_awaiting_initial_contact
+        and _has_store_or_contact_info_question(request.message)
+        and not _is_contact_explanation_question(request.message)
+    )
+    if route_contact_info_question:
+        session["awaiting_initial_contact_reply"] = False
+        session["pending_initial_user_message"] = None
+        effective_message = request.message
+    elif was_awaiting_initial_contact or contact_became_available:
         session["awaiting_initial_contact_reply"] = False
         contact_reply_decision = _classify_contact_prompt_reply(session, request.message)
         if contact_reply_decision.action == "decline_contact_details":

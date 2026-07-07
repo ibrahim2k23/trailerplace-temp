@@ -558,6 +558,50 @@ def test_contact_reason_question_is_answered_then_saved_request_continues(monkey
     assert service._get_session(session_id)["pending_initial_user_message"] is None
 
 
+def test_store_contact_question_after_initial_contact_prompt_routes_to_graph(monkeypatch):
+    session_id = "00000000-0000-0000-0000-000000001128"
+    service.reset_session(session_id)
+    session = service._get_session(session_id)
+    session.update(
+        initial_contact_request_asked=True,
+        awaiting_initial_contact_reply=True,
+    )
+    routed = []
+
+    monkeypatch.setattr(service, "create_or_get_soft_lead", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "update_lead_contact", lambda **_kwargs: "lead")
+    monkeypatch.setattr(service, "_extract_contact", lambda *_args, **_kwargs: {
+        "full_name": None,
+        "email": None,
+        "phone": None,
+        "name_confidence": "none",
+    })
+    monkeypatch.setattr(
+        service,
+        "_classify_contact_prompt_reply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("store contact questions should bypass contact-prompt classification")
+        ),
+    )
+    monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
+    monkeypatch.setattr(service, "_should_route_to_graph", lambda _session, message: routed.append(message) or True)
+    monkeypatch.setattr(
+        service,
+        "_invoke_graph",
+        lambda _session, message, _shown: {
+            "assistant_text": "You can reach our team at 979-532-1486.",
+            "tool_events": [{"tool": "send_non_sales_faq_email", "result": {"status": "sent"}}],
+            "last_listings": [],
+        },
+    )
+
+    response = service.handle_chat(_req(session_id, "How can I contact you guys?"))
+
+    assert routed == ["How can I contact you guys?"]
+    assert response.assistant_text == "You can reach our team at 979-532-1486."
+    assert service._get_session(session_id)["awaiting_initial_contact_reply"] is False
+
+
 def test_resumed_graph_does_not_receive_contact_reply_as_recent_context(monkeypatch):
     session_id = "00000000-0000-0000-0000-000000001014"
     service.reset_session(session_id)

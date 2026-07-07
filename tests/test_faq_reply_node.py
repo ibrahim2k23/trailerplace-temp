@@ -94,6 +94,28 @@ def test_faq_node_uses_generic_fallback_for_unknown_category(monkeypatch):
     assert out["assistant_text"] == "You can reach our team at 979-532-1486. Happy to keep helping with your trailer search too!"
 
 
+def test_faq_node_missing_contact_uses_neutral_team_notification_copy():
+    state = _base_state()
+    state.update(
+        {
+            "customer_full_name": None,
+            "customer_email": None,
+            "customer_phone": None,
+            "user_message": "How do I contact you guys?",
+            "mind_decision": {
+                "faq_category": "contact_human",
+                "assistant_text": "You can reach our team at 979-532-1486.",
+            },
+        }
+    )
+
+    out = graph._faq_email_node(state)
+
+    assert out["assistant_text"].startswith("To notify our team, could you share your name")
+    assert "customer asked to contact a person" not in out["assistant_text"].lower()
+    assert out["tool_events"][-1]["result"]["status"] == "deferred_missing_contact"
+
+
 def test_escalation_node_defers_for_contact_and_repeats_active_question():
     state = _base_state()
     state.update(

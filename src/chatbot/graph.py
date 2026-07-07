@@ -1732,21 +1732,22 @@ def _has_contact(state: ChatbotState) -> bool:
     )
 
 
-def _missing_contact_request(state: ChatbotState, reason: str) -> str:
-    clean_reason = str(reason or "this request").strip()
+def _missing_contact_request(state: ChatbotState, reason: str | None = None) -> str:
+    clean_reason = str(reason or "").strip()
+    purpose = f" about {clean_reason}" if clean_reason else ""
     if state.get("customer_full_name"):
         return (
-            f"To send {clean_reason} to our team, could you share either an email address "
-            "or phone number? Sharing it is optional, and we can keep working on your trailer search."
+            f"To notify our team, could you share either a phone number "
+            "or email address? Sharing it is optional, and we can keep working on your trailer search."
         )
     if state.get("customer_phone") or state.get("customer_email"):
         return (
-            f"To send {clean_reason} to our team, could you share your name? "
+            f"To notify our team, could you share your name? "
             "Sharing it is optional, and we can keep working on your trailer search."
         )
     return (
-        f"To send {clean_reason} to our team, could you share your name and either an email "
-        "address or phone number? Sharing them is optional, and we can keep working on your trailer search."
+        f"To notify our team, could you share your name and either a phone "
+        "number or email address? Sharing them is optional, and we can keep working on your trailer search."
     )
 
 
@@ -7145,7 +7146,7 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
         events.append({"tool": "send_non_sales_faq_email", "result": {"status": "deferred_missing_contact"}})
         return {
             **state,
-            "assistant_text": _missing_contact_request(state, summary.lower()),
+            "assistant_text": _missing_contact_request(state),
             "pending_contact_action": {
                 "type": "faq",
                 "faq_category": category,
