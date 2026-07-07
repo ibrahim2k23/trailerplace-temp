@@ -45,6 +45,7 @@ from src.chatbot.prompts import (
     TRAILERPLACE_KNOWLEDGE_SECTION,
     active_slot_policy,
     escalation_actions,
+    faq_triggers,
     EXTRACTOR_NO_VALUE,
     ADJUDICATOR_NO_VALUE,
 )
@@ -2447,7 +2448,7 @@ def _adjudicate_office_trailer_clarification_turn(
                 "Enclosed": "General office trailer, office work, office use, office only, jobsite office, site office, mobile office, workspace, admin office, crew office, or similar.",
             },
             "tool_rules": {
-                "send_non_sales_faq_email": "Use for contact/human help, financing, trade-in, service/parts, or store/location info.",
+                "send_non_sales_faq_email": f"Use for {faq_triggers()}.",
                 "send_escalation_alert_email": f"Use when the customer asks TrailerPlace/the team to perform an unsupported real-world action: {escalation_actions()}. General information questions do not qualify.",
             },
         }
@@ -3021,7 +3022,7 @@ def _adjudicate_active_question_turn(
                     "An email-triggering request interrupts but never answers or skips the active qualification "
                     "question. Set answered_active_question=false and no_preference_for_active_question=false. "
                     "Provide a natural reply and let the app preserve or advance the question flow.\n"
-                    "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
+                    f"- send_non_sales_faq_email: {faq_triggers()}.\n"
                     f"- send_escalation_alert_email: requests that the business perform an unsupported real-world "
                     f"action — {escalation_actions()}.\n"
                     "- Escalate action requests, not ordinary questions. 'Remind me tomorrow' and 'schedule a call at "

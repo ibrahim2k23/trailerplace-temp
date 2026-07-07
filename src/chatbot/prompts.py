@@ -527,3 +527,9 @@ def escalation_actions() -> str:
         "application, or paperwork; call/text/email the customer; schedule a call, meeting, "
         "appointment, delivery, pickup, service, or installation; or make a future timing commitment"
     )
+
+
+def faq_triggers() -> str:
+    """Single source of truth for what routes to send_non_sales_faq_email
+    (Stage E3). Prompt-text only, no deterministic detection."""
+    return "contact/human help, financing, trade-in, service/parts, or store/location info"
