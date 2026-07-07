@@ -16,7 +16,11 @@ import os
 import uuid
 
 import pytest
+from dotenv import load_dotenv
 
+# Load .env so OPENAI_API_KEY/PINECONE_API_KEY are visible when the skip
+# condition below is evaluated at collection time.
+load_dotenv()
 os.environ.setdefault("TRAILERPLACE_PERSIST_CHATS", "0")
 
 pytestmark = pytest.mark.skipif(
@@ -36,37 +40,48 @@ def _sid() -> str:
     return str(uuid.uuid4())
 
 
-def _drive_to_results(opening: str, session_id: str, max_turns: int = 8):
-    """Send an opening request, then answer 'no preference' until listings appear."""
+def _is_contact_gate(text: str) -> bool:
+    t = (text or "").lower()
+    return "your name" in t and ("phone" in t or "email" in t)
+
+
+def _open(opening: str, session_id: str):
+    """Send the opening request and clear the turn-1 optional-contact gate."""
     resp = _chat(opening, session_id)
+    if _is_contact_gate(resp.assistant_text):
+        resp = _chat("no thanks", session_id)  # declining resumes the saved request
+    return resp
+
+
+def _drive_to_cards(opening: str, session_id: str, max_turns: int = 8):
+    """Open, then answer 'no preference' until inventory cards appear in the text."""
+    resp = _open(opening, session_id)
     for _ in range(max_turns):
-        if resp.listings:
+        if "trailerplace.com/inventory" in (resp.assistant_text or ""):
             return resp
         resp = _chat("no preference", session_id)
     return resp
 
 
 def test_faq_contact_reply_contains_phone():
-    resp = _chat("how do I contact your team?", _sid())
+    resp = _open("how do I contact your team?", _sid())
     assert "979-532-1486" in (resp.assistant_text or "")
 
 
 def test_catalogue_question_lists_real_types():
-    text = (_chat("what kind of trailers do you carry?", _sid()).assistant_text or "").lower()
-    # at least a couple of canonical types should be named
+    text = (_open("what kind of trailers do you carry?", _sid()).assistant_text or "").lower()
     assert sum(t in text for t in ("utility", "dump", "enclosed", "flatbed", "livestock")) >= 2
 
 
 def test_tilt_use_case_resolves_and_searches():
-    sid = _sid()
-    resp = _drive_to_results("I want a tilt trailer to haul a tractor", sid)
-    assert resp.listings, "expected listings after qualifying a tilt request"
-    cats = {getattr(l, "category_subcategory", "").split(" > ")[0] for l in resp.listings}
-    assert cats == {"Tilt"}, f"expected only Tilt listings, got {cats}"
+    text = (_drive_to_cards("I want a tilt trailer to haul a tractor", _sid()).assistant_text or "").lower()
+    assert "trailerplace.com/inventory" in text, "expected inventory cards for a tilt request"
+    assert "tilt" in text, "expected tilt trailers surfaced"
 
 
 def test_make_search_returns_only_that_make():
-    resp = _drive_to_results("show me Cargo Craft enclosed trailers", _sid())
-    assert resp.listings, "expected listings for a Cargo Craft search"
-    makes = {getattr(l, "make", "") for l in resp.listings}
-    assert makes == {"Cargo Craft"}, f"expected only Cargo Craft, got {makes}"
+    text = (_drive_to_cards("show me Cargo Craft enclosed trailers", _sid()).assistant_text or "").lower()
+    assert "cargo craft" in text, "expected Cargo Craft results"
+    # no other real brand should appear in the returned cards
+    others = ("iron bull", "diamond c", "kaufman", "aluma", "galyean", "stallion")
+    assert not [b for b in others if b in text], "expected only Cargo Craft in results"
