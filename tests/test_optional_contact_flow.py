@@ -1715,16 +1715,10 @@ def test_unsupported_business_action_routing_uses_structured_classifier(monkeypa
     session["initial_contact_request_asked"] = True
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(service, "_is_catalogue_overview_turn", lambda *_args, **_kwargs: False)
-
-    class _UnsupportedActionRouter:
-        def invoke(self, _messages):
-            return service.UnsupportedBusinessActionRoutingDecision(
-                should_route_graph=True,
-                reason="customer requested a business action",
-            )
-
-    monkeypatch.setattr(service, "_unsupported_business_action_router_llm", lambda: _UnsupportedActionRouter())
+    monkeypatch.setattr(
+        service, "_route_decision",
+        lambda *_args, **_kwargs: service.RoutingDecision(route="escalation", reason="business action"),
+    )
 
     assert service._should_route_to_graph(session, "Please arrange the paperwork for me") is True
 
@@ -1743,8 +1737,7 @@ def test_contact_info_question_with_buying_intent_uses_faq_tool_not_generic_cate
     monkeypatch.setattr(service, "update_lead_contact", lambda **kwargs: "00000000-0000-0000-0000-000000009121")
     monkeypatch.setattr(service, "_persist", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service, "_is_confused_user_turn", lambda *_args, **_kwargs: (False, 0))
-    monkeypatch.setattr(service, "_is_catalogue_overview_turn", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(service, "_is_unsupported_business_action_turn", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service, "_route_decision", lambda *_args, **_kwargs: service.RoutingDecision(route="other"))
     monkeypatch.setattr(
         graph,
         "_classify_non_recommendation_turn",
@@ -2743,15 +2736,7 @@ def test_active_recommendation_qna_stays_in_graph_even_if_overview_classifier_fi
         {"role": "user", "content": "what are the options?"},
     ]
 
-    class _OverviewClassifier:
-        def invoke(self, messages):
-            assert "active qualification question" in messages[0].content
-            return service.CatalogueOverviewDecision(
-                is_catalogue_overview=True,
-                reason="User asks for broad trailer options, not a specific recommendation.",
-            )
-
-    monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
+    monkeypatch.setattr(service, "_route_decision", lambda *_a, **_k: service.RoutingDecision(route="catalogue_overview"))
 
     assert service._should_route_to_graph(session, "what are the options?") is True
 
@@ -2769,14 +2754,7 @@ def test_active_qna_answer_stays_in_graph_even_if_overview_classifier_fires(monk
         {"role": "user", "content": "construction debris"},
     ]
 
-    class _OverviewClassifier:
-        def invoke(self, _messages):
-            return service.CatalogueOverviewDecision(
-                is_catalogue_overview=True,
-                reason="Incorrect broad overview classification.",
-            )
-
-    monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
+    monkeypatch.setattr(service, "_route_decision", lambda *_a, **_k: service.RoutingDecision(route="catalogue_overview"))
 
     assert service._should_route_to_graph(session, "construction debris") is True
 
@@ -2784,14 +2762,7 @@ def test_active_qna_answer_stays_in_graph_even_if_overview_classifier_fires(monk
 def test_specific_recommendation_request_still_routes_with_catalogue_classifier(monkeypatch):
     session = service._new_session("specific-search-route")
 
-    class _OverviewClassifier:
-        def invoke(self, _messages):
-            return service.CatalogueOverviewDecision(
-                is_catalogue_overview=False,
-                reason="User gives a specific trailer shopping request.",
-            )
-
-    monkeypatch.setattr(service, "_catalogue_overview_llm", lambda: _OverviewClassifier())
+    monkeypatch.setattr(service, "_route_decision", lambda *_a, **_k: service.RoutingDecision(route="other"))
 
     assert service._should_route_to_graph(session, "show me 12 ft livestock trailers") is True
 

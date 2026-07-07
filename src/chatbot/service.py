@@ -147,13 +147,10 @@ class InitialMessagePreservationDecision(BaseModel):
     reason: str = ""
 
 
-class CatalogueOverviewDecision(BaseModel):
-    is_catalogue_overview: bool = False
-    reason: str = ""
-
-
-class UnsupportedBusinessActionRoutingDecision(BaseModel):
-    should_route_graph: bool = False
+class RoutingDecision(BaseModel):
+    # Single merged main-phase router (E5): replaces the catalogue-overview,
+    # unsupported-business-action, and ROUTE/SMALLTALK gates.
+    route: Literal["escalation", "catalogue_overview", "listings_followup", "other"] = "other"
     reason: str = ""
 
 
@@ -360,12 +357,8 @@ def _initial_message_preservation_llm():
     return make_llm(model=_CHAT_MODEL, structured_output=InitialMessagePreservationDecision)
 
 
-def _catalogue_overview_llm():
-    return make_llm(structured_output=CatalogueOverviewDecision)
-
-
-def _unsupported_business_action_router_llm():
-    return make_llm(structured_output=UnsupportedBusinessActionRoutingDecision)
+def _routing_llm():
+    return make_llm(structured_output=RoutingDecision)
 
 
 def _regex_contact(message: str) -> dict[str, Optional[str]]:
@@ -1141,39 +1134,38 @@ def _has_metadata_update_intent(message: str) -> bool:
     return bool(resolve_make_from_text(text, use_llm_fallback=False).make)
 
 
-def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> bool:
+
+def _route_decision(session: dict[str, Any], user_message: str, has_prior_listings: bool) -> RoutingDecision:
+    """Merged main-phase router (E5): one structured call replacing the
+    catalogue-overview, unsupported-business-action, and ROUTE/SMALLTALK gates.
+    Called only after the deterministic pre-checks are inconclusive."""
     text = (user_message or "").strip()
-    if not text:
-        return False
-    if _has_actionable_intent(text) and re.search(
-        r"\b(?:haul|hauling|carry|carrying|load|transport|tow|vehicle|equipment|mower|tractor|skid\s*steer)\b",
-        text,
-        re.I,
-    ):
-        return False
+    if not text or not os.getenv("OPENAI_API_KEY"):
+        return RoutingDecision(route="other", reason="no_text_or_key")
     try:
-        decision = _catalogue_overview_llm().invoke(
+        decision = _routing_llm().invoke(
             [
                 SystemMessage(
                     content=(
-                        "Classify whether the latest user message is asking for a broad overview of what "
-                        "TrailerPlace carries/offers, instead of asking the planner to recommend or search "
-                        "specific inventory. Return structured fields only.\n\n"
-                        "Set is_catalogue_overview=true when the user asks what trailer types, options, "
-                        "lineup, inventory categories, products, or services TrailerPlace has/carries/sells, "
-                        "and the user has not provided enough specific shopping constraints to search inventory.\n\n"
-                        "Set is_catalogue_overview=true even if the chat currently has an active qualification "
-                        "question, when the latest message is asking about available types/options generally.\n\n"
-                        "Set is_catalogue_overview=false when the user wants recommendations, asks what options fit "
-                        "a use case, asks to show/search "
-                        "trailers, gives constraints like category/length/make/budget/payload/hitch/features, "
-                        "answers a qualification question with a preference, expresses purchase interest, asks "
-                        "about a specific listing, or asks for more/next options after listing results were shown.\n\n"
-                        "Examples of true: 'what trailers do you offer?', 'what are the options?', "
-                        "'which type of trailers do you have?', 'what do you guys carry?'.\n"
-                        "Examples of false: 'show me utility trailers', 'I need a 12 ft livestock trailer', "
-                        "'what are my options for hauling heavy vehicles?', 'more options' after listings, "
-                        "'I want an enclosed trailer', 'what is the price of stock 123'."
+                        "Classify the latest customer message into exactly one route for a trailer-sales "
+                        "assistant. Return structured fields only. Evaluate in this priority order:\n\n"
+                        f"1. route='escalation' — the customer asks TrailerPlace/the team to perform a real-world "
+                        f"action or commitment the chatbot cannot complete directly: {escalation_actions()}. "
+                        "Action requests only ('reserve this', 'remind me tomorrow', 'send a quote', 'schedule a "
+                        "call at 3 PM'). Requests to stop/skip questions or to show results/options/inventory are "
+                        "NOT escalation. Information questions ('what does it cost?', 'do you offer financing?', "
+                        "'how do reservations work?') are NOT escalation.\n"
+                        "2. route='catalogue_overview' — the customer asks broadly what trailer types, options, "
+                        "lineup, inventory categories, products, or services TrailerPlace has/carries/sells, without "
+                        "enough specific constraints to search ('what trailers do you offer?', 'what are the "
+                        "options?', 'what do you guys carry?'). NOT this when they give constraints "
+                        "(category/length/make/budget/hitch/features), want recommendations for a use case, ask to "
+                        "show/search trailers, answer a qualification question, express purchase interest, ask about "
+                        "a specific listing, or ask for more/next options after results.\n"
+                        "3. route='listings_followup' — the message could refer to previously shown listings: "
+                        "selection, ordinal reference ('the 4th one'), follow-up constraints, asking for more "
+                        "options, or purchase intent.\n"
+                        "4. route='other' — none of the above (ordinary smalltalk or a question answerable without a tool)."
                     )
                 ),
                 HumanMessage(
@@ -1185,8 +1177,7 @@ def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> b
                             "trailer_category": session.get("trailer_category"),
                             "slots_collected": session.get("slots_collected") or {},
                             "metadata_filters_collected": session.get("metadata_filters_collected") or {},
-                            "has_shown_search_results": bool(session.get("has_shown_search_results")),
-                            "has_last_listings": bool(session.get("last_listings") or session.get("already_shown_listing_urls")),
+                            "has_prior_listings": has_prior_listings,
                             "recent_messages": (session.get("messages") or [])[-6:],
                         },
                         default=str,
@@ -1194,77 +1185,11 @@ def _is_catalogue_overview_turn(session: dict[str, Any], user_message: str) -> b
                 ),
             ]
         )
-        result = bool(decision.is_catalogue_overview)
-        logger.info(
-            "catalogue_overview_route_decision | is_catalogue_overview=%s | reason=%r | latest_message=%r | awaiting_slot=%r | has_last_listings=%s",
-            result,
-            decision.reason,
-            text,
-            session.get("awaiting_slot"),
-            bool(session.get("last_listings") or session.get("already_shown_listing_urls")),
-        )
-        return result
+        logger.info("route_decision | route=%s | reason=%r | latest_message=%r", decision.route, decision.reason, text)
+        return decision
     except Exception:
-        logger.exception("Catalogue overview classifier failed; keeping existing routing behavior")
-        return False
-
-
-def _is_unsupported_business_action_turn(session: dict[str, Any], user_message: str) -> bool:
-    text = (user_message or "").strip()
-    if not text:
-        return False
-    if not os.getenv("OPENAI_API_KEY"):
-        return False
-    try:
-        decision = _unsupported_business_action_router_llm().invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "Classify whether the latest user message should be routed to the trailer-planner graph "
-                        "because it may require the Escalation Alert email tool. Return structured fields only.\n\n"
-                        f"Set should_route_graph=true when the customer asks TrailerPlace/the team to perform a "
-                        f"real-world action or commitment the chatbot cannot complete directly: {escalation_actions()}.\n\n"
-                        "Set should_route_graph=false for broad catalogue browsing, ordinary trailer information, "
-                        "recommendations/search requests, supported FAQ topics like financing/trade-in/service/"
-                        "store info, simple smalltalk, and direct questions the assistant can answer without a tool.\n\n"
-                        "Requests to stop or skip qualification questions and requests to show results, options, "
-                        "listings, trailers, or inventory are supported search-control requests, not escalation actions. "
-                        "They must be false here even when phrased urgently.\n\n"
-                        "Examples that must be false: 'I want one to haul raw materials for construction', "
-                        "'what trailer should I use for heavy items', and other normal trailer recommendation turns.\n\n"
-                        "Action requests are true: 'Reserve this trailer', 'Remind me tomorrow', 'Send me a quote', "
-                        "and 'Schedule a call for 3 PM'. Information questions are false: 'What does it cost?', "
-                        "'What time are you open?', 'Do you offer financing?', and 'How do reservations work?'.\n\n"
-                        "Do not decide which tool to call. Only decide whether this turn must be routed into the graph."
-                    )
-                ),
-                HumanMessage(
-                    content=json.dumps(
-                        {
-                            "latest_user_message": text,
-                            "awaiting_slot": session.get("awaiting_slot"),
-                            "pending_questions": session.get("pending_questions") or [],
-                            "trailer_category": session.get("trailer_category"),
-                            "has_shown_search_results": bool(session.get("has_shown_search_results")),
-                            "has_last_listings": bool(session.get("last_listings") or session.get("already_shown_listing_urls")),
-                            "recent_messages": (session.get("messages") or [])[-6:],
-                        },
-                        default=str,
-                    )
-                ),
-            ]
-        )
-        result = bool(decision.should_route_graph)
-        logger.info(
-            "unsupported_business_action_route_decision | should_route_graph=%s | reason=%r | latest_message=%r",
-            result,
-            decision.reason,
-            text,
-        )
-        return result
-    except Exception:
-        logger.exception("Unsupported business action classifier failed; keeping existing routing behavior")
-        return False
+        logger.exception("Merged router failed; keeping existing routing behavior")
+        return RoutingDecision(route="other", reason="exception")
 
 
 def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
@@ -1284,47 +1209,25 @@ def _should_route_to_graph(session: dict[str, Any], user_message: str) -> bool:
     if _has_trailer_search_context(session) and _has_metadata_update_intent(user_message):
         return True
 
-    if _is_unsupported_business_action_turn(session, user_message):
-        return True
-
-    # Keep deterministic fast-paths for obvious intent.
+    # Keep deterministic fast-path for obvious intent. (Escalation would also
+    # route to graph, so evaluating this before the merged router below changes
+    # no outcome and saves an LLM call for these messages.)
     if _has_actionable_intent(user_message):
         return True
 
-    if _is_catalogue_overview_turn(session, user_message):
+    # One merged router replaces the escalation / catalogue-overview /
+    # ROUTE-SMALLTALK gates. Map its route to the same precedence as before:
+    # escalation -> graph; catalogue overview -> not graph; a listings follow-up
+    # -> graph only when listings were shown; otherwise smalltalk.
+    has_prior_listings = bool(session.get("last_listings") or session.get("already_shown_listing_urls"))
+    route = _route_decision(session, user_message, has_prior_listings).route
+    if route == "escalation":
+        return True
+    if route == "catalogue_overview":
         return False
-
-    # If we have shown listings before, let the model decide whether this turn is
-    # a listings follow-up (interest, comparison, ordinal reference, show more, etc.).
-    if not (session.get("last_listings") or session.get("already_shown_listing_urls")):
+    if not has_prior_listings:
         return False
-
-    try:
-        response = make_llm(model=_CHAT_MODEL).invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "Classify whether the latest user message should go to the trailer-planner graph. "
-                        "Respond with exactly one token: ROUTE or SMALLTALK.\n"
-                        "Choose ROUTE for any message that could refer to shown listings, trailer selection, "
-                        "ordinal references, follow-up constraints, asking for more options, or purchase intent."
-                    )
-                ),
-                HumanMessage(
-                    content=(
-                        f"Latest user message: {user_message}\n"
-                        f"Current category: {session.get('trailer_category')}\n"
-                        f"Has shown listings before: {bool(session.get('last_listings') or session.get('already_shown_listing_urls'))}\n"
-                        f"Recent messages: {(session.get('messages') or [])[-6:]}"
-                    )
-                ),
-            ]
-        )
-        label = str(response.content or "").strip().upper()
-        return label.startswith("ROUTE")
-    except Exception:
-        logger.exception("Route classifier failed; falling back to deterministic intent check")
-        return _has_actionable_intent(user_message)
+    return route == "listings_followup"
 
 
 def _is_contact_only_message(message: str) -> bool:
