@@ -517,3 +517,13 @@ ADJUDICATOR_NO_VALUE = (
     "set no_preference_for_active_question=true, supply no active value or field update, "
     "and do not invent or retry a value."
 )
+
+
+def escalation_actions() -> str:
+    """Single source of truth for the unsupported real-world actions that route
+    to send_escalation_alert_email (Stage E3). Semicolon list, no framing."""
+    return (
+        "hold/reserve; send a reminder/follow-up; create/send a quote, invoice, contract, "
+        "application, or paperwork; call/text/email the customer; schedule a call, meeting, "
+        "appointment, delivery, pickup, service, or installation; or make a future timing commitment"
+    )

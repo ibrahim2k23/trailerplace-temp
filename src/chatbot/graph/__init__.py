@@ -44,6 +44,7 @@ from src.chatbot.prompts import (
     MIND_SYSTEM_PROMPT,
     TRAILERPLACE_KNOWLEDGE_SECTION,
     active_slot_policy,
+    escalation_actions,
     EXTRACTOR_NO_VALUE,
     ADJUDICATOR_NO_VALUE,
 )
@@ -2447,7 +2448,7 @@ def _adjudicate_office_trailer_clarification_turn(
             },
             "tool_rules": {
                 "send_non_sales_faq_email": "Use for contact/human help, financing, trade-in, service/parts, or store/location info.",
-                "send_escalation_alert_email": "Use when the customer asks TrailerPlace/the team to perform an unsupported real-world action: hold/reserve; send a reminder/follow-up; create/send a quote, invoice, contract, application, or paperwork; call/text/email them; schedule a call, meeting, appointment, delivery, pickup, service, or installation; or make a future timing commitment. General information questions do not qualify.",
+                "send_escalation_alert_email": f"Use when the customer asks TrailerPlace/the team to perform an unsupported real-world action: {escalation_actions()}. General information questions do not qualify.",
             },
         }
         try:
@@ -3021,10 +3022,8 @@ def _adjudicate_active_question_turn(
                     "question. Set answered_active_question=false and no_preference_for_active_question=false. "
                     "Provide a natural reply and let the app preserve or advance the question flow.\n"
                     "- send_non_sales_faq_email: financing, trade-in, service/parts, store/location, human contact.\n"
-                    "- send_escalation_alert_email: requests that the business perform an unsupported real-world action "
-                    "— hold/reserve; send a reminder/follow-up; create/send a quote, invoice, contract, application, "
-                    "or paperwork; call/text/email the customer; schedule a call, meeting, appointment, delivery, "
-                    "pickup, service, or installation; or make a future timing commitment.\n"
+                    f"- send_escalation_alert_email: requests that the business perform an unsupported real-world "
+                    f"action — {escalation_actions()}.\n"
                     "- Escalate action requests, not ordinary questions. 'Remind me tomorrow' and 'schedule a call at "
                     "3 PM' escalate; 'what time are you open?' and 'how do reservations work?' do not.\n"
                     "- Never set send_interested_listing_email during active qualification.\n"
