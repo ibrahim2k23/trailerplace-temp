@@ -163,3 +163,11 @@ Purpose: Package marker for chatbot module.
 - "Use `Axx/Dxx` references only."
 - "Summarize only deltas in `D05,D06,D11` since last review."
 - "Trace user message path through `F1` with function names only."
+
+## Refactor Additions (v4.4)
+- `constants.py` — window/threshold constants + compaction helpers, width-exclusion set, phone/URL.
+- `llm.py` — `make_llm(model_env/default_model/temperature/structured_output)`, `safe_invoke` (ValidationError-safe), `resolve_model` (site-env -> OPENAI_MODEL -> default).
+- `units.py` — `parse_weight_lbs`/`parse_length_ft`; behaviour-equivalent to the old ingest parsers (no re-ingest needed for units). Locked by `tests/test_units.py`.
+- `make_aliases.py` — `MAKE_ALIASES` (alias -> canonical short make). `make_inventory` no longer needs `_DISPLAY_OVERRIDES`/`_FILTER_VARIANTS` after re-ingest.
+- `graph/apply_mind/state_return.py` — `build_state_return(state, **overrides)`.
+- `email_tools._send_async` + `_EMAIL_EXECUTOR` — background SMTP dispatch (in-memory path).

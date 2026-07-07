@@ -81,3 +81,13 @@ When reusing this document in future prompts:
 - Reference by file ID only, e.g. `A06 + A11 interaction`.
 - For a flow question, use `F1/F2/F3` labels first.
 - Ask for "delta against Axx" instead of full file explanation.
+
+## Refactor Additions (v4.4)
+New shared modules introduced by the prompt/flow/code-health refactor:
+- `src/chatbot/constants.py` — recent-window sizing + `compact_recent_messages`/`compact_listings`, `DYNAMIC_WIDTH_EXCLUDED_CATEGORIES`, dealership phone/URL.
+- `src/chatbot/llm.py` — central LLM factory: `make_llm` / `safe_invoke` / `resolve_model`. All ChatOpenAI construction now flows through here.
+- `src/chatbot/units.py` — single-source weight/length parsing (`parse_weight_lbs`, `parse_length_ft`) shared by `ingest` (index write) and `pinecone_search` (query/rerank), so both parse raw catalog strings identically.
+- `src/chatbot/make_aliases.py` — single-source `MAKE_ALIASES` map consumed by `normalizer`, `make_resolver`, and `pinecone_search`; the index stores the canonical short display form (re-ingest applied).
+- `src/chatbot/graph/` — `graph.py` is now a package; `graph/apply_mind/` holds `build_state_return`, the single state-assembly helper for `_apply_mind_node` exits.
+- `tools/email_tools.py` — in-memory-path SMTP sends dispatched to a background pool (non-blocking); `EMAIL_SEND_SYNC=1` forces inline for tests.
+- `tests/test_live_conversations.py` — RUN_LIVE conversation harness for verifying prompt/flow changes.
