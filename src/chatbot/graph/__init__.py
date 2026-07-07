@@ -1748,7 +1748,11 @@ def _has_contact(state: ChatbotState) -> bool:
 
 
 def _missing_contact_request(state: ChatbotState, reason: str) -> str:
-    clean_reason = str(reason or "this request").strip()
+    # Never interpolate the internal email_purpose (reason) into customer text —
+    # it leaked strings like "customer asked to contact a person." Use a generic
+    # phrase instead.
+    del reason
+    clean_reason = "your request"
     if state.get("customer_full_name"):
         return (
             f"To send {clean_reason} to our team, could you share either an email address "
