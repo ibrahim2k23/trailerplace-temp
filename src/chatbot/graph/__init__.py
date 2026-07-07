@@ -38,6 +38,7 @@ from src.chatbot.constants import (
     compact_listings,
     compact_recent_messages,
 )
+from src.chatbot.graph.apply_mind import build_state_return
 from src.chatbot.llm import make_llm, safe_invoke
 from src.chatbot.prompts import MIND_SYSTEM_PROMPT, TRAILERPLACE_KNOWLEDGE_SECTION
 from src.chatbot.state import ChatbotState, QuestionItem
@@ -5668,16 +5669,16 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         if not suggestion_text:
             suggestion_text = _category_suggestion_prompt(pending_category_suggestion)
         decision["action"] = "respond"
-        return {
-            **state,
-            "assistant_text": suggestion_text,
-            "slots_collected": slots,
-            "metadata_filters_collected": metadata_filters,
-            "requested_non_metadata_features": requested_non_metadata_features,
-            "awaiting_slot": _CATEGORY_SUGGESTION_SLOT,
-            "pending_questions": [],
-            "mind_decision": decision,
-        }
+        return build_state_return(
+            state,
+            assistant_text=suggestion_text,
+            slots_collected=slots,
+            metadata_filters_collected=metadata_filters,
+            requested_non_metadata_features=requested_non_metadata_features,
+            awaiting_slot=_CATEGORY_SUGGESTION_SLOT,
+            pending_questions=[],
+            mind_decision=decision,
+        )
     if pending_category_change:
         carry_filters = dict(pending_category_change.get("carry_filters") or {})
         confirmation = _yes_no_answer(latest_message)
@@ -5719,25 +5720,25 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                     )
                     pending_category_change["carry_filters"] = remaining
                     pending_category_change["question"] = question
-                    return {
-                        **state,
-                        "metadata_filters_collected": metadata_filters,
-                        "pending_category_change": pending_category_change,
-                        "assistant_text": question,
-                        "awaiting_slot": _CATEGORY_FILTER_CONFIRMATION_SLOT,
-                        "pending_questions": [],
-                        "mind_decision": {**decision, "action": "respond"},
-                    }
+                    return build_state_return(
+                        state,
+                        metadata_filters_collected=metadata_filters,
+                        pending_category_change=pending_category_change,
+                        assistant_text=question,
+                        awaiting_slot=_CATEGORY_FILTER_CONFIRMATION_SLOT,
+                        pending_questions=[],
+                        mind_decision={**decision, "action": "respond"},
+                    )
                 confirmation = False
             else:
                 reply = _question_turn_fallback_reply(question, latest_message)
-                return {
-                    **state,
-                    "assistant_text": f"{reply}\n\n{question}" if reply else question,
-                    "awaiting_slot": _CATEGORY_FILTER_CONFIRMATION_SLOT,
-                    "pending_questions": [],
-                    "mind_decision": {**decision, "action": "respond"},
-                }
+                return build_state_return(
+                    state,
+                    assistant_text=f"{reply}\n\n{question}" if reply else question,
+                    awaiting_slot=_CATEGORY_FILTER_CONFIRMATION_SLOT,
+                    pending_questions=[],
+                    mind_decision={**decision, "action": "respond"},
+                )
         if confirmation:
             for key, value in carry_filters.items():
                 if key not in metadata_filters:
@@ -5854,33 +5855,33 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
         if carry_filters:
             question = _category_filter_confirmation_text(carry_filters, category)
             decision["action"] = "respond"
-            return {
-                **state,
-                "trailer_category": category,
-                "pending_category_change": {
+            return build_state_return(
+                state,
+                trailer_category=category,
+                pending_category_change={
                     "old_category": category_before,
                     "new_category": category,
                     "carry_filters": carry_filters,
                     "question": question,
                 },
-                "slots_collected": slots,
-                "slots_skipped": [],
-                "metadata_filters_collected": metadata_filters,
-                "defaulted_metadata_filters": [],
-                "requested_non_metadata_features": [],
-                "active_search_request_text": latest_message,
-                "make_category_options": [],
-                "awaiting_slot": _CATEGORY_FILTER_CONFIRMATION_SLOT,
-                "pending_questions": [],
-                "asked_questions": [],
-                "already_shown_listing_urls": [],
-                "last_listings": [],
-                "active_question_attempts": {},
-                "active_question_unanswered_count": 0,
-                "active_question_tracker": None,
-                "assistant_text": question,
-                "mind_decision": decision,
-            }
+                slots_collected=slots,
+                slots_skipped=[],
+                metadata_filters_collected=metadata_filters,
+                defaulted_metadata_filters=[],
+                requested_non_metadata_features=[],
+                active_search_request_text=latest_message,
+                make_category_options=[],
+                awaiting_slot=_CATEGORY_FILTER_CONFIRMATION_SLOT,
+                pending_questions=[],
+                asked_questions=[],
+                already_shown_listing_urls=[],
+                last_listings=[],
+                active_question_attempts={},
+                active_question_unanswered_count=0,
+                active_question_tracker=None,
+                assistant_text=question,
+                mind_decision=decision,
+            )
 
     make_category_options = list(state.get("make_category_options") or [])
     if _catalogue_redirect_allowed(
@@ -5906,28 +5907,28 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             or "Could you clarify which type you mean?"
         )
         decision["action"] = "respond"
-        return {
-            **state,
-            "trailer_category": None,
-            "category_needs_clarification": True,
-            "category_clarification_key": category_clarification_key,
-            "slots_collected": slots,
-            "slots_skipped": sorted(slots_skipped),
-            "metadata_filters_collected": metadata_filters,
-            "requested_non_metadata_features": requested_non_metadata_features,
-            "active_search_request_text": _updated_active_search_request_text(
+        return build_state_return(
+            state,
+            trailer_category=None,
+            category_needs_clarification=True,
+            category_clarification_key=category_clarification_key,
+            slots_collected=slots,
+            slots_skipped=sorted(slots_skipped),
+            metadata_filters_collected=metadata_filters,
+            requested_non_metadata_features=requested_non_metadata_features,
+            active_search_request_text=_updated_active_search_request_text(
                 state=state,
                 latest_message="",
                 slots=slots,
                 metadata_filters=metadata_filters,
                 reset_active_request=category_changed or make_changed,
             ),
-            "make_category_options": make_category_options,
-            "awaiting_slot": _CATEGORY_CLARIFICATION_SLOT,
-            "pending_questions": [],
-            "assistant_text": clarification_question,
-            "mind_decision": decision,
-        }
+            make_category_options=make_category_options,
+            awaiting_slot=_CATEGORY_CLARIFICATION_SLOT,
+            pending_questions=[],
+            assistant_text=clarification_question,
+            mind_decision=decision,
+        )
 
     if awaiting_slot == _MAKE_CATEGORY_CHOICE_SLOT:
         chosen_category = _category_from_choice(latest_message, make_category_options)
@@ -5965,28 +5966,28 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             if reply_prefix:
                 assistant_text = f"{reply_prefix}\n\n{assistant_text}"
             decision["action"] = "respond"
-            return {
-                **state,
-                "trailer_category": category,
-                "category_needs_clarification": category_needs_clarification,
-                "category_clarification_key": category_clarification_key,
-                "slots_collected": slots,
-                "slots_skipped": sorted(slots_skipped),
-                "metadata_filters_collected": metadata_filters,
-                "requested_non_metadata_features": requested_non_metadata_features,
-                "active_search_request_text": _updated_active_search_request_text(
+            return build_state_return(
+                state,
+                trailer_category=category,
+                category_needs_clarification=category_needs_clarification,
+                category_clarification_key=category_clarification_key,
+                slots_collected=slots,
+                slots_skipped=sorted(slots_skipped),
+                metadata_filters_collected=metadata_filters,
+                requested_non_metadata_features=requested_non_metadata_features,
+                active_search_request_text=_updated_active_search_request_text(
                     state=state,
                     latest_message=latest_message,
                     slots=slots,
                     metadata_filters=metadata_filters,
                     reset_active_request=category_changed or make_changed,
                 ),
-                "make_category_options": make_category_options,
-                "awaiting_slot": _MAKE_CATEGORY_CHOICE_SLOT,
-                "pending_questions": [],
-                "assistant_text": assistant_text,
-                "mind_decision": decision,
-            }
+                make_category_options=make_category_options,
+                awaiting_slot=_MAKE_CATEGORY_CHOICE_SLOT,
+                pending_questions=[],
+                assistant_text=assistant_text,
+                mind_decision=decision,
+            )
 
     if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT:
         chosen_category = resolve_category_from_text(latest_message).category
@@ -6040,28 +6041,28 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
                 if question_turn.reply_to_user:
                     assistant_text = f"{question_turn.reply_to_user}\n\n{assistant_text}"
                 decision["action"] = "respond"
-                return {
-                    **state,
-                    "trailer_category": category,
-                    "category_needs_clarification": category_needs_clarification,
-                    "category_clarification_key": category_clarification_key,
-                    "slots_collected": slots,
-                    "slots_skipped": sorted(slots_skipped),
-                    "metadata_filters_collected": metadata_filters,
-                    "requested_non_metadata_features": requested_non_metadata_features,
-                    "active_search_request_text": _updated_active_search_request_text(
+                return build_state_return(
+                    state,
+                    trailer_category=category,
+                    category_needs_clarification=category_needs_clarification,
+                    category_clarification_key=category_clarification_key,
+                    slots_collected=slots,
+                    slots_skipped=sorted(slots_skipped),
+                    metadata_filters_collected=metadata_filters,
+                    requested_non_metadata_features=requested_non_metadata_features,
+                    active_search_request_text=_updated_active_search_request_text(
                         state=state,
                         latest_message="",
                         slots=slots,
                         metadata_filters=metadata_filters,
                         reset_active_request=category_changed or make_changed,
                     ),
-                    "make_category_options": make_category_options,
-                    "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-                    "pending_questions": [],
-                    "assistant_text": assistant_text,
-                    "mind_decision": decision,
-                }
+                    make_category_options=make_category_options,
+                    awaiting_slot=_GENERIC_CATEGORY_CHOICE_SLOT,
+                    pending_questions=[],
+                    assistant_text=assistant_text,
+                    mind_decision=decision,
+                )
 
     category, category_options, make_question = _apply_make_resolution(
         latest_message=latest_message,
@@ -6098,28 +6099,28 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             apply_slot_updates=False,
         )
         decision["action"] = "respond"
-        return {
-            **state,
-            "trailer_category": category,
-            "category_needs_clarification": category_needs_clarification,
-            "category_clarification_key": category_clarification_key,
-            "slots_collected": slots,
-            "slots_skipped": sorted(slots_skipped),
-            "metadata_filters_collected": metadata_filters,
-            "requested_non_metadata_features": requested_non_metadata_features,
-            "active_search_request_text": _updated_active_search_request_text(
+        return build_state_return(
+            state,
+            trailer_category=category,
+            category_needs_clarification=category_needs_clarification,
+            category_clarification_key=category_clarification_key,
+            slots_collected=slots,
+            slots_skipped=sorted(slots_skipped),
+            metadata_filters_collected=metadata_filters,
+            requested_non_metadata_features=requested_non_metadata_features,
+            active_search_request_text=_updated_active_search_request_text(
                 state=state,
                 latest_message=latest_message,
                 slots=slots,
                 metadata_filters=metadata_filters,
                 reset_active_request=category_changed or make_changed,
             ),
-            "make_category_options": category_options,
-            "awaiting_slot": _MAKE_CATEGORY_CHOICE_SLOT,
-            "pending_questions": [],
-            "assistant_text": make_question,
-            "mind_decision": decision,
-        }
+            make_category_options=category_options,
+            awaiting_slot=_MAKE_CATEGORY_CHOICE_SLOT,
+            pending_questions=[],
+            assistant_text=make_question,
+            mind_decision=decision,
+        )
 
     _apply_generic_haul_use_to_category_slot(category, slots)
 
@@ -6581,28 +6582,28 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             assistant_text = str(decision.get("assistant_text") or "").strip()
             if not assistant_text:
                 assistant_text = _GENERIC_CATEGORY_QUESTION
-            return {
-                **state,
-                "trailer_category": None,
-                "category_needs_clarification": category_needs_clarification,
-                "category_clarification_key": category_clarification_key,
-                "slots_collected": slots,
-                "slots_skipped": sorted(slots_skipped),
-                "metadata_filters_collected": metadata_filters,
-                "requested_non_metadata_features": requested_non_metadata_features,
-                "active_search_request_text": _updated_active_search_request_text(
+            return build_state_return(
+                state,
+                trailer_category=None,
+                category_needs_clarification=category_needs_clarification,
+                category_clarification_key=category_clarification_key,
+                slots_collected=slots,
+                slots_skipped=sorted(slots_skipped),
+                metadata_filters_collected=metadata_filters,
+                requested_non_metadata_features=requested_non_metadata_features,
+                active_search_request_text=_updated_active_search_request_text(
                     state=state,
                     latest_message=latest_message,
                     slots=slots,
                     metadata_filters=metadata_filters,
                     reset_active_request=category_changed or make_changed,
                 ),
-                "make_category_options": make_category_options,
-                "awaiting_slot": _GENERIC_CATEGORY_CHOICE_SLOT,
-                "pending_questions": [],
-                "assistant_text": assistant_text,
-                "mind_decision": {**decision, "assistant_text": assistant_text},
-            }
+                make_category_options=make_category_options,
+                awaiting_slot=_GENERIC_CATEGORY_CHOICE_SLOT,
+                pending_questions=[],
+                assistant_text=assistant_text,
+                mind_decision={**decision, "assistant_text": assistant_text},
+            )
 
     product_counter_topics = {"trailer_categories", "hitch_types", "makes", "dimensions", "payload"}
     if (
@@ -6985,38 +6986,38 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     )
 
     decision["action"] = action
-    return {
-        **state,
-        "trailer_category": category,
-        "category_needs_clarification": category_needs_clarification,
-        "category_clarification_key": category_clarification_key,
-        "slots_collected": slots,
-        "slots_skipped": sorted(slots_skipped),
-        "metadata_filters_collected": metadata_filters,
-        "defaulted_metadata_filters": sorted(defaulted_metadata_filters),
-        "requested_non_metadata_features": requested_non_metadata_features,
-        "active_search_request_text": active_search_request_text,
-        "make_category_options": make_category_options,
-        "awaiting_slot": awaiting_slot,
-        "pending_questions": pending,
-        "asked_questions": asked,
-        "already_shown_listing_urls": [] if reset_result_state else state.get("already_shown_listing_urls"),
-        "last_listings": [] if reset_result_state else state.get("last_listings"),
-        "assistant_text": assistant_text,
-        "selected_listing_title": decision.get("selected_listing_title"),
-        "selected_listing_url": decision.get("selected_listing_url"),
-        "mind_decision": decision,
-        "repeated_unanswered_question_escalation": repeated_unanswered_escalation,
-        "skipped_unanswered_slot": skipped_unanswered_slot,
-        "continue_search_after_email": continue_search_after_email,
-        "active_question_was_unanswered": active_question_was_unanswered,
-        "active_question_was_resolved": active_question_was_resolved,
-        "active_question_slot": active_qna_slot,
-        "active_question_attempts": active_question_attempts,
-        "active_question_text": (
+    return build_state_return(
+        state,
+        trailer_category=category,
+        category_needs_clarification=category_needs_clarification,
+        category_clarification_key=category_clarification_key,
+        slots_collected=slots,
+        slots_skipped=sorted(slots_skipped),
+        metadata_filters_collected=metadata_filters,
+        defaulted_metadata_filters=sorted(defaulted_metadata_filters),
+        requested_non_metadata_features=requested_non_metadata_features,
+        active_search_request_text=active_search_request_text,
+        make_category_options=make_category_options,
+        awaiting_slot=awaiting_slot,
+        pending_questions=pending,
+        asked_questions=asked,
+        already_shown_listing_urls=[] if reset_result_state else state.get("already_shown_listing_urls"),
+        last_listings=[] if reset_result_state else state.get("last_listings"),
+        assistant_text=assistant_text,
+        selected_listing_title=decision.get("selected_listing_title"),
+        selected_listing_url=decision.get("selected_listing_url"),
+        mind_decision=decision,
+        repeated_unanswered_question_escalation=repeated_unanswered_escalation,
+        skipped_unanswered_slot=skipped_unanswered_slot,
+        continue_search_after_email=continue_search_after_email,
+        active_question_was_unanswered=active_question_was_unanswered,
+        active_question_was_resolved=active_question_was_resolved,
+        active_question_slot=active_qna_slot,
+        active_question_attempts=active_question_attempts,
+        active_question_text=(
             displayed_active_question or None
         ),
-    }
+    )
 
 
 def _route_after_mind(state: ChatbotState) -> str:
