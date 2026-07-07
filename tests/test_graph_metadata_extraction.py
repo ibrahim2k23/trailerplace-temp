@@ -1864,8 +1864,8 @@ def test_llm_field_extraction_normalizes_compact_size_order(monkeypatch):
         apply_slot_updates=True,
     )
 
-    assert decision.metadata_filters_update["width_ft"] == "6"
-    assert decision.metadata_filters_update["length_ft"] == "12"
+    assert decision.metadata_filters_update["width_ft"] == "6 ft"
+    assert decision.metadata_filters_update["length_ft"] == "12 ft"
 
 
 def test_field_extraction_decision_normalizes_empty_rejected_candidates_object():

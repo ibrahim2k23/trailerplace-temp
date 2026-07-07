@@ -3566,6 +3566,17 @@ def _extract_field_updates(
         )
 
     data = _model_dump(decision)
+    # Deterministic A×B orientation override. The documented convention is
+    # "AxB = width A x length B; AxBxC adds height C" (stated in the extractor
+    # prompt), but the LLM occasionally transposes width and length. When the
+    # latest message contains that shorthand, a regex parse is authoritative, so
+    # we overwrite the LLM's width/length/height with it. Injecting before
+    # normalization lets the corrected values also mirror into the category slots.
+    shorthand_dims = _dimension_shorthand_updates(latest)
+    if shorthand_dims:
+        merged_metadata = dict(data.get("metadata_filters_update") or {})
+        merged_metadata.update(shorthand_dims)
+        data["metadata_filters_update"] = merged_metadata
     data = _normalize_llm_field_mappings(data, category)
     confidence = str(data.get("confidence") or "low").lower()
     if confidence not in _CONFIDENT_FIELD_EXTRACTION:
