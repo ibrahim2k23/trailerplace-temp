@@ -1,10 +1,37 @@
 from __future__ import annotations
 
+import logging
+import os
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 from src.email_sender import send_faq_email_sync, send_ticket_notification
+
+logger = logging.getLogger(__name__)
+
+# The durable path returns early via _queue_email; only the in-memory path
+# reaches the synchronous SMTP senders below, which can block the request for
+# up to the SMTP timeout (~30s). Dispatch those sends to a small background pool
+# so the turn returns immediately. Delivery is best-effort (like the durable
+# outbox); failures are logged, not surfaced to the customer.
+_EMAIL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="email-send")
+
+
+def _send_async(fn, **kwargs) -> None:
+    def _run() -> None:
+        try:
+            fn(**kwargs)
+        except Exception:
+            logger.exception("background_email_send_failed | fn=%s", getattr(fn, "__name__", fn))
+
+    # Tests (and any caller needing deterministic delivery) set EMAIL_SEND_SYNC=1
+    # to run the send inline instead of on the background pool.
+    if os.getenv("EMAIL_SEND_SYNC") == "1":
+        _run()
+        return
+    _EMAIL_EXECUTOR.submit(_run)
 from src.conversation_store import (
     get_conversation,
     promote_lead_to_hard,
@@ -92,7 +119,7 @@ def send_interested_listing_email(
         return queued
     item = (item_name or "").strip()
     details = _append_conversation("", session_id).strip()
-    send_ticket_notification(
+    _send_async(send_ticket_notification,
         full_name=full_name,
         email=email,
         phone=phone,
@@ -139,7 +166,7 @@ def send_non_sales_faq_email(
     if not summary_line.startswith(f"[{category}]"):
         summary_line = f"[{category}] {summary_line}"
     summary_line = _append_conversation(summary_line, session_id)
-    send_faq_email_sync(
+    _send_async(send_faq_email_sync,
         full_name=full_name,
         email=email,
         phone=phone,
@@ -183,7 +210,7 @@ def send_escalation_alert_email(
     if not summary_line.startswith("[Escalation Alert]"):
         summary_line = f"[Escalation Alert] {summary_line}"
     summary_line = _append_conversation(summary_line, session_id)
-    send_faq_email_sync(
+    _send_async(send_faq_email_sync,
         full_name=full_name,
         email=email,
         phone=phone,
@@ -215,7 +242,7 @@ def send_trailer_results_shown_email(
     if queued:
         return queued
     summary_line = _append_conversation(TRAILER_RESULTS_SHOWN_DESCRIPTION, session_id)
-    send_faq_email_sync(
+    _send_async(send_faq_email_sync,
         full_name=full_name,
         email=email,
         phone=phone,

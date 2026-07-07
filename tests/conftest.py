@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Email sends run on a background pool in production; make them synchronous in
+# tests so assertions on the sent payload are deterministic.
+os.environ.setdefault("EMAIL_SEND_SYNC", "1")
+
 
 class _LiveCallBlocked:
     """Offline stand-in for the real ``ChatOpenAI`` client.
