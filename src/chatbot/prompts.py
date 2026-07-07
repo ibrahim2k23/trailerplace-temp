@@ -525,7 +525,8 @@ def escalation_actions() -> str:
     return (
         "hold/reserve; send a reminder/follow-up; create/send a quote, invoice, contract, "
         "application, or paperwork; call/text/email the customer; schedule a call, meeting, "
-        "appointment, delivery, pickup, service, or installation; or make a future timing commitment"
+        "appointment, delivery, pickup, inspection, service, or installation; promise future "
+        "timing; or make a custom arrangement"
     )
 
 

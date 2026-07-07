@@ -27,6 +27,7 @@ from src.chatbot.prompts import (
     TRAILERPLACE_ACTION_SECTION,
     TRAILERPLACE_KNOWLEDGE_SECTION,
     TRAILERPLACE_PERSONA_SECTION,
+    escalation_actions,
 )
 from src.chatbot.tools.email_tools import (
     capture_email_events,
@@ -1221,11 +1222,8 @@ def _is_unsupported_business_action_turn(session: dict[str, Any], user_message: 
                     content=(
                         "Classify whether the latest user message should be routed to the trailer-planner graph "
                         "because it may require the Escalation Alert email tool. Return structured fields only.\n\n"
-                        "Set should_route_graph=true when the customer asks TrailerPlace/the team to perform a "
-                        "real-world action or commitment the chatbot cannot complete directly: hold/reserve a trailer; "
-                        "send a reminder or future follow-up; create/send a quote, invoice, contract, application, or "
-                        "paperwork; call/text/email the customer; schedule a call, meeting, appointment, delivery, "
-                        "pickup, inspection, service, or installation; promise future timing; or make a custom arrangement.\n\n"
+                        f"Set should_route_graph=true when the customer asks TrailerPlace/the team to perform a "
+                        f"real-world action or commitment the chatbot cannot complete directly: {escalation_actions()}.\n\n"
                         "Set should_route_graph=false for broad catalogue browsing, ordinary trailer information, "
                         "recommendations/search requests, supported FAQ topics like financing/trade-in/service/"
                         "store info, simple smalltalk, and direct questions the assistant can answer without a tool.\n\n"
