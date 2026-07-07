@@ -470,3 +470,33 @@ MIND_SYSTEM_PROMPT = f"""
 (Use for informational answers only — do NOT infer category from make)
 {make_prompt_block()}
 """.strip()
+
+
+def active_slot_policy() -> str:
+    """Single source of truth for the authoritative active-slot / answer-
+    classification rules (range->smallest, numeric needs a digit, width numeric,
+    compound-dimension split, cargo_size, roll-off, category/make stability).
+
+    Extracted verbatim from the field-extraction adjudicator so it can be shared
+    across the extractor / question-adjudicator / reconciler prompts without the
+    rule wording drifting between them (Stage E3).
+    """
+    return (
+        "## AUTHORITATIVE ACTIVE-SLOT POLICY\n"
+        "- For a free-text active slot, extract any substantive direct answer even when broad or informal. "
+        "Do not overwrite it using text that answers a different active slot.\n"
+        "- Numeric fields require a digit or an unambiguous number written in words. Accept ranges and "
+        "approximations; for every range store only its smallest stated value ('5000-10000 lbs' -> '5000 lbs'). "
+        "Return no numeric update when no usable number exists.\n"
+        "- Width requires a numeric measurement. Never extract 'flexible', 'normal', 'standard', 'whatever fits', "
+        "or 'no specific measurement' as width_ft.\n"
+        "- Compound dimensions must be separated: '16 by 7 feet' means length_ft='16 ft' and width_ft='7 ft'. "
+        "Never copy the complete compound phrase into both fields.\n"
+        "- For active cargo_size, one usable length fully answers the field; width and height are optional. "
+        "'18 by 8 feet; height is not important' stores cargo_size='18 ft × 8 ft', length_ft='18 ft', "
+        "width_ft='8 ft'. 'About 18 feet long' stores cargo_size='18 ft', length_ft='18 ft'.\n"
+        "- For Roll Off bin_size, map the chosen numeric value directly into length_ft for Pinecone: "
+        "'15 yd' becomes length_ft='15 ft', not 45 ft. For ranges, use the smallest value.\n"
+        "- An already resolved category is stable during active Q&A. Cargo wording is not a category switch.\n"
+        "- Extract a make only from an explicitly named manufacturer; generic cargo language is never a make.\n\n"
+    )
