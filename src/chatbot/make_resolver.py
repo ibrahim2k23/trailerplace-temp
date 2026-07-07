@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Literal
 
 from src.chatbot.make_aliases import MAKE_ALIASES as _ALIASES
@@ -66,7 +67,11 @@ def _tokens(text: str) -> list[str]:
     return [token for token in _norm(text).split() if token and token not in _GENERIC_TOKENS]
 
 
+@lru_cache(maxsize=1)
 def _valid_make_map() -> dict[str, str]:
+    # Inventory makes are static at runtime; rebuilding this map on every make
+    # resolution (a per-query hot path) is wasted work, so cache it. Callers
+    # read it without mutating.
     valid = set(known_makes())
     out: dict[str, str] = {}
     for make in valid:
