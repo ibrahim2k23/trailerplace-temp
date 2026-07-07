@@ -79,6 +79,29 @@ def test_tilt_use_case_resolves_and_searches():
     assert "tilt" in text, "expected tilt trailers surfaced"
 
 
+def _stored_length(resp) -> str:
+    """The length the extractor stored, from the last assistant message metadata."""
+    msgs = resp.main_prior_messages or []
+    meta = msgs[-1] if msgs else {}
+    return str(
+        (meta.get("metadata_filters_collected") or {}).get("length_ft")
+        or (meta.get("slots_collected") or {}).get("trailer_length_ft")
+        or ""
+    )
+
+
+def test_range_answer_stores_smallest_value():
+    # answer_classification_policy: a numeric range stores only the smallest value.
+    length = _stored_length(_open("I need a 15 to 18 ft livestock trailer", _sid()))
+    assert length.startswith("15"), f"expected smallest (15), got {length!r}"
+
+
+def test_number_word_dimension_extracted():
+    # answer_classification_policy: unambiguous number words count as numeric.
+    length = _stored_length(_open("I want a livestock trailer about twelve feet long", _sid()))
+    assert length.startswith("12"), f"expected 12 from 'twelve feet', got {length!r}"
+
+
 def test_make_search_returns_only_that_make():
     text = (_drive_to_cards("show me Cargo Craft enclosed trailers", _sid()).assistant_text or "").lower()
     assert "cargo craft" in text, "expected Cargo Craft results"
