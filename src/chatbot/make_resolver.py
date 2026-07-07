@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Literal
 
+from src.chatbot.make_aliases import MAKE_ALIASES as _ALIASES
 from src.chatbot.make_inventory import known_makes
 
 
@@ -18,53 +19,6 @@ class MakeResolution:
     match_type: MatchType | None = None
     reason: str = ""
 
-
-_ALIASES = {
-    "alcom": "Alcom",
-    "aluma": "Aluma",
-    "alum": "Aluma",
-    "ameritrail": "AmeriTrail",
-    "ameri trail": "AmeriTrail",
-    "ameraitrail": "AmeriTrail",
-    "baseline": "Baseline",
-    "cm trailers": "CM TRAILERS",
-    "cm trailer": "CM TRAILERS",
-    "calico trailers": "Calico Trailers",
-    "calico": "Calico Trailers",
-    "cargo craft": "Cargo Craft",
-    "cargo craft trailers": "Cargo Craft",
-    "continental cargo": "Continental Cargo",
-    "diamond c": "Diamond C",
-    "diamond c trailers": "Diamond C",
-    "dimond c": "Diamond C",
-    "east texas": "East Texas Trailers",
-    "east texas trailers": "East Texas Trailers",
-    "fairwest": "FAIRWEST",
-    "galyean": "Galyean",
-    "iron bull": "Iron Bull Trailers",
-    "iron bull trailers": "Iron Bull Trailers",
-    "j&j": "J&J Trailer",
-    "j and j": "J&J Trailer",
-    "j j": "J&J Trailer",
-    "kaufman": "Kaufman Trailers",
-    "kaufman trailers": "Kaufman Trailers",
-    "lark united manufacturing": "LARK UNITED MANUFACTURING",
-    "liberty": "Liberty",
-    "norstar": "Norstar",
-    "p&c": "P&C",
-    "p and c": "P&C",
-    "p n c": "P&C",
-    "pace": "Pace",
-    "pace american": "Pace American",
-    "ranch king": "RANCH KING",
-    "rd trailers": "RD TRAILERS",
-    "rd trailer": "RD TRAILERS",
-    "stallion": "Stallion",
-    "star": "Star",
-    "texas pride": "Texas Pride",
-    "w w": "W-W",
-    "w-w": "W-W",
-}
 
 _GENERIC_TOKENS = {
     "a",

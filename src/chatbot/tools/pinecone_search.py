@@ -80,28 +80,8 @@ class PineconeListingSearchResult:
     make_debug: dict[str, Any] = field(default_factory=dict)
     match_analysis: dict[str, Any] = field(default_factory=dict)
 
-MAKE_ALIAS_MAP: dict[str, str] = {
-    "cargo craft": "Cargo Craft",
-    "cargo craft trailers": "Cargo Craft",
-    "iron bull": "Iron Bull Trailers",
-    "iron bull trailers": "Iron Bull Trailers",
-    "diamond c": "Diamond C",
-    "diamond c trailers": "Diamond C",
-    "east texas": "East Texas Trailers",
-    "east texas trailers": "East Texas Trailers",
-    "calico": "Calico Trailers",
-    "calico trailers": "Calico Trailers",
-    "haulmark": "Haulmark",
-    "stallion": "Stallion",
-    "p&c": "P&C",
-    "p and c": "P&C",
-    "p n c": "P&C",
-    "p c": "P&C",
-    "aluma": "Aluma",
-    "galyean": "Galyean",
-    "gooseneck": "Gooseneck",
-    "texas pride": "Texas Pride",
-}
+# Make/brand aliases are single-sourced in make_aliases.py.
+from src.chatbot.make_aliases import MAKE_ALIASES as MAKE_ALIAS_MAP
 
 _ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
 

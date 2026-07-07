@@ -1,6 +1,10 @@
 import re
 from typing import Optional
 
+# Make/brand aliases are single-sourced in make_aliases.py (consumed here, by the
+# query-time make resolver, and by pinecone rerank display).
+from src.chatbot.make_aliases import MAKE_ALIASES as MAKE_MAP
+
 # ---------------------------------------------------------------------------
 # Canonical mappings
 # ---------------------------------------------------------------------------
@@ -27,25 +31,6 @@ CATEGORY_MAP = {
 # Subcategories that are effectively noise (model numbers, dimensions, etc.)
 _JUNK_SUBCATEGORY_RE = re.compile(r'^\d|["\']|^\d+x\d+', re.IGNORECASE)
 _JUNK_SUBCATEGORY_WORDS = {"unspecified", "trailers", "none", ""}
-
-MAKE_MAP = {
-    "cargo craft trailers": "Cargo Craft Trailers",
-    "cargo craft": "Cargo Craft Trailers",
-    "diamond c trailers": "Diamond C Trailers",
-    "diamond c": "Diamond C Trailers",
-    "stallion": "Stallion",
-    "texas pride": "Texas Pride",
-    "iron bull trailers": "Iron Bull Trailers",
-    "iron bull": "Iron Bull Trailers",
-    "east texas trailers": "East Texas Trailers",
-    "east texas": "East Texas Trailers",
-    "calico trailers": "Calico Trailers",
-    "calico": "Calico Trailers",
-    "kaufman trailers": "Kaufman Trailers",
-    "kaufman": "Kaufman Trailers",
-    "ameraitrail": "AmeriTrail",
-    "ameritrail": "AmeriTrail",
-}
 
 HITCH_MAP = {
     "bumper pull": "Bumper Pull",
