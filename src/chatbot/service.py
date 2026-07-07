@@ -610,9 +610,15 @@ def _enforce_contact_response_policy(
         r"[^.!?\n]{0,80}\b(?:e-?mail(?:\s+address)?|phone(?:\s+number)?|"
         r"contact\s+(?:details?|information|info)|callback\s+(?:details?|number))\b"
     )
+    # The dealership answering with its OWN phone/site (e.g. a "how do I contact
+    # you" FAQ) is not soliciting the declined customer's contact — strip those
+    # from the probe so they do not trip the guard.
+    probe = str(assistant_text or "")
+    for own in ("979-532-1486", "979.532.1486", "9795321486", "trailerplace.com"):
+        probe = probe.replace(own, " ")
     if not re.search(
         rf"(?:{email_address})|(?:{us_phone})|(?:{contact_request})",
-        str(assistant_text or ""),
+        probe,
         flags=re.IGNORECASE,
     ):
         return assistant_text
