@@ -973,63 +973,10 @@ P2
 
 ---
 
-# 20. Prompt rule "do NOT infer category from make" contradicts the spec (and the code)
-
-## Severity
-Medium
-
-## Category
-Instruction Hierarchy / Consistency
-
-## Location
-- `prompts.py` — `PRODUCT_INFO_RULES` (285), make block appended last (478–480); `make_resolver`/`make_inventory` / `make_category_options` usage in `_should_route_to_graph` and graph.
-
-## Spec validation (langgraph_rules_vs_excel.md) — CORRECTED FINDING
-❌ **The original framing was wrong.** The spec *intends* certain brand→category mappings: §1.2
-(line 94) lists **"Galyean, Star trailer, Calico trailer" as Livestock** wording, and line 108
-gives "cattle leads to Livestock." So resolving "Galyean" → Livestock is **correct per spec**,
-not a hallucination. The genuine defect is the inverse: the planner prompt says *"do NOT infer
-category from make,"* which **contradicts both the spec and the code** (`make_category_options`
-does map brands to categories; §2.2 uses brands for within-category reranking).
-
-## Current Prompt
-`PRODUCT_INFO_RULES`: brands are "for informational answers only — do NOT infer category from
-make." Meanwhile the code resolves brand→category and the spec lists brand words as category
-signals.
-
-## Problem
-The prompt forbids exactly what the spec and code want. The model is told brands are inert while
-the orchestration treats some brands (e.g. Galyean) as category signals — a direct
-prompt-vs-spec-vs-code contradiction that produces inconsistent brand handling.
-
-## LLM Failure Mode
-Inconsistency: on turns where the model obeys the prompt it refuses to use a brand that *should*
-imply Livestock; on turns where the code's `make_category_options` fires, the category appears
-anyway — so behavior flips depending on which path wins.
-
-## Example Failure
-"I want a Galyean" — prompt-obeying turn: model ignores the brand and asks a generic category
-question; code-driven turn: Livestock options appear. Same input, different behavior.
-
-## Why This Happens
-The prompt rule was written to prevent *generic* brands from forcing a category, but it
-over-generalizes and contradicts the spec's brand→category table and the code's mapping.
-
-## Recommended Improvement
-Align the prompt with the spec: state positively that category-specific brands (per the mapping)
-are valid category signals, while generic brands act as within-category filters/rerank; when a
-brand maps to multiple categories, confirm which type. Remove the blanket "do NOT infer category
-from make."
-
-## Expected Benefit
-Consistent, spec-compliant brand handling; eliminates the prompt/code/spec contradiction.
-
-## Priority
-P3
 
 ---
 
-# 21. Minor prompt/schema hygiene
+# 20. Minor prompt/schema hygiene
 
 ## Severity
 Low
@@ -1085,16 +1032,13 @@ P3
 | 17 | Confusion score + magic thresholds | Medium | P2 |
 | 18 | Turn-1 contact gate deprioritizes first request (contradicts spec example flow) | High | P1 |
 | 19 | Answer/no-pref/counter trichotomy inconsistent across 3 sites | Medium | P2 |
-| 20 | Prompt "do NOT infer category from make" contradicts spec + code | Medium | P2 |
-| 21 | Dead slot / static follow-up / unused email context | Low | P3 |
+| 20 | Dead slot / static follow-up / unused email context | Low | P3 |
 
 ## Spec-validation adjustments (see PROMPT_AUDIT_VALIDATION.md)
 - **#1, #2, #3, #8, #18** — confirmed real spec violations. #18 raised Medium→High / P2→P1
   because the spec's canonical example answers the opening request immediately (no contact gate).
 - **#6** — reframed: dimension-blindness is spec-justified (imperfect inventory); the fixable
   defect is the absolute "exact match" wording + the magic `==6` trigger.
-- **#20** — corrected: brand→category mapping is spec-intended (Galyean→Livestock); the real
-  defect is the prompt rule contradicting the spec/code. Severity Low→Medium.
 - **#4, #5, #7, #9–#17, #19, #21** — legitimate but outside the spec's scope (engineering/prompt
   reliability). #9 softened: the spec endorses multiple specialized helpers.
 
