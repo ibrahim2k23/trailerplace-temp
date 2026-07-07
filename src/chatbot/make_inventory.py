@@ -13,18 +13,6 @@ from src.normalizer import normalize_category, normalize_make
 _ROOT = Path(__file__).resolve().parents[2]
 _LISTINGS_FILE = _ROOT / "listings_final_v5.xlsx"
 
-_DISPLAY_OVERRIDES = {
-    "Cargo Craft Trailers": "Cargo Craft",
-    "Diamond C Trailers": "Diamond C",
-}
-
-_FILTER_VARIANTS = {
-    "Cargo Craft": {"Cargo Craft", "Cargo Craft Trailers"},
-    "Cargo Craft Trailers": {"Cargo Craft", "Cargo Craft Trailers"},
-    "Diamond C": {"Diamond C", "Diamond C Trailers"},
-    "Diamond C Trailers": {"Diamond C", "Diamond C Trailers"},
-}
-
 _CATEGORY_ALIASES = {
     "Atv Trailer": "Utility",
     "Concession": "Enclosed",
@@ -41,8 +29,9 @@ class MakeInventory:
 
 
 def _display_make(value: Any) -> str:
-    normalized = normalize_make(str(value or "").strip())
-    return _DISPLAY_OVERRIDES.get(normalized, normalized)
+    # normalize_make now yields the canonical short display form directly
+    # (make_aliases.py), so no post-hoc display override is needed.
+    return normalize_make(str(value or "").strip())
 
 
 def _display_category(value: Any) -> str:
@@ -76,7 +65,6 @@ def load_make_inventory() -> MakeInventory:
         variants = filter_values.setdefault(make, set())
         variants.add(raw_make)
         variants.add(normalize_make(raw_make))
-        variants.update(_FILTER_VARIANTS.get(make, set()))
 
     canonical_makes = tuple(sorted(categories))
     return MakeInventory(
