@@ -34,6 +34,9 @@ from src.normalizer import (
     normalize_condition,
     build_embedding_text,
 )
+# Weight/length parsing is single-sourced in units.py so the numbers written to
+# the index here match how the query/rerank path re-parses the same raw strings.
+from src.chatbot.units import parse_weight_lbs as parse_lbs, parse_length_ft
 
 load_dotenv()
 
@@ -91,98 +94,6 @@ def parse_money(val) -> Optional[float]:
         return v if v > 0 else None
     except (TypeError, ValueError):
         return None
-
-
-def parse_lbs(val) -> Optional[float]:
-    """Parse weight-like text and normalize to lbs."""
-    if val is None:
-        return None
-    if isinstance(val, float) and pd.isna(val):
-        return None
-    if isinstance(val, (int, float)):
-        try:
-            out = float(val)
-            return out if out > 0 else None
-        except (TypeError, ValueError):
-            return None
-    s = str(val).strip().lower()
-    if not s:
-        return None
-    s = s.replace(",", "")
-
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(k|m)\b", s)
-    if m:
-        qty = float(m.group(1))
-        mult = 1000.0 if m.group(2) == "k" else 1_000_000.0
-        out = qty * mult
-        return out if out > 0 else None
-
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:lb|lbs|pound|pounds|#)\b", s)
-    if m:
-        out = float(m.group(1))
-        return out if out > 0 else None
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:kg|kgs|kilogram|kilograms)\b", s)
-    if m:
-        out = float(m.group(1)) * 2.2046226218
-        return out if out > 0 else None
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:ton|tons|tonne|tonnes)\b", s)
-    if m:
-        out = float(m.group(1)) * 2000.0
-        return out if out > 0 else None
-
-    m = re.search(r"\b(\d+(?:\.\d+)?)\b", s)
-    if not m:
-        return None
-    out = float(m.group(1))
-    return out if out > 0 else None
-
-
-def parse_length_ft(val) -> Optional[float]:
-    """Parse length-like text and normalize to feet."""
-    if val is None:
-        return None
-    if isinstance(val, float) and pd.isna(val):
-        return None
-    if isinstance(val, (int, float)):
-        try:
-            out = float(val)
-            return out if out > 0 else None
-        except (TypeError, ValueError):
-            return None
-    s = str(val).strip().lower()
-    if not s:
-        return None
-
-    ft_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:ft|feet|['′]|`(?!`))", s)
-    in_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:in|inch|inches|\"|``|″)", s)
-    if ft_m:
-        ft = float(ft_m.group(1))
-        inches = float(in_m.group(1)) if in_m else 0.0
-        out = ft + (inches / 12.0)
-        return out if out > 0 else None
-    if in_m:
-        out = float(in_m.group(1)) / 12.0
-        return out if out > 0 else None
-    yd_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:yd|yds|yard|yards)\b", s)
-    if yd_m:
-        out = float(yd_m.group(1)) * 3.0
-        return out if out > 0 else None
-    m_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|meter|meters|metre|metres)\b", s)
-    if m_m:
-        out = float(m_m.group(1)) * 3.280839895
-        return out if out > 0 else None
-    cm_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:cm|centimeter|centimeters|centimetre|centimetres)\b", s)
-    if cm_m:
-        out = float(cm_m.group(1)) / 30.48
-        return out if out > 0 else None
-    mm_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:mm|millimeter|millimeters|millimetre|millimetres)\b", s)
-    if mm_m:
-        out = float(mm_m.group(1)) / 304.8
-        return out if out > 0 else None
-    if re.fullmatch(r"\d+(?:\.\d+)?", s):
-        out = float(s)
-        return out if out > 0 else None
-    return None
 
 
 def _money_from_info(info: dict, *keys: str) -> Optional[float]:

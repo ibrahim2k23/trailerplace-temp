@@ -14,6 +14,13 @@ from pinecone import Pinecone
 
 from src.normalizer import normalize_category, normalize_hitch, normalize_subcategory
 from src.chatbot.make_inventory import make_filter_values
+# Single-sourced parsers (units.py) so query/rerank parse raw catalog strings the
+# same way ingest did when it wrote the index. _parse_number/_parse_length_ft are
+# kept as local aliases to avoid churning the many call sites.
+from src.chatbot.units import (
+    parse_length_ft as _parse_length_ft,
+    parse_weight_lbs as _parse_number,
+)
 
 load_dotenv()
 
@@ -97,66 +104,6 @@ MAKE_ALIAS_MAP: dict[str, str] = {
 }
 
 _ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
-
-
-def _parse_number(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value) if value > 0 else None
-    text = str(value).lower().replace(",", "").strip()
-    if not text:
-        return None
-    # Common small typos and variants for unit words.
-    text = re.sub(r"\blb\b", "lbs", text)
-    text = re.sub(r"\blbd\b", "lbs", text)
-    text = re.sub(r"\blbss\b", "lbs", text)
-    text = re.sub(r"\bpunds\b", "pounds", text)
-    text = re.sub(r"\bkgs\b", "kg", text)
-    text = re.sub(r"\bkilograms?\b", "kg", text)
-    text = re.sub(r"\btonnes?\b", "ton", text)
-
-    # Normalize unit-bearing values to pounds.
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(lbs?|pounds?|#)\b", text)
-    if m:
-        number = float(m.group(1))
-        return number if number > 0 else None
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(kg)\b", text)
-    if m:
-        number = float(m.group(1)) * 2.2046226218
-        return number if number > 0 else None
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(ton)\b", text)
-    if m:
-        number = float(m.group(1)) * 2000.0
-        return number if number > 0 else None
-
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(k|m)?", text)
-    if not match:
-        return None
-    number = float(match.group(1))
-    suffix = match.group(2)
-    if suffix == "k":
-        number *= 1000
-    elif suffix == "m":
-        number *= 1_000_000
-    return number if number > 0 else None
-
-
-def _parse_length_ft(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value) if value > 0 else None
-    text = str(value).lower().strip()
-    if not text:
-        return None
-    ft = re.search(r"(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')", text)
-    inches = re.search(r"(\d+(?:\.\d+)?)\s*(?:in|inch|inches|\")", text)
-    if ft:
-        return float(ft.group(1)) + (float(inches.group(1)) / 12 if inches else 0)
-    if inches:
-        return float(inches.group(1)) / 12
-    return _parse_number(text)
 
 
 @lru_cache(maxsize=1)
