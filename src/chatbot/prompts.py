@@ -472,31 +472,48 @@ MIND_SYSTEM_PROMPT = f"""
 """.strip()
 
 
-def active_slot_policy() -> str:
+def active_slot_policy(no_value_directive: str) -> str:
     """Single source of truth for the authoritative active-slot / answer-
     classification rules (range->smallest, numeric needs a digit, width numeric,
     compound-dimension split, cargo_size, roll-off, category/make stability).
 
-    Extracted verbatim from the field-extraction adjudicator so it can be shared
-    across the extractor / question-adjudicator / reconciler prompts without the
-    rule wording drifting between them (Stage E3).
+    Shared across the extractor / question-adjudicator / reconciler prompts so
+    the rule wording cannot drift between them (Stage E3). The only per-site
+    difference is what to do when a numeric/width answer has no usable value:
+    the extractor omits the field, the adjudicator/reconciler set the
+    no-preference flag. That is passed as ``no_value_directive``.
     """
     return (
         "## AUTHORITATIVE ACTIVE-SLOT POLICY\n"
-        "- For a free-text active slot, extract any substantive direct answer even when broad or informal. "
-        "Do not overwrite it using text that answers a different active slot.\n"
+        "- Free-text slots (haul_item, haul_material, use_case and similar) accept any substantive direct answer, "
+        "however broad or informal ('random things', 'general cargo', 'assorted equipment'). Reject only an "
+        "unrelated counter-question, an explicit refusal/skip, or content that answers a different field. Never "
+        "overwrite a slot using text that answers a different slot.\n"
         "- Numeric fields require a digit or an unambiguous number written in words. Accept ranges and "
-        "approximations; for every range store only its smallest stated value ('5000-10000 lbs' -> '5000 lbs'). "
-        "Return no numeric update when no usable number exists.\n"
-        "- Width requires a numeric measurement. Never extract 'flexible', 'normal', 'standard', 'whatever fits', "
-        "or 'no specific measurement' as width_ft.\n"
+        "approximations; for every range use only its smallest stated value ('5000-10000 lbs' -> '5000 lbs'). "
+        f"When no usable number exists, {no_value_directive}\n"
+        "- Width requires a numeric measurement. 'Flexible', 'normal', 'standard', 'whatever fits', and "
+        f"'no specific measurement' are not widths; when the width answer is one of these, {no_value_directive}\n"
         "- Compound dimensions must be separated: '16 by 7 feet' means length_ft='16 ft' and width_ft='7 ft'. "
         "Never copy the complete compound phrase into both fields.\n"
         "- For active cargo_size, one usable length fully answers the field; width and height are optional. "
-        "'18 by 8 feet; height is not important' stores cargo_size='18 ft × 8 ft', length_ft='18 ft', "
-        "width_ft='8 ft'. 'About 18 feet long' stores cargo_size='18 ft', length_ft='18 ft'.\n"
+        "'18 by 8 feet; height is not important' means cargo_size='18 ft × 8 ft', length_ft='18 ft', "
+        "width_ft='8 ft'. 'About 18 feet long' means cargo_size='18 ft', length_ft='18 ft'.\n"
         "- For Roll Off bin_size, map the chosen numeric value directly into length_ft for Pinecone: "
-        "'15 yd' becomes length_ft='15 ft', not 45 ft. For ranges, use the smallest value.\n"
-        "- An already resolved category is stable during active Q&A. Cargo wording is not a category switch.\n"
+        "'15 yd' becomes length_ft='15 ft', not 45 ft (never convert yards to feet). For ranges, use the smallest value.\n"
+        "- For choice or fixed-choice slots, 'either', 'whatever works', 'standard', and flexible wording express "
+        "no preference; store neither option ('either bumper pull or gooseneck' -> store neither). "
+        f"When the answer is such flexible wording, {no_value_directive}\n"
+        "- For every other constrained field, accept a recognizable field value; when the answer is instead a "
+        f"cooperative vague one (no preference), {no_value_directive}\n"
+        "- An already resolved category is stable during active Q&A. Incidental cargo wording is not a category switch.\n"
         "- Extract a make only from an explicitly named manufacturer; generic cargo language is never a make.\n\n"
     )
+
+
+# Per-site "no usable value" directives for active_slot_policy().
+EXTRACTOR_NO_VALUE = "make no update for that field."
+ADJUDICATOR_NO_VALUE = (
+    "set no_preference_for_active_question=true, supply no active value or field update, "
+    "and do not invent or retry a value."
+)

@@ -40,7 +40,13 @@ from src.chatbot.constants import (
 )
 from src.chatbot.graph.apply_mind import build_state_return
 from src.chatbot.llm import make_llm, safe_invoke
-from src.chatbot.prompts import MIND_SYSTEM_PROMPT, TRAILERPLACE_KNOWLEDGE_SECTION, active_slot_policy
+from src.chatbot.prompts import (
+    MIND_SYSTEM_PROMPT,
+    TRAILERPLACE_KNOWLEDGE_SECTION,
+    active_slot_policy,
+    EXTRACTOR_NO_VALUE,
+    ADJUDICATOR_NO_VALUE,
+)
 from src.chatbot.state import ChatbotState, QuestionItem
 from src.models import TrailerListing
 from src.normalizer import normalize_category, normalize_hitch, normalize_subcategory
@@ -2985,23 +2991,7 @@ def _adjudicate_active_question_turn(
                     "- Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — "
                     "  'anything', 'all types of material', 'various equipment'. Capture the phrase as-is.\n\n"
 
-                    "## AUTHORITATIVE LOOSE-ANSWER POLICY\n"
-                    "- Numeric fields (weight, payload, length, width, height, capacity, crew size) require a digit "
-                    "or an unambiguous number written in words. Accept ranges and approximations; for every range "
-                    "store only its smallest stated value ('15 to 18 ft' -> '15 ft'). If no usable "
-                    "number is present, set no_preference_for_active_question=true; never retry or invent a value.\n"
-                    "- For width, 'flexible', 'normal', 'standard', 'whatever fits', and 'no specific measurement' "
-                    "mean no preference. Return no active-slot value and no width_ft update.\n"
-                    "- Roll Off bin_size is a search proxy for trailer length: copy its chosen numeric value directly "
-                    "to length_ft ('15 yd' -> length_ft='15 ft'), without converting yards to feet.\n"
-                    "- Free-text haul/use fields accept any substantive direct answer, including 'random things', "
-                    "'general cargo', and 'assorted equipment'. Reject only explicit refusal/skip, a counter-question, "
-                    "or content answering a different field.\n"
-                    "- 'Either', 'whatever works', 'standard', and flexible wording mean no preference for a choice slot.\n"
-                    "- Example: 'Either bumper pull or gooseneck is fine' means no preference: store neither hitch.\n"
-                    "- For every other constrained field, accept a recognizable field value; otherwise a cooperative "
-                    "vague answer means no preference, not rejection and not a retry.\n"
-                    "- Incidental cargo words never change an already selected category during active Q&A.\n\n"
+                    f"{active_slot_policy(ADJUDICATOR_NO_VALUE)}"
 
                     "## ACTIVE QUESTION EVALUATION\n"
                     "- Treat the active slot definition and question text as authoritative.\n"
@@ -3528,7 +3518,7 @@ def _extract_field_updates(
         "- payload_lbs is haul/carried weight — NOT GVWR unless user specifically says GVWR.\n"
         "- Side/wall height: '3 inch sides', '3 ft walls' → height_ft.\n\n"
 
-        f"{active_slot_policy()}"
+        f"{active_slot_policy(EXTRACTOR_NO_VALUE)}"
 
         "## CONFIDENCE\n"
         "If confidence is low, leave updates empty and optionally set clarification_needed.\n"
