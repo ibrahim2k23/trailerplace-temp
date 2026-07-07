@@ -144,14 +144,23 @@ components.html(
   const savedTheme = parentWindow.localStorage.getItem(storageKey);
   const chatKey = "trailerplace-chat-session";
   const urlSession = url.searchParams.get("chat_session");
-  const savedSession = parentWindow.sessionStorage.getItem(chatKey);
+  const resetSession = url.searchParams.get("reset_chat_session") === "1";
+  const savedSession =
+    parentWindow.sessionStorage.getItem(chatKey) ||
+    parentWindow.localStorage.getItem(chatKey);
 
-  if (!urlSession && savedSession) {
+  if (resetSession && urlSession) {
+    parentWindow.sessionStorage.setItem(chatKey, urlSession);
+    parentWindow.localStorage.setItem(chatKey, urlSession);
+    url.searchParams.delete("reset_chat_session");
+    parentWindow.history.replaceState({}, "", url.toString());
+  } else if (savedSession && urlSession !== savedSession) {
     url.searchParams.set("chat_session", savedSession);
     parentWindow.location.replace(url.toString());
     return;
   } else if (urlSession) {
     parentWindow.sessionStorage.setItem(chatKey, urlSession);
+    parentWindow.localStorage.setItem(chatKey, urlSession);
   }
 
   if (!urlTheme && (savedTheme === "light" || savedTheme === "dark")) {
@@ -1244,6 +1253,7 @@ with st.sidebar:
                 del st.session_state[k]
         st.session_state.chat_session_id = str(uuid.uuid4())
         st.query_params["chat_session"] = st.session_state.chat_session_id
+        st.query_params["reset_chat_session"] = "1"
         st.session_state.pop("durable_session_restored", None)
         st.session_state.last_thinking_result = None
         st.session_state.thinking_status = "idle"
@@ -1259,6 +1269,7 @@ with st.sidebar:
             _reset_api_session(old_sid)
         st.session_state.auth_ok = False
         st.query_params["chat_session"] = str(uuid.uuid4())
+        st.query_params["reset_chat_session"] = "1"
         st.session_state.messages = []
         for k in (
             "chat_session_id",

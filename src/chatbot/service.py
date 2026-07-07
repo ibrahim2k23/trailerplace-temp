@@ -2644,7 +2644,7 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
         customer_phone=session.get("customer_phone"),
         contact_status=session.get("contact_status"),
         main_prior_messages=session.get("messages") or [],
-        listings=[],
+        listings=result.get("last_listings") or [],
         thinking_context={
             "category": session.get("trailer_category"),
             "slots": session.get("slots_collected") or {},
