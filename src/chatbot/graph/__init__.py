@@ -7213,20 +7213,14 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
         }
     summary = FAQ_CATEGORY_LABELS[category]
     if not _has_contact(state):
+        # Informational FAQs are self-service: the direct fallback reply already
+        # carries the phone/site, so answer it immediately instead of deferring
+        # an internal team-email that just loops asking for the customer's
+        # contact (the bug the live harness caught for "how do I contact you").
         events = list(state.get("tool_events") or [])
-        events.append({"tool": "send_non_sales_faq_email", "result": {"status": "deferred_missing_contact"}})
-        return {
-            **state,
-            "assistant_text": _missing_contact_request(state, summary.lower()),
-            "pending_contact_action": {
-                "type": "faq",
-                "faq_category": category,
-                "summary": summary,
-                "user_message": state.get("user_message") or "",
-                "context_summary": _compact_recent_context(state),
-            },
-            "tool_events": events,
-        }
+        events.append({"tool": "send_non_sales_faq_email", "result": {"status": "answered_without_contact"}})
+        reply = _FAQ_REPLY_FALLBACKS.get(category, "").strip() or _FAQ_GENERIC_FALLBACK
+        return build_state_return(state, assistant_text=reply, tool_events=events)
     _persist_email_transcript_snapshot(state)
     result = send_non_sales_faq_email(
         session_id=state.get("session_id") or "",
