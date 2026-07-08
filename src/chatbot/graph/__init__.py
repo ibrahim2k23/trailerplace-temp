@@ -510,7 +510,14 @@ class PineconeMatchFramingDecision(BaseModel):
 
 @lru_cache(maxsize=1)
 def _mind_llm():
-    return make_llm(structured_output=MindDecision)
+    # F3: per-role env (MIND_MODEL) so the planner model can be flipped (e.g. to
+    # gpt-5-mini) via config alone once the A/B clears. Default is unchanged
+    # (OPENAI_MODEL -> gpt-4o-mini). NOTE: method stays function_calling — the
+    # planner/reconciler cannot use strict json_schema because MindDecision /
+    # QuestionTurnDecision carry free-form dict[str, Any] payloads
+    # (slots_collected_update, metadata_filters_update), which strict mode can't
+    # represent. Migrating would require a typed-slot schema redesign (deferred).
+    return make_llm(model_env="MIND_MODEL", structured_output=MindDecision)
 
 
 @lru_cache(maxsize=1)
