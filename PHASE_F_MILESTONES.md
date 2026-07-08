@@ -111,7 +111,11 @@ Deleting it would break all of that to fix a race that production doesn't have. 
 
 ---
 
-## Milestone F5 — Confusion-detection redesign (Type: DECISION → then ENG)
+## Milestone F5 — Confusion-detection redesign (Type: DECISION → then ENG) — ⏸️ DEFERRED
+
+**Deferred (not now).** Not a bug — current 0–100 confusion score works; this is a
+fragility cleanup. Revisit if/when escalation misfires become a real problem. When picked
+up, decide: switch to repeat-counting + pick N (escalate after N repeats).
 
 **Why here:** changes user-facing escalation behavior, so it needs sign-off; lower urgency than the above.
 
@@ -170,6 +174,6 @@ F7 (summarization)     ── likely won't-do
 ## Open decisions checklist (for the owner)
 - [x] **F3:** ~~reconciler on gpt-5-mini~~ **DONE** (reconciler flipped, verified live). Planner still on gpt-4o-mini pending a broader A/B — open question: is the per-turn cost of also flipping the planner worth it?
 - [x] **F4:** ~~Is a Postgres DB guaranteed in every deployment?~~ **Closed (option A)** — production already race-safe via the durable advisory lock; in-memory path kept for tests/dev.
-- [ ] **F5:** Approve ordinal confusion enum + deterministic repeat count; choose N and the enum→escalation mapping.
+- [~] **F5:** Deferred — revisit only if escalation misfires become a real problem.
 - [x] **F6:** ~~Commit to building a canonical feature ontology?~~ **Closed won't-do** — no per-listing feature knowledge base to validate against.
 - [ ] **F7:** Is there a real long-thread degradation worth summarization's cost, or close as won't-do?
