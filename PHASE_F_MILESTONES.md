@@ -73,7 +73,24 @@ Ordering below is by recommended execution order (risk-adjusted, dependency-awar
 
 ---
 
-## Milestone F4 — In-memory session locking (or drop the in-memory path) (Type: DECISION → then ENG)
+> **UPDATE (F3 partial — DONE):** The **reconciler (G8)** now runs on **gpt-5-mini** by
+> default (`_active_turn_reconciler_llm`): dedicated resolver skips `OPENAI_MODEL`,
+> temperature left unset for reasoning models, `function_calling` kept (json_schema still
+> blocked). Override with `ACTIVE_TURN_RECONCILER_MODEL`. Verified live: full active-Q&A
+> flow incl. counter-question classification, 0 errors. The **planner (G1)** stays on
+> gpt-4o-mini (flip via `MIND_MODEL`); a broader A/B is still the open piece.
+
+## Milestone F4 — In-memory session locking (or drop the in-memory path) (Type: DECISION → then ENG) — ✅ CLOSED (option A)
+
+**Closed: no change needed.** Decided against dropping the in-memory path. Finding: in
+production (persistence enabled) every turn already goes through the durable path, which
+serializes per-session via the Postgres advisory lock in `durable_turn` *and* writes
+`_sessions` under `_lock` — so the race can't occur in production. The in-memory branch
+(`handle_chat` early-return when `not persistence_enabled()`) only runs DB-less, i.e. in
+tests and local dev (the whole suite + live harness run `TRAILERPLACE_PERSIST_CHATS=0`).
+Deleting it would break all of that to fix a race that production doesn't have. Left as-is.
+
+<details><summary>Original F4 write-up</summary>
 
 **Why here:** correctness-relevant but the *right* fix depends on deployment topology — an architecture call.
 
@@ -89,6 +106,8 @@ Ordering below is by recommended execution order (risk-adjusted, dependency-awar
 **Verification:** concurrency test firing two simultaneous requests at one session id; live harness 6/6.
 
 **Estimated size:** small (drop path) or medium (locking). Gated on the decision.
+
+</details>
 
 ---
 
@@ -149,8 +168,8 @@ F7 (summarization)     ── likely won't-do
 **Immediate next action:** F1. Everything above F3 is unblocked engineering; F3–F5 are parked pending the three decisions; F6–F7 are separate projects.
 
 ## Open decisions checklist (for the owner)
-- [ ] **F3:** What metric defines "planner/reconciler is better on gpt-5-mini"? Is the per-turn cost increase acceptable?
-- [ ] **F4:** Is a Postgres DB guaranteed in every deployment? (Yes → drop in-memory path; No → add locking.)
+- [x] **F3:** ~~reconciler on gpt-5-mini~~ **DONE** (reconciler flipped, verified live). Planner still on gpt-4o-mini pending a broader A/B — open question: is the per-turn cost of also flipping the planner worth it?
+- [x] **F4:** ~~Is a Postgres DB guaranteed in every deployment?~~ **Closed (option A)** — production already race-safe via the durable advisory lock; in-memory path kept for tests/dev.
 - [ ] **F5:** Approve ordinal confusion enum + deterministic repeat count; choose N and the enum→escalation mapping.
 - [x] **F6:** ~~Commit to building a canonical feature ontology?~~ **Closed won't-do** — no per-listing feature knowledge base to validate against.
 - [ ] **F7:** Is there a real long-thread degradation worth summarization's cost, or close as won't-do?

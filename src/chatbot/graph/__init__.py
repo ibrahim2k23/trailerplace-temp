@@ -568,10 +568,29 @@ def _question_turn_adjudicator_llm():
     )
 
 
+def _is_reasoning_model(name: str) -> bool:
+    # Reasoning models (gpt-5*, o-series) reject an explicit temperature and are
+    # driven differently from chat models.
+    return (name or "").lower().startswith(("gpt-5", "o1", "o3", "o4"))
+
+
+def _active_turn_reconciler_model_name() -> str:
+    # F3: the reconciler is the last-line safety net on active Q&A turns, so it
+    # runs on the stronger reasoning model by default. Resolution deliberately
+    # skips OPENAI_MODEL (which is gpt-4o-mini) — set ACTIVE_TURN_RECONCILER_MODEL
+    # to override (e.g. back to gpt-4o-mini to A/B the cost).
+    return (os.getenv("ACTIVE_TURN_RECONCILER_MODEL") or "gpt-5-mini").strip()
+
+
 @lru_cache(maxsize=1)
 def _active_turn_reconciler_llm():
+    model = _active_turn_reconciler_model_name()
+    # Keep function_calling: json_schema (strict) can't represent the free-form
+    # dict[str, Any] payloads QuestionTurnDecision carries. Reasoning models need
+    # temperature left unset.
     return make_llm(
-        model_env="ACTIVE_TURN_RECONCILER_MODEL",
+        model=model,
+        temperature=None if _is_reasoning_model(model) else 0.0,
         structured_output=QuestionTurnDecision,
     )
 
