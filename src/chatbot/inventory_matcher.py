@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
+from src.chatbot.formatting import LISTING_CARD_SEPARATOR, render_listing_card
 from src.chatbot.llm import make_llm
 from src.chatbot.make_resolver import resolve_make_from_text
 from src.normalizer import clean_dealer_notes
@@ -1001,17 +1002,20 @@ def _listing_bullets(listing: dict[str, Any]) -> list[str]:
 
 
 def _format_listing_block(index: int, listing: dict[str, Any]) -> str:
-    title = _item_label(listing)
-    url = _clean_scalar(listing.get("url"))
-    line1 = f"Trailer #{index}: [{title}]({url})" if url else f"Trailer #{index}: {title}"
-    bullets = _listing_bullets(listing)
-    if not bullets:
-        bullets = ["- *(No spec fields on this listing.)*"]
-    return "\n\n".join([line1, "\n".join(bullets)])
+    # Direct-lookup path: no match_validation context, so no why-line (the user
+    # asked for a specific trailer, not a requirements-based match). Renders
+    # through the shared card component so header/bullet/separator layout stays
+    # in lockstep with the search path (formatting.format_listing_results).
+    return render_listing_card(
+        index,
+        title=_item_label(listing),
+        url=_clean_scalar(listing.get("url")),
+        bullet_lines=_listing_bullets(listing),
+    )
 
 
 def _format_listing_blocks(listings: list[dict[str, Any]]) -> str:
-    return "\n\n---\n\n".join(
+    return LISTING_CARD_SEPARATOR.join(
         _format_listing_block(i, listing)
         for i, listing in enumerate(listings[:5], 1)
     )

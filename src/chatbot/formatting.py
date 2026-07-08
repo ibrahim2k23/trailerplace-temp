@@ -217,6 +217,42 @@ def _why_it_fits_body(
     if (user_message or "").strip():
         return "A solid option based on your request and the specs available on this listing."
     return "A strong option based on your current search filters."
+
+
+_NO_SPECS_BULLET = "- *(No spec fields on this listing.)*"
+LISTING_CARD_SEPARATOR = "\n\n---\n\n"
+
+
+def render_listing_card(
+    index: int,
+    *,
+    title: str,
+    url: str = "",
+    bullet_lines: list[str],
+    why_line: str | None = None,
+) -> str:
+    """Single source of truth for one trailer card's layout.
+
+    Both the Pinecone search path (``format_listing_results``) and the direct
+    inventory-lookup path (``inventory_matcher._format_listing_block``) render
+    cards through this so the header/bullet/separator structure can't drift.
+    ``bullet_lines`` are already ``- ``-prefixed; ``why_line`` is the optional
+    match-fit note that only the search path supplies.
+    """
+    title_txt = str(title or "").strip() or "Trailer listing"
+    url_txt = str(url or "").strip()
+    header = (
+        f"Trailer #{index}: [{title_txt}]({url_txt})"
+        if url_txt
+        else f"Trailer #{index}: {title_txt}"
+    )
+    body = "\n".join(bullet_lines) if bullet_lines else _NO_SPECS_BULLET
+    parts = [header, "", body]
+    if why_line:
+        parts.extend(["", why_line])
+    return "\n".join(parts)
+
+
 def format_listing_results(
     listings: list[dict[str, Any]],
     *,
@@ -232,32 +268,22 @@ def format_listing_results(
 
     sections: list[str] = []
     for i, listing in enumerate(listings, 1):
-        title = str(listing.get("title") or "Trailer listing").strip()
-        url = str(listing.get("url") or "").strip()
-
-        if url:
-            line1 = f"Trailer #{i}: [{title}]({url})"
-        else:
-            line1 = f"Trailer #{i}: {title}"
-
         raw_bullets = _ordered_bullets(listing, user_message=user_message, slots=slots or {})
         bullet_lines = [f"- {text}" for text in raw_bullets]
 
-        why_fallback = _why_it_fits_body(
+        why = _why_it_fits_body(
             listing,
             category=category,
             slots=slots or {},
             user_message=user_message,
         )
-        why = why_fallback
 
-        block_parts = [line1]
-        if bullet_lines:
-            block_parts.extend(["", "\n".join(bullet_lines)])
-        else:
-            block_parts.extend(["", "- *(No spec fields on this listing.)*"])
-        block_parts.extend(["", why])
+        sections.append(render_listing_card(
+            i,
+            title=str(listing.get("title") or "Trailer listing").strip(),
+            url=str(listing.get("url") or "").strip(),
+            bullet_lines=bullet_lines,
+            why_line=why,
+        ))
 
-        sections.append("\n".join(block_parts))
-
-    return "\n\n---\n\n".join(sections)
+    return LISTING_CARD_SEPARATOR.join(sections)
