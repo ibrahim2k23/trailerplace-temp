@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any, Literal, Optional
 
@@ -6121,39 +6123,55 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     active_qna_search_now = False
     active_qna_skip_remaining = False
     if active_qna_slot and latest_message.strip():
-        question_turn = _adjudicate_active_question_turn(
-            state={
-                **state,
-                "trailer_category": category,
-                "slots_collected": slots,
-                "metadata_filters_collected": metadata_filters,
-            },
-            category=category,
-            active_slot=active_qna_slot,
-            active_question=active_qna_question,
-            active_definition=active_qna_definition,
-            latest_message=latest_message,
-            pending_questions=pending_source_for_turn,
-            make_category_options=make_category_options,
-        )
-        supplemental_slots, _supplemental_metadata, supplemental_features = _apply_explicit_filter_extraction(
-            state=state,
-            category=category,
-            slots=slots,
-            metadata_filters=metadata_filters,
-            latest_message=latest_message,
-            awaiting_slot=active_qna_slot,
-            apply_slot_updates=True,
-        )
-        active_no_preference = classify_no_preference(
-            category=category,
-            user_message=latest_message,
-            awaiting_slot=active_qna_slot,
-            pending_questions=pending_source_for_turn,
-            slots_collected=slots,
-            metadata_filters_collected=metadata_filters,
-            allowed_category_slots=sorted(allowed_category_slots),
-            active_question=active_qna_question,
+        # E6: the question adjudicator (G7) and the explicit-filter extractor (G5) share
+        # inputs but not outputs, so run them concurrently to shave a round-trip off every
+        # active Q&A turn. The extractor mutates `slots`/`metadata_filters` in place, so the
+        # adjudicator receives deep copies of those dicts to stay race-free.
+        with ThreadPoolExecutor(max_workers=2) as _reconciler_input_pool:
+            _adjudicator_future = _reconciler_input_pool.submit(
+                _adjudicate_active_question_turn,
+                state={
+                    **state,
+                    "trailer_category": category,
+                    "slots_collected": copy.deepcopy(slots),
+                    "metadata_filters_collected": copy.deepcopy(metadata_filters),
+                },
+                category=category,
+                active_slot=active_qna_slot,
+                active_question=active_qna_question,
+                active_definition=active_qna_definition,
+                latest_message=latest_message,
+                pending_questions=pending_source_for_turn,
+                make_category_options=make_category_options,
+            )
+            _extraction_future = _reconciler_input_pool.submit(
+                _apply_explicit_filter_extraction,
+                state=state,
+                category=category,
+                slots=slots,
+                metadata_filters=metadata_filters,
+                latest_message=latest_message,
+                awaiting_slot=active_qna_slot,
+                apply_slot_updates=True,
+            )
+            question_turn = _adjudicator_future.result()
+            supplemental_slots, _supplemental_metadata, supplemental_features = (
+                _extraction_future.result()
+            )
+        # E6: the question adjudicator (G7) already classifies no-preference for the
+        # active slot under the shared answer-classification policy, so its verdict is
+        # the same signal the standalone no-preference classifier (M2) used to produce.
+        # Derive M2's PreferenceNullDecision from the adjudicator instead of a second
+        # LLM round-trip; the reconciler still treats this as advisory evidence.
+        active_no_preference = PreferenceNullDecision(
+            has_no_preference=bool(question_turn.no_preference_for_active_question),
+            target_slots=(
+                [str(active_qna_slot)]
+                if question_turn.no_preference_for_active_question
+                else []
+            ),
+            reason="derived_from_question_adjudicator",
+            confidence=question_turn.confidence,
         )
         question_turn = _reconcile_active_question_turn(
             state=state,
