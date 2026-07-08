@@ -327,8 +327,61 @@ def close_session(session_id: str) -> None:
             session.commit()
 
 
+# Outbox retry policy. Sane defaults (F1) — tune via env only if needed.
+#   LEASE:    a row stuck in 'processing' longer than this is treated as
+#             orphaned by a crashed/killed drainer and reclaimed.
+#   MAX:      after this many delivery attempts a 'failed' row is parked as
+#             'dead' so it stops consuming drain budget forever.
+#   BACKOFF:  a 'failed' row is only retried once this (exponential, capped)
+#             window has elapsed since its last attempt (claimed_at).
+_OUTBOX_LEASE_SECONDS = 300
+_OUTBOX_MAX_ATTEMPTS = 5
+_OUTBOX_RETRY_BASE_SECONDS = 60
+_OUTBOX_RETRY_CAP_SECONDS = 3600
+
+
+def _outbox_backoff_seconds(attempt_count: int) -> float:
+    """Exponential backoff for the Nth retry: 60s, 120s, 240s, … capped."""
+    exp = max(0, attempt_count - 1)
+    return min(_OUTBOX_RETRY_BASE_SECONDS * (2 ** exp), _OUTBOX_RETRY_CAP_SECONDS)
+
+
+def _outbox_claim_decision(
+    status: str,
+    attempt_count: int,
+    claimed_at: Optional[datetime],
+    now: datetime,
+) -> str:
+    """Pure eligibility decision for a candidate outbox row.
+
+    Returns 'claim' (attempt delivery now), 'skip' (not yet eligible), or
+    'dead' (retries exhausted — park it). Kept side-effect free so the retry
+    policy is unit-testable without a database.
+    """
+    if status == "pending":
+        return "claim"
+    if attempt_count >= _OUTBOX_MAX_ATTEMPTS:
+        return "dead"
+    if claimed_at is None:
+        return "claim"
+    age = (now - claimed_at).total_seconds()
+    if status == "processing":
+        # Only reclaim once the lease has expired (orphaned by a dead drainer);
+        # otherwise another drainer is likely mid-flight on it.
+        return "claim" if age >= _OUTBOX_LEASE_SECONDS else "skip"
+    if status == "failed":
+        return "claim" if age >= _outbox_backoff_seconds(attempt_count) else "skip"
+    return "skip"
+
+
 def deliver_pending_outbox(limit: int = 10) -> None:
-    """Best-effort at-least-once delivery; failed rows remain retryable."""
+    """At-least-once delivery with claim leasing + bounded exponential retry.
+
+    Claims up to ``limit`` eligible rows (stamping ``claimed_at`` so concurrent
+    drainers don't double-send and crashed drainers' rows can be reclaimed),
+    then delivers each outside the claim transaction. Failures stay retryable
+    until ``_OUTBOX_MAX_ATTEMPTS``, after which the row is parked as 'dead'.
+    """
     if not persistence_enabled():
         return
     from src.chatbot.tools import email_tools
@@ -339,28 +392,51 @@ def deliver_pending_outbox(limit: int = 10) -> None:
         "escalation_alert": email_tools.send_escalation_alert_email,
         "results_shown": email_tools.send_trailer_results_shown_email,
     }
+    now = datetime.now(timezone.utc)
     with _session() as session:
-        rows = list(session.execute(
+        # Over-fetch candidates: eligibility (backoff / lease) is decided in
+        # Python, so some locked rows may turn out not-yet-ready and be skipped.
+        candidates = list(session.execute(
             select(ChatbotOutbox)
-            .where(ChatbotOutbox.status.in_(("pending", "failed")))
+            .where(ChatbotOutbox.status.in_(("pending", "failed", "processing")))
             .order_by(ChatbotOutbox.created_at)
             .with_for_update(skip_locked=True)
-            .limit(limit)
+            .limit(limit * 4)
         ).scalars())
-        for row in rows:
+        claimed = []
+        for row in candidates:
+            decision = _outbox_claim_decision(
+                row.status, row.attempt_count, row.claimed_at, now
+            )
+            if decision == "dead":
+                row.status = "dead"
+                logger.error(
+                    "outbox_delivery_exhausted | event_id=%s attempts=%s last_error=%s",
+                    row.event_id, row.attempt_count, row.last_error,
+                )
+                continue
+            if decision == "skip":
+                continue
             row.status = "processing"
             row.attempt_count += 1
+            row.claimed_at = now
+            claimed.append(row)
+            if len(claimed) >= limit:
+                break
         session.commit()
+        # Snapshot delivery inputs before the session closes (rows are detached
+        # but expire_on_commit=False keeps loaded attributes readable).
+        work = [(row.event_id, row.event_type, dict(row.payload)) for row in claimed]
 
-    for row in rows:
+    for event_id, event_type, payload in work:
         try:
-            handlers[row.event_type](**row.payload)
+            handlers[event_type](**payload)
             status, error = "sent", None
         except Exception as exc:
-            logger.exception("outbox_delivery_failed | event_id=%s", row.event_id)
+            logger.exception("outbox_delivery_failed | event_id=%s", event_id)
             status, error = "failed", str(exc)[:2000]
         with _session() as session:
-            current = session.get(ChatbotOutbox, row.event_id)
+            current = session.get(ChatbotOutbox, event_id)
             if current:
                 current.status = status
                 current.last_error = error
