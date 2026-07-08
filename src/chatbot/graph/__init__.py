@@ -40,7 +40,7 @@ from src.chatbot.constants import (
     compact_listings,
     compact_recent_messages,
 )
-from src.chatbot.graph.apply_mind import build_state_return
+from src.chatbot.graph.apply_mind import ApplyMindContext, build_state_return
 from src.chatbot.llm import make_llm, safe_invoke
 from src.chatbot.prompts import (
     MIND_SYSTEM_PROMPT,
@@ -5577,7 +5577,65 @@ def _adjudicate_category_filter_confirmation(
         return CategoryFilterConfirmationDecision()
 
 
-def _apply_mind_node(state: ChatbotState) -> ChatbotState:
+def _apply_mind_category_phase(ctx: ApplyMindContext) -> ChatbotState | None:
+    _u = ctx.unpack()
+    active_qna_counter_topic = _u["active_qna_counter_topic"]
+    active_qna_email_action = _u["active_qna_email_action"]
+    active_qna_escalation_summary = _u["active_qna_escalation_summary"]
+    active_qna_faq_category = _u["active_qna_faq_category"]
+    active_qna_faq_summary = _u["active_qna_faq_summary"]
+    active_qna_question = _u["active_qna_question"]
+    active_qna_reply = _u["active_qna_reply"]
+    active_qna_retry_question = _u["active_qna_retry_question"]
+    active_qna_search_now = _u["active_qna_search_now"]
+    active_qna_skip_remaining = _u["active_qna_skip_remaining"]
+    active_qna_slot = _u["active_qna_slot"]
+    active_qna_unanswered = _u["active_qna_unanswered"]
+    active_qna_unsupported_request = _u["active_qna_unsupported_request"]
+    active_question_attempts = _u["active_question_attempts"]
+    active_question_was_resolved = _u["active_question_was_resolved"]
+    active_question_was_unanswered = _u["active_question_was_unanswered"]
+    assistant_text = _u["assistant_text"]
+    awaiting_slot = _u["awaiting_slot"]
+    category = _u["category"]
+    category_before = _u["category_before"]
+    category_changed = _u["category_changed"]
+    category_clarification_key = _u["category_clarification_key"]
+    category_needs_clarification = _u["category_needs_clarification"]
+    decision = _u["decision"]
+    defaulted_metadata_filters = _u["defaulted_metadata_filters"]
+    dynamic_questions = _u["dynamic_questions"]
+    extracted_features = _u["extracted_features"]
+    extracted_slots = _u["extracted_slots"]
+    generic_no_category_missing = _u["generic_no_category_missing"]
+    invalid_required = _u["invalid_required"]
+    invalid_required_slot = _u["invalid_required_slot"]
+    key = _u["key"]
+    latest_message = _u["latest_message"]
+    make_category_options = _u["make_category_options"]
+    make_changed = _u["make_changed"]
+    make_only_missing = _u["make_only_missing"]
+    metadata_filters = _u["metadata_filters"]
+    metadata_filters_before = _u["metadata_filters_before"]
+    missing_required = _u["missing_required"]
+    original_mind_action = _u["original_mind_action"]
+    original_mind_text = _u["original_mind_text"]
+    pending = _u["pending"]
+    question_turn = _u["question_turn"]
+    questions_by_slot = _u["questions_by_slot"]
+    repeated_unanswered_escalation = _u["repeated_unanswered_escalation"]
+    requested_non_metadata_features = _u["requested_non_metadata_features"]
+    required_slots_override = _u["required_slots_override"]
+    reset_result_state = _u["reset_result_state"]
+    skipped_unanswered_slot = _u["skipped_unanswered_slot"]
+    slot = _u["slot"]
+    slots = _u["slots"]
+    slots_before = _u["slots_before"]
+    slots_skipped = _u["slots_skipped"]
+    slots_skipped_before = _u["slots_skipped_before"]
+    state = _u["state"]
+    value = _u["value"]
+
     decision = dict(state.get("mind_decision") or {})
     original_mind_action = str(decision.get("action") or "respond")
     original_mind_text = str(decision.get("assistant_text") or "").strip()
@@ -6084,6 +6142,69 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             mind_decision=decision,
         )
 
+    ctx.repack(locals())
+    return None
+
+
+def _apply_mind_active_turn_phase(ctx: ApplyMindContext) -> ChatbotState | None:
+    _u = ctx.unpack()
+    active_qna_counter_topic = _u["active_qna_counter_topic"]
+    active_qna_email_action = _u["active_qna_email_action"]
+    active_qna_escalation_summary = _u["active_qna_escalation_summary"]
+    active_qna_faq_category = _u["active_qna_faq_category"]
+    active_qna_faq_summary = _u["active_qna_faq_summary"]
+    active_qna_question = _u["active_qna_question"]
+    active_qna_reply = _u["active_qna_reply"]
+    active_qna_retry_question = _u["active_qna_retry_question"]
+    active_qna_search_now = _u["active_qna_search_now"]
+    active_qna_skip_remaining = _u["active_qna_skip_remaining"]
+    active_qna_slot = _u["active_qna_slot"]
+    active_qna_unanswered = _u["active_qna_unanswered"]
+    active_qna_unsupported_request = _u["active_qna_unsupported_request"]
+    active_question_attempts = _u["active_question_attempts"]
+    active_question_was_resolved = _u["active_question_was_resolved"]
+    active_question_was_unanswered = _u["active_question_was_unanswered"]
+    assistant_text = _u["assistant_text"]
+    awaiting_slot = _u["awaiting_slot"]
+    category = _u["category"]
+    category_before = _u["category_before"]
+    category_changed = _u["category_changed"]
+    category_clarification_key = _u["category_clarification_key"]
+    category_needs_clarification = _u["category_needs_clarification"]
+    decision = _u["decision"]
+    defaulted_metadata_filters = _u["defaulted_metadata_filters"]
+    dynamic_questions = _u["dynamic_questions"]
+    extracted_features = _u["extracted_features"]
+    extracted_slots = _u["extracted_slots"]
+    generic_no_category_missing = _u["generic_no_category_missing"]
+    invalid_required = _u["invalid_required"]
+    invalid_required_slot = _u["invalid_required_slot"]
+    key = _u["key"]
+    latest_message = _u["latest_message"]
+    make_category_options = _u["make_category_options"]
+    make_changed = _u["make_changed"]
+    make_only_missing = _u["make_only_missing"]
+    metadata_filters = _u["metadata_filters"]
+    metadata_filters_before = _u["metadata_filters_before"]
+    missing_required = _u["missing_required"]
+    original_mind_action = _u["original_mind_action"]
+    original_mind_text = _u["original_mind_text"]
+    pending = _u["pending"]
+    question_turn = _u["question_turn"]
+    questions_by_slot = _u["questions_by_slot"]
+    repeated_unanswered_escalation = _u["repeated_unanswered_escalation"]
+    requested_non_metadata_features = _u["requested_non_metadata_features"]
+    required_slots_override = _u["required_slots_override"]
+    reset_result_state = _u["reset_result_state"]
+    skipped_unanswered_slot = _u["skipped_unanswered_slot"]
+    slot = _u["slot"]
+    slots = _u["slots"]
+    slots_before = _u["slots_before"]
+    slots_skipped = _u["slots_skipped"]
+    slots_skipped_before = _u["slots_skipped_before"]
+    state = _u["state"]
+    value = _u["value"]
+
     _apply_generic_haul_use_to_category_slot(category, slots)
 
     allowed_category_slots = _category_slots(category)
@@ -6516,6 +6637,69 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     if awaiting_slot and awaiting_slot in slots:
         awaiting_slot = None
 
+    ctx.repack(locals())
+    return None
+
+
+def _apply_mind_questions_phase(ctx: ApplyMindContext) -> ChatbotState | None:
+    _u = ctx.unpack()
+    active_qna_counter_topic = _u["active_qna_counter_topic"]
+    active_qna_email_action = _u["active_qna_email_action"]
+    active_qna_escalation_summary = _u["active_qna_escalation_summary"]
+    active_qna_faq_category = _u["active_qna_faq_category"]
+    active_qna_faq_summary = _u["active_qna_faq_summary"]
+    active_qna_question = _u["active_qna_question"]
+    active_qna_reply = _u["active_qna_reply"]
+    active_qna_retry_question = _u["active_qna_retry_question"]
+    active_qna_search_now = _u["active_qna_search_now"]
+    active_qna_skip_remaining = _u["active_qna_skip_remaining"]
+    active_qna_slot = _u["active_qna_slot"]
+    active_qna_unanswered = _u["active_qna_unanswered"]
+    active_qna_unsupported_request = _u["active_qna_unsupported_request"]
+    active_question_attempts = _u["active_question_attempts"]
+    active_question_was_resolved = _u["active_question_was_resolved"]
+    active_question_was_unanswered = _u["active_question_was_unanswered"]
+    assistant_text = _u["assistant_text"]
+    awaiting_slot = _u["awaiting_slot"]
+    category = _u["category"]
+    category_before = _u["category_before"]
+    category_changed = _u["category_changed"]
+    category_clarification_key = _u["category_clarification_key"]
+    category_needs_clarification = _u["category_needs_clarification"]
+    decision = _u["decision"]
+    defaulted_metadata_filters = _u["defaulted_metadata_filters"]
+    dynamic_questions = _u["dynamic_questions"]
+    extracted_features = _u["extracted_features"]
+    extracted_slots = _u["extracted_slots"]
+    generic_no_category_missing = _u["generic_no_category_missing"]
+    invalid_required = _u["invalid_required"]
+    invalid_required_slot = _u["invalid_required_slot"]
+    key = _u["key"]
+    latest_message = _u["latest_message"]
+    make_category_options = _u["make_category_options"]
+    make_changed = _u["make_changed"]
+    make_only_missing = _u["make_only_missing"]
+    metadata_filters = _u["metadata_filters"]
+    metadata_filters_before = _u["metadata_filters_before"]
+    missing_required = _u["missing_required"]
+    original_mind_action = _u["original_mind_action"]
+    original_mind_text = _u["original_mind_text"]
+    pending = _u["pending"]
+    question_turn = _u["question_turn"]
+    questions_by_slot = _u["questions_by_slot"]
+    repeated_unanswered_escalation = _u["repeated_unanswered_escalation"]
+    requested_non_metadata_features = _u["requested_non_metadata_features"]
+    required_slots_override = _u["required_slots_override"]
+    reset_result_state = _u["reset_result_state"]
+    skipped_unanswered_slot = _u["skipped_unanswered_slot"]
+    slot = _u["slot"]
+    slots = _u["slots"]
+    slots_before = _u["slots_before"]
+    slots_skipped = _u["slots_skipped"]
+    slots_skipped_before = _u["slots_skipped_before"]
+    state = _u["state"]
+    value = _u["value"]
+
     should_check_pre_generic_turn = (
         (decision.get("action") or "respond") in {"respond", "ask_next_question", "pinecone_search"}
         and not bool(state.get("has_shown_search_results"))
@@ -6698,6 +6882,69 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
     )
     if generic_no_category_missing:
         pending = _queue_generic_no_category_questions(pending, generic_no_category_missing)
+
+    ctx.repack(locals())
+    return None
+
+
+def _apply_mind_actions_phase(ctx: ApplyMindContext) -> ChatbotState | None:
+    _u = ctx.unpack()
+    active_qna_counter_topic = _u["active_qna_counter_topic"]
+    active_qna_email_action = _u["active_qna_email_action"]
+    active_qna_escalation_summary = _u["active_qna_escalation_summary"]
+    active_qna_faq_category = _u["active_qna_faq_category"]
+    active_qna_faq_summary = _u["active_qna_faq_summary"]
+    active_qna_question = _u["active_qna_question"]
+    active_qna_reply = _u["active_qna_reply"]
+    active_qna_retry_question = _u["active_qna_retry_question"]
+    active_qna_search_now = _u["active_qna_search_now"]
+    active_qna_skip_remaining = _u["active_qna_skip_remaining"]
+    active_qna_slot = _u["active_qna_slot"]
+    active_qna_unanswered = _u["active_qna_unanswered"]
+    active_qna_unsupported_request = _u["active_qna_unsupported_request"]
+    active_question_attempts = _u["active_question_attempts"]
+    active_question_was_resolved = _u["active_question_was_resolved"]
+    active_question_was_unanswered = _u["active_question_was_unanswered"]
+    assistant_text = _u["assistant_text"]
+    awaiting_slot = _u["awaiting_slot"]
+    category = _u["category"]
+    category_before = _u["category_before"]
+    category_changed = _u["category_changed"]
+    category_clarification_key = _u["category_clarification_key"]
+    category_needs_clarification = _u["category_needs_clarification"]
+    decision = _u["decision"]
+    defaulted_metadata_filters = _u["defaulted_metadata_filters"]
+    dynamic_questions = _u["dynamic_questions"]
+    extracted_features = _u["extracted_features"]
+    extracted_slots = _u["extracted_slots"]
+    generic_no_category_missing = _u["generic_no_category_missing"]
+    invalid_required = _u["invalid_required"]
+    invalid_required_slot = _u["invalid_required_slot"]
+    key = _u["key"]
+    latest_message = _u["latest_message"]
+    make_category_options = _u["make_category_options"]
+    make_changed = _u["make_changed"]
+    make_only_missing = _u["make_only_missing"]
+    metadata_filters = _u["metadata_filters"]
+    metadata_filters_before = _u["metadata_filters_before"]
+    missing_required = _u["missing_required"]
+    original_mind_action = _u["original_mind_action"]
+    original_mind_text = _u["original_mind_text"]
+    pending = _u["pending"]
+    question_turn = _u["question_turn"]
+    questions_by_slot = _u["questions_by_slot"]
+    repeated_unanswered_escalation = _u["repeated_unanswered_escalation"]
+    requested_non_metadata_features = _u["requested_non_metadata_features"]
+    required_slots_override = _u["required_slots_override"]
+    reset_result_state = _u["reset_result_state"]
+    skipped_unanswered_slot = _u["skipped_unanswered_slot"]
+    slot = _u["slot"]
+    slots = _u["slots"]
+    slots_before = _u["slots_before"]
+    slots_skipped = _u["slots_skipped"]
+    slots_skipped_before = _u["slots_skipped_before"]
+    state = _u["state"]
+    value = _u["value"]
 
     valid_actions = {
         "ask_next_question",
@@ -6996,6 +7243,27 @@ def _apply_mind_node(state: ChatbotState) -> ChatbotState:
             displayed_active_question or None
         ),
     )
+    ctx.repack(locals())
+    return None
+
+
+def _apply_mind_node(state: ChatbotState) -> ChatbotState:
+    # E7: the former ~1,400-line monolith is now four sequential phase functions
+    # sharing an ApplyMindContext. Phase bodies are the original code verbatim; the
+    # context carries every boundary-crossing local so behavior is unchanged. Each
+    # phase returns a ChatbotState to short-circuit (the original early returns) or
+    # None to continue; the action phase always returns.
+    ctx = ApplyMindContext(state)
+    for _phase in (
+        _apply_mind_category_phase,
+        _apply_mind_active_turn_phase,
+        _apply_mind_questions_phase,
+        _apply_mind_actions_phase,
+    ):
+        _result = _phase(ctx)
+        if _result is not None:
+            return _result
+    raise RuntimeError("apply_mind pipeline produced no result")
 
 
 def _route_after_mind(state: ChatbotState) -> str:

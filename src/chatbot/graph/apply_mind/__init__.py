@@ -8,6 +8,7 @@ on top of it.
 
 from __future__ import annotations
 
+from src.chatbot.graph.apply_mind.context import ApplyMindContext
 from src.chatbot.graph.apply_mind.state_return import build_state_return
 
-__all__ = ["build_state_return"]
+__all__ = ["ApplyMindContext", "build_state_return"]
