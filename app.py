@@ -959,6 +959,50 @@ def _format_type_for_card(category_subcategory: str) -> str:
     return s.split(" > ")[0].strip()
 
 
+def _to_trailer_listing(d: dict) -> TrailerListing | None:
+    """Build a card model from one raw API/persisted listing dict."""
+    try:
+        price = d.get("price")
+        if isinstance(price, str) and price not in ("Call for price", ""):
+            price = float(price.replace("$", "").replace(",", ""))
+        return TrailerListing(
+            listing_id=str(d.get("url") or d.get("title") or ""),
+            title=str(d.get("title") or ""),
+            condition=str(d.get("condition") or "New"),
+            price=price,
+            price_display=str(d.get("price") or "") or None,
+            payments_from=None,
+            category_subcategory=str(d.get("category") or ""),
+            make=str(d.get("make") or ""),
+            color=str(d.get("color") or ""),
+            hitch_type=d.get("hitch_type"),
+            year=d.get("year"),
+            length=d.get("length"),
+            width=d.get("width"),
+            axles=d.get("axles"),
+            gvwr=d.get("gvwr"),
+            payload_capacity=d.get("payload_capacity"),
+            trailer_material=d.get("material"),
+            floor=d.get("floor"),
+            url=str(d.get("url") or ""),
+            score=d.get("relevance_score"),
+        )
+    except Exception:
+        return None
+
+
+def _to_trailer_listings(raw: list | None) -> list[TrailerListing]:
+    out = []
+    for d in raw or []:
+        if isinstance(d, TrailerListing):
+            out.append(d)
+        elif isinstance(d, dict):
+            listing = _to_trailer_listing(d)
+            if listing is not None:
+                out.append(listing)
+    return out
+
+
 def render_card(listing: TrailerListing, rank: int):
     dark = st.session_state.get("ui_dark_mode", True)
     card_bg = "#151E2B" if dark else "#FFFFFF"
@@ -1140,7 +1184,13 @@ if (
         st.session_state.backend_ready_error = "Conversation could not be restored."
         st.rerun()
     if restored.get("exists") and not restored.get("closed"):
-        st.session_state.messages = restored.get("messages") or []
+        # Persisted listings come back as raw dicts; normalize so the shown-URL
+        # dedupe sees the same shape it gets from a live turn.
+        restored_messages = restored.get("messages") or []
+        for _msg in restored_messages:
+            if _msg.get("listings"):
+                _msg["listings"] = _to_trailer_listings(_msg["listings"])
+        st.session_state.messages = restored_messages
         st.session_state.sales_phase = restored.get("sales_phase") or "main"
         for key in ("customer_full_name", "customer_email", "customer_phone"):
             if restored.get(key) is not None:
@@ -1321,8 +1371,6 @@ else:
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            for j, listing in enumerate(msg.get("listings") or [], 1):
-                render_card(listing, j)
             if msg.get("role") == "assistant":
                 prev_fb = msg.get("user_feedback")
                 if isinstance(prev_fb, dict):
@@ -1473,43 +1521,7 @@ def _process_assistant_reply(prompt: str) -> bool:
                 thinking_context = data.get("thinking_context")
                 st.session_state.pending_turn_id = None
 
-                listings = []
-                for d in (data.get("listings") or []):
-                    if not isinstance(d, dict):
-                        continue
-                    try:
-                        listings.append(
-                            TrailerListing(
-                                listing_id=str(d.get("url") or d.get("title") or ""),
-                                title=str(d.get("title") or ""),
-                                condition=str(d.get("condition") or "New"),
-                                price=float(
-                                    d["price"].replace("$", "").replace(",", "")
-                                )
-                                if isinstance(d.get("price"), str)
-                                and d.get("price")
-                                not in ("Call for price", None, "")
-                                else d.get("price"),
-                                price_display=str(d.get("price") or "") or None,
-                                payments_from=None,
-                                category_subcategory=str(d.get("category") or ""),
-                                make=str(d.get("make") or ""),
-                                color=str(d.get("color") or ""),
-                                hitch_type=d.get("hitch_type"),
-                                year=d.get("year"),
-                                length=d.get("length"),
-                                width=d.get("width"),
-                                axles=d.get("axles"),
-                                gvwr=d.get("gvwr"),
-                                payload_capacity=d.get("payload_capacity"),
-                                trailer_material=d.get("material"),
-                                floor=d.get("floor"),
-                                url=str(d.get("url") or ""),
-                                score=d.get("relevance_score"),
-                            )
-                        )
-                    except Exception:
-                        pass
+                listings = _to_trailer_listings(data.get("listings"))
 
             st.session_state.messages.append({
                 "role": "assistant",
@@ -1525,8 +1537,6 @@ def _process_assistant_reply(prompt: str) -> bool:
             })
             assistant_message_index = len(st.session_state.messages) - 1
         st.markdown(response_text)
-        for i, listing in enumerate(listings or [], 1):
-            render_card(listing, i)
 
     if thinking_agent_enabled() and thinking_context is not None:
         st.session_state.last_thinking_payload = thinking_context

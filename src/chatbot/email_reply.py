@@ -61,6 +61,8 @@ FAQ scenarios:
   "Our service and parts team can help. Reach them at 979-532-1486."
 - store_info:
   "We're located in Wharton, TX. Call 979-532-1486 or visit https://trailerplace.com. We also offer financing and delivery."
+- delivery:
+  "Yes, we offer delivery. Call 979-532-1486 and our team will go over delivery options and cost for your area."
 
 Non-FAQ scenarios:
 - generic team request:

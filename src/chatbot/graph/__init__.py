@@ -88,6 +88,10 @@ _FAQ_REPLY_FALLBACKS: dict[str, str] = {
         f"We're located in Wharton, TX. Call 979-532-1486 or visit {_SITE_URL}. "
         "We also offer financing and delivery."
     ),
+    "delivery": (
+        "Yes, we offer delivery. Call 979-532-1486 and our team will go over delivery "
+        "options and cost for your area."
+    ),
 }
 _FAQ_GENERIC_FALLBACK = "Thanks, I sent that request to the team so they can help you with it."
 _ESCALATION_SENT_REPLY = (
@@ -1882,6 +1886,9 @@ _SLOT_METADATA_FILTER_MAP = {
     "cargo_size": ("length_ft", "width_ft"),
     "haul_length_ft": ("length_ft",),
     "haul_weight_lbs": ("payload_lbs",),
+    # The hitch slot and its search filter share a name; without this entry, skipping
+    # hitch_type ("either one is acceptable") left a hitch_type filter behind.
+    "hitch_type": ("hitch_type",),
     "item_or_trailer_width_ft": ("width_ft",),
     "max_price": ("max_price",),
     "payload_capacity": ("payload_lbs",),
@@ -1893,6 +1900,97 @@ _SLOT_METADATA_FILTER_MAP = {
     "vehicle_length_ft": ("length_ft",),
     "width_ft": ("width_ft",),
 }
+
+
+# A hitch is only ever a hitch because the customer said so. Every other source --
+# the mind echoing a shown listing's spec, the fallback regex seeing "gooseneck"
+# inside "bumper pull or gooseneck", an adjudicator guess -- has produced filters
+# the customer never asked for, silently hiding half the inventory.
+_HITCH_GOOSENECK_RE = re.compile(r"\bgoose[\s-]?neck\b", re.I)
+_HITCH_BUMPER_RE = re.compile(r"\bbumper[\s-]?pull\b", re.I)
+
+# "either one is acceptable" / "you choose" / "whichever" -- the customer is
+# declining to pick, even though they just named the options out loud.
+_HITCH_HEDGE_RE = re.compile(
+    r"\b(?:either|both|any|anything|whatever|whichever|either\s+one|no\s+preference|"
+    r"don'?t\s+care|doesn'?t\s+matter|does\s+not\s+matter|not\s+fussed|no\s+strong|"
+    r"up\s+to\s+you|you\s+(?:choose|decide|pick|recommend)|your\s+call|flexible|"
+    r"open\s+to|acceptable|fine\s+(?:either|with|by)|no\s+strict)\b",
+    re.I,
+)
+
+# "which hitch is better?" is a question about hitches, not a choice of one.
+_HITCH_QUESTION_RE = re.compile(
+    r"^\s*(?:what|which|whats|what'?s|do|does|are|is|can|could|tell\s+me|explain)\b",
+    re.I,
+)
+
+
+def hitch_choice_from_message(message: Any) -> str | None:
+    """Return the single hitch the customer explicitly chose, else None.
+
+    None means "not grounded in this message" -- naming both options, hedging,
+    asking a question about hitches, or not mentioning one at all.
+    """
+    text = str(message or "").strip()
+    if not text:
+        return None
+    names_gooseneck = bool(_HITCH_GOOSENECK_RE.search(text))
+    names_bumper = bool(_HITCH_BUMPER_RE.search(text))
+    if names_gooseneck == names_bumper:
+        # Neither named, or both named -- either way no single explicit choice.
+        return None
+    if _HITCH_HEDGE_RE.search(text) or _HITCH_QUESTION_RE.match(text):
+        return None
+    return "Gooseneck" if names_gooseneck else "Bumper Pull"
+
+
+def _enforce_hitch_grounding(
+    *,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any],
+    slots_skipped: set[str],
+    slots_before: dict[str, Any],
+    metadata_filters_before: dict[str, Any],
+    latest_message: str,
+    active_slot: str | None,
+) -> None:
+    """Drop any hitch this turn introduced that the customer did not explicitly state.
+
+    Values carried in from earlier turns are left alone; only *new* writes are gated.
+    """
+    grounded = hitch_choice_from_message(latest_message)
+    if grounded:
+        slots["hitch_type"] = grounded
+        metadata_filters["hitch_type"] = grounded
+        slots_skipped.discard("hitch_type")
+        return
+
+    prior_slot = slots_before.get("hitch_type")
+    prior_filter = metadata_filters_before.get("hitch_type")
+    reverted: dict[str, Any] = {}
+    if slots.get("hitch_type") != prior_slot:
+        reverted["slot"] = slots.get("hitch_type")
+        slots.pop("hitch_type", None)
+        if prior_slot:
+            slots["hitch_type"] = prior_slot
+    if metadata_filters.get("hitch_type") != prior_filter:
+        reverted["filter"] = metadata_filters.get("hitch_type")
+        metadata_filters.pop("hitch_type", None)
+        if prior_filter:
+            metadata_filters["hitch_type"] = prior_filter
+
+    # The customer answered the hitch question without choosing: stop re-asking.
+    if active_slot == "hitch_type" and not prior_slot:
+        slots_skipped.add("hitch_type")
+
+    if reverted:
+        logger.info(
+            "hitch_grounding_rejected | latest_message=%r | reverted=%s | active_slot=%r",
+            latest_message[:160],
+            json.dumps(reverted, default=str),
+            active_slot,
+        )
 
 
 def _has_width_requirement(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> bool:
@@ -2947,6 +3045,16 @@ def _adjudicate_active_question_turn(
                     "   Never use either as active_slot_value for a category/base-category question, make, or any other slot. "
                     "   If stated while a different question is active, store in metadata_filters_update.hitch_type and leave the active question unanswered unless the same message also answers it. "
                     "   Informational hitch questions ('what hitches do you have?', 'which is better?') → no hitch_type update.\n"
+                    "2a. NEVER SET hitch_type UNLESS THE LATEST USER MESSAGE EXPLICITLY NAMES EXACTLY ONE HITCH AS THEIR CHOICE. "
+                    "   Set it to null in every one of these cases:\n"
+                    "     - the user names both ('bumper pull or gooseneck', 'gooseneck or bumper pull');\n"
+                    "     - the user declines to pick ('either one is acceptable', 'either is fine', 'both work', "
+                    "'you choose', 'whichever', 'up to you', 'no preference', \"doesn't matter\", 'I'm flexible');\n"
+                    "     - the user asks about hitches rather than choosing one;\n"
+                    "     - the hitch appears only in a listing you showed, a listing the user asked about, or your own "
+                    "earlier message. NEVER copy a shown trailer's hitch_type (or any other spec) into "
+                    "metadata_filters_update. Filters come from the customer's words, never from inventory.\n"
+                    "   Naming both options is a refusal to choose, not a selection of the first one.\n"
                     "3. NO MAKE INFERENCE. Makes are for user education only — never infer category from make.\n\n"
 
                     "## FOUR MUTUALLY EXCLUSIVE RESPONSE STATES\n"
@@ -3009,6 +3117,11 @@ def _adjudicate_active_question_turn(
                     "For yes/no fields, use the strings 'yes' or 'no', not JSON booleans.\n"
                     "- no_preference_for_active_question=true when the user says no preference for the active slot only — this does NOT trigger a search.\n"
                     "  Example: 'Any length is fine' → no_preference_for_active_question=true, search_now_requested=false.\n"
+                    "- For a fixed-choice question (hitch, open vs covered, tilt style, loading style, dump mechanism), "
+                    "naming BOTH offered options means no preference — it never selects the first one. "
+                    "'Bumper pull or gooseneck—either one is acceptable', 'either is fine', and 'any of those' → "
+                    "no_preference_for_active_question=true, answered_active_question=false, active_slot_value=null, "
+                    "and no hitch_type/metadata_filters_update entry for that field.\n"
                     "- If unanswered: do not fabricate a value. Provide reply_to_user addressing their comment/question.\n"
                     "- Interpret answers semantically: '14 footer', 'twenty-foot', '14' all answer a length question.\n"
                     "- Use history only to resolve an explicit reference — never copy an old value as a new answer.\n\n"
@@ -3020,6 +3133,8 @@ def _adjudicate_active_question_turn(
                     "→ answered_active_question=false, no_preference_for_active_question=false, search_now_requested=true, skip_remaining_questions=true\n\n"
                     "Active: 'What length do you need?' | User: 'Any length is fine.'\n"
                     "→ no_preference_for_active_question=true, search_now_requested=false\n\n"
+                    "Active: 'Do you prefer a bumper pull or gooseneck hitch?' | User: 'Bumper pull or gooseneck—either one is acceptable.'\n"
+                    "→ no_preference_for_active_question=true, answered_active_question=false, active_slot_value=null\n\n"
                     "Active: 'What length do you need?' | User: 'What kinds of dump trailers are available?'\n"
                     "→ search_now_requested=true, answered_active_question=false\n\n"
 
@@ -3056,6 +3171,7 @@ def _adjudicate_active_question_turn(
                     "- Never set send_interested_listing_email during active qualification.\n"
                     "- Do not set any email action for broad catalogue browsing.\n"
                     "Examples: 'How do I contact you?' → send_non_sales_faq_email, faq_category=contact_human. "
+                    "'Do you offer delivery for trailers?' → send_non_sales_faq_email, faq_category=delivery. "
                     "'Can you call me tomorrow?' → send_escalation_alert_email.\n\n"
 
                     "## ALUMINUM BASE-CATEGORY RULES\n"
@@ -3494,7 +3610,11 @@ def _extract_field_updates(
         "   - History alone must never create a haul item.\n"
         "2. HITCH TYPES ONLY GO IN hitch_type. Gooseneck and Bumper Pull are hitch configurations.\n"
         "   Never put either into base_category, generic_haul_use, haul_item, subcategory, make, or features.\n"
-        "   Only extract hitch_type when the user explicitly selects or prefers one in the latest message.\n"
+        "   Only extract hitch_type when the latest user message explicitly names EXACTLY ONE hitch as their choice.\n"
+        "   Naming both ('bumper pull or gooseneck') is a refusal to choose, not a selection of the first → null.\n"
+        "   Declining to pick ('either one is acceptable', 'you choose', 'whichever', 'no preference') → null.\n"
+        "   A hitch mentioned in a listing that was shown, or in your own earlier message, is NOT the user's "
+        "choice → null. Never copy specs out of inventory into filters.\n"
         "   Informational questions ('what hitches do you have?', 'which is better?') → no hitch_type update.\n"
         "3. NO MAKE EXTRACTION. Make/manufacturer is handled by a separate resolver.\n"
         "4. NO subcategory UNLESS current_category=Aluminum.\n\n"
@@ -3528,7 +3648,7 @@ def _extract_field_updates(
         "EXTREMELY IMPORTANT- LOOSE / OPEN-ENDED ANSWERS:\n"
 "  • Dimensions (length_ft, width_ft, height_ft): vague answers ('any length', 'doesn't matter', 'no preference') → set to null. Only store a concrete measurement.\n"
 "  • Haul/use fields (generic_haul_use, haul_item, haul_material): store whatever the user says, even if broad — 'all types of material', 'anything', 'various equipment','random things',it does not matter what they say. as long it's not a counter question or a value for any other field. Capture the phrase as-is.\n"
-"  • hitch_type: only store 'gooseneck' or 'bumper pull'. Any other answer or non-specific reply ('either', 'doesn't matter', 'any') → set to null.\n"
+"  • hitch_type: only store 'gooseneck' or 'bumper pull', and only when the user names exactly one as their choice. Naming both ('bumper pull or gooseneck'), any non-specific reply ('either', 'either one is acceptable', 'you choose', \"doesn't matter\", 'any'), or a hitch seen only in a shown listing → set to null.\n"
 "  • max_price: only set when the user gives a concrete upper limit. Vague answers → null.\n"
 "  • payload_lbs: store a concrete weight only. Vague answers ('any weight', 'doesn't matter') → null.\n"
 "IF ONE OF THE ANSWERS IF LOOSE/OPEN-ENDED, DO NOT SET OTHER FIELDS UNLESS EXPLICITLY STATED. For example, if the user says 'I want a trailer for gravel, any length is fine', set generic_haul_use='gravel' and length_ft=null. Do not set other fields unless explicitly stated."
@@ -3737,10 +3857,9 @@ def _fallback_filter_extraction(state: ChatbotState) -> FilterExtractionDecision
         updates["max_price"] = price
 
     lower = text.lower()
-    if "gooseneck" in lower:
-        updates["hitch_type"] = "gooseneck"
-    elif "bumper pull" in lower or "bumper-pull" in lower:
-        updates["hitch_type"] = "bumper pull"
+    grounded_hitch = hitch_choice_from_message(text)
+    if grounded_hitch:
+        updates["hitch_type"] = grounded_hitch
 
     color_match = re.search(
         r"\b(black|white|gray|grey|silver|red|blue|green|yellow|orange|tan)\b",
@@ -4374,6 +4493,7 @@ def _fallback_decision(state: ChatbotState) -> MindDecision:
         "store": "store_info",
         "hours": "store_info",
         "location": "store_info",
+        "delivery": "delivery",
     }
     for term, category in faq_terms.items():
         if term in text:
@@ -5255,10 +5375,13 @@ def _classify_non_recommendation_turn(
                         "Return structured data only. For catalogue questions, category questions, recommendations, "
                         "active QnA answers, and ordinary shopping, return continue_recommendation_flow without replacement text.\n\n"
                         "Choose send_non_sales_faq_email when the customer asks how to contact TrailerPlace, asks for the phone number, "
-                        "location, store info, sales contact, financing, trade-in, service, or parts. Use faq_category contact_human for "
+                        "location, store info, sales contact, financing, trade-in, service, parts, or whether delivery is offered. "
+                        "Use faq_category contact_human for "
                         "general contact/sales-contact questions and store_info for location/store visit questions.\n\n"
                         "Examples: 'How can I contact you guys?' means send_non_sales_faq_email/contact_human; "
                         "'Where are you located?' means send_non_sales_faq_email/store_info; "
+                        "'Do you offer delivery for trailers?' means send_non_sales_faq_email/delivery; "
+                        "'Schedule a delivery for Friday' means send_escalation_alert_email, not delivery; "
                         "'Can you call me tomorrow?' means send_escalation_alert_email, not contact_human.\n\n"
                         f"Choose send_escalation_alert_email when the customer asks TrailerPlace/the team to perform an unsupported "
                         f"real-world action or commitment: for example {escalation_actions()}; or buy a trailer from the "
@@ -6374,6 +6497,21 @@ def _apply_mind_active_turn_phase(ctx: ApplyMindContext) -> ChatbotState | None:
             for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
                 question_turn.metadata_filters_update.pop(str(key), None)
         if (
+            str(active_qna_slot) == _DYNAMIC_WIDTH_SLOT
+            and question_turn.answered_active_question
+            and not _explicit_width_requested(latest_message, active_qna_slot)
+        ):
+            # The width question is only answerable with a numeric measurement. When the user
+            # defers ("whatever standard width you recommend"), the mind node volunteers one
+            # anyway and the adjudicator sometimes echoes it back as the customer's own answer.
+            # Ground the answer in the message: no measurement means no preference.
+            question_turn.answered_active_question = False
+            question_turn.no_preference_for_active_question = True
+            question_turn.active_slot_value = None
+            question_turn.slots_collected_update.pop(str(active_qna_slot), None)
+            for key in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()):
+                question_turn.metadata_filters_update.pop(str(key), None)
+        if (
             not question_turn.answered_active_question
             and not question_turn.no_preference_for_active_question
             and not question_turn.search_now_requested
@@ -6521,7 +6659,13 @@ def _apply_mind_active_turn_phase(ctx: ApplyMindContext) -> ChatbotState | None:
             None,
             category,
         ).items():
-            if str(key) in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()) and active_qna_unanswered:
+            # A no-preference turn already popped the active slot's filters above. Re-adding
+            # them here would let a value the model volunteered anyway (e.g. "Bumper Pull" for
+            # "either one is acceptable") flow back into the slot via _slot_updates_from_metadata,
+            # which also clears the skip. Suppress them for the same reason as an unanswered turn.
+            if str(key) in _SLOT_METADATA_FILTER_MAP.get(str(active_qna_slot), ()) and (
+                active_qna_unanswered or question_turn.no_preference_for_active_question
+            ):
                 continue
             metadata_filters[key] = value
         if active_qna_skip_remaining:
@@ -6645,6 +6789,10 @@ def _apply_mind_active_turn_phase(ctx: ApplyMindContext) -> ChatbotState | None:
                 )
 
     for key, value in _slot_updates_from_metadata(category, metadata_filters).items():
+        # Never back-fill a slot the user just declined to constrain; doing so would both
+        # invent a value they never gave and silently clear the skip.
+        if str(key) in slots_skipped:
+            continue
         if key in slots or value in (None, ""):
             continue
         is_valid, reason = _validate_slot_value(key, value)
@@ -6660,6 +6808,21 @@ def _apply_mind_active_turn_phase(ctx: ApplyMindContext) -> ChatbotState | None:
             )
             if not invalid_required_slot:
                 invalid_required_slot = key
+
+    # Runs after every writer above (mind decision, explicit extraction, metadata
+    # back-fill) so no path can leave an ungrounded hitch behind.
+    _enforce_hitch_grounding(
+        slots=slots,
+        metadata_filters=metadata_filters,
+        slots_skipped=slots_skipped,
+        slots_before=slots_before,
+        metadata_filters_before=metadata_filters_before,
+        latest_message=latest_message,
+        active_slot=active_qna_slot or awaiting_slot,
+    )
+    if awaiting_slot == "hitch_type" and "hitch_type" in slots_skipped:
+        awaiting_slot = None
+
     if awaiting_slot and awaiting_slot in slots:
         awaiting_slot = None
 

@@ -29,6 +29,11 @@ _GENERIC_TOKENS = {
     "available",
     "brand",
     "by",
+    # "cargo" is an everyday word here ("what cargo can it carry?") that also happens to
+    # be a token of the makes Cargo Craft and Continental Cargo. Treat it as generic so
+    # it can never seed a partial/fuzzy brand match; the full phrase still resolves via
+    # the exact/alias tier, which reads the raw text rather than these tokens.
+    "cargo",
     "do",
     "for",
     "have",
@@ -108,9 +113,15 @@ def _resolve_deterministic(text: str) -> MakeResolution:
     for token in message_tokens:
         if len(token) < 4 or token == "aluminum":
             continue
-        for phrase, make in make_map.items():
-            phrase_tokens = phrase.split()
-            if any(part.startswith(token) for part in phrase_tokens):
+        for phrase, make in sorted(make_map.items()):
+            # Only single-word makes may be reached by a prefix match. Allowing a bare
+            # word to stand in for one token of a multi-word make ("cargo" -> Cargo
+            # Craft, "bull" -> Iron Bull Trailers) matched ordinary sentences; the
+            # short forms customers actually type are already in the alias map, which
+            # the exact/alias tier above resolves at high confidence.
+            if " " in phrase:
+                continue
+            if phrase.startswith(token):
                 if not _candidate_allowed(make, text):
                     continue
                 return MakeResolution(make, "medium", "partial")

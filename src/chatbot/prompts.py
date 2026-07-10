@@ -38,7 +38,7 @@ ACTIONS = """
 | `ask_trailer_category` | No category resolved yet AND response ends by asking the user to choose a trailer type |
 | `pinecone_search` | Category resolved + ALL required slots filled |
 | `send_interested_listing_email` | Customer expresses interest in a specific shown listing |
-| `send_non_sales_faq_email` | Contact/human help, financing, trade-in, service/parts, store info |
+| `send_non_sales_faq_email` | Contact/human help, financing, trade-in, service/parts, store info, whether delivery is offered |
 | `send_escalation_alert_email` | Unsupported business action requested (call me, quote, invoice, hold, schedule, etc.) |
 
 ### Catalogue / Browse-All Redirect
@@ -274,6 +274,12 @@ Use `action=respond` (NOT `send_non_sales_faq_email`) for:
 - "What hitch types do you have?" → "Bumper Pull and Gooseneck."
 - "What makes/brands do you carry?" → use the brands list (for information only; do NOT infer category from make).
 - "What does TrailerPlace sell / offer?" → concise marketing overview: trailer types + hitch configs + financing, trade-ins, delivery, service, spare parts.
+
+These are about the *product catalogue*. A question about whether a **service** is offered —
+financing, delivery, trade-ins, service, or spare parts — is NOT a product-information question:
+it always uses `send_non_sales_faq_email` with the matching `faq_category`, even though you also
+answer it in `assistant_text`. "Do you offer delivery for trailers?" and "Do you offer financing?"
+are FAQ tool calls, never a bare `respond`.
 """.strip()
 
 
@@ -288,8 +294,11 @@ FAQ_RULES = """
 | `trade_in` | Trade-in appraisals |
 | `service_parts` | Service, parts, repairs |
 | `store_info` | Location, hours, visiting |
+| `delivery` | Whether delivery is offered, delivery areas, delivery cost |
 
 ### Rules
+- Asking *whether* a service exists is an FAQ; asking us to *schedule* it is an escalation.
+  "Do you offer delivery?" → `delivery` FAQ. "Schedule a delivery for Friday" → escalation.
 - Always provide `assistant_text` alongside the tool call.
 - Tool sends only when phone or email is known; otherwise code asks for contact first.
 - Include phone 979-532-1486 in every FAQ reply.
@@ -301,6 +310,7 @@ FAQ_RULES = """
 - **trade_in**: "For trade-in appraisals, call **979-532-1486** and our sales team will get you sorted out."
 - **service_parts**: "For service and parts, call **979-532-1486** and our team will point you in the right direction."
 - **store_info**: "We're in **Wharton, TX**. Call **979-532-1486** — our team can also help with financing and delivery."
+- **delivery**: "Yes, we offer delivery. Call **979-532-1486** and our team will go over delivery options and cost for your area. I can keep helping you pick the right trailer."
 """.strip()
 
 
@@ -313,7 +323,7 @@ Use this action when the customer asks TrailerPlace/the team/chatbot to perform 
 ### Rules
 - The customer must request an action or commitment. A general question the chatbot can answer is not an escalation.
 - "Reserve this trailer", "Remind me tomorrow", "Send me a quote", and "Schedule a call for 3 PM" trigger escalation.
-- "What does it cost?", "What time are you open?", "Do you offer financing?", and "How do reservations work?" do not trigger escalation.
+- "What does it cost?", "What time are you open?", "Do you offer financing?", "Do you offer delivery?", and "How do reservations work?" do not trigger escalation.
 - Summarize the requested unsupported action in the email body.
 - Always provide `assistant_text`: confirm the query was sent, say the team will reach out soon, offer to continue helping choose a trailer.
 - Do NOT trigger for: broad catalogue browsing, ordinary trailer questions, recommendations, supported FAQ categories, or specific-listing interest.
@@ -533,4 +543,7 @@ def escalation_actions() -> str:
 def faq_triggers() -> str:
     """Single source of truth for what routes to send_non_sales_faq_email
     (Stage E3). Prompt-text only, no deterministic detection."""
-    return "contact/human help, financing, trade-in, service/parts, or store/location info"
+    return (
+        "contact/human help, financing, trade-in, service/parts, store/location info, "
+        "or whether delivery is offered"
+    )

@@ -44,6 +44,7 @@ FAQ_CATEGORY_LABELS = {
     "trade_in": "Customer asked about trade-in.",
     "service_parts": "Customer asked about service or parts.",
     "store_info": "Customer asked about store information.",
+    "delivery": "Customer asked about trailer delivery.",
 }
 FAQ_ITEM_OF_INTEREST_LABELS = {
     "contact_human": "Wants to talk to a sales representative",
@@ -51,6 +52,7 @@ FAQ_ITEM_OF_INTEREST_LABELS = {
     "trade_in": "Trade-In Query",
     "service_parts": "Spare Parts Query",
     "store_info": "Store Information Query",
+    "delivery": "Delivery Query",
 }
 TRAILER_RESULTS_SHOWN_SUBJECT = "Trailer Results Shown to User"
 TRAILER_RESULTS_SHOWN_DESCRIPTION = "Trailer results were shown to the user."

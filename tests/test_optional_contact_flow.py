@@ -2797,3 +2797,22 @@ def test_business_overview_smalltalk_prompt_guides_llm(monkeypatch):
     assert "trade-ins" in captured["system"]
     assert "service or spare parts" in captured["system"]
     assert "Do not mention rentals" in captured["system"]
+
+
+def test_missing_contact_phrase_names_only_absent_fields():
+    assert (
+        service._missing_contact_phrase({})
+        == "your name and either an email address or phone number"
+    )
+    assert (
+        service._missing_contact_phrase({"customer_full_name": "Ibrahim"})
+        == "either an email address or phone number"
+    )
+    assert service._missing_contact_phrase({"customer_email": "a@b.com"}) == "your name"
+    assert service._missing_contact_phrase({"customer_phone": "555"}) == "your name"
+    assert (
+        service._missing_contact_phrase(
+            {"customer_full_name": "Ibrahim", "customer_email": "a@b.com"}
+        )
+        == ""
+    )

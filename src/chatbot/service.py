@@ -62,7 +62,11 @@ _GENERAL_INTENT_RE = re.compile(
     r"trailer|haul|hauling|buy|looking|want|need|search|show|more|"
     r"recommend|recommendation|option|options|best|proceed|continue|"
     r"gooseneck|bumper\s*[- ]?\s*pull|hitch|payload|capacity|"
+    # Keep the supported FAQ services in sync with prompts.faq_triggers(); a service the
+    # regex misses never reaches the graph, so it is answered as smalltalk and never
+    # raises the FAQ email ("Do you offer delivery?" used to fall through here).
     r"financ(?:e|ing)|trade(?:-|\s)?in|service|parts|human|contact|"
+    r"deliver(?:y|ies|ed)?|"
     r"store|hours|location|interested"
     r")\b",
     re.I,
@@ -704,6 +708,19 @@ def _apply_contact_from_request_and_message(session: dict[str, Any], request: Ch
     if changed:
         _persist_contact(session)
     return changed
+
+
+def _missing_contact_phrase(session: dict[str, Any]) -> str:
+    """Name only the contact fields the session is still missing."""
+    needs_name = not session.get("customer_full_name")
+    needs_reachable = not (session.get("customer_email") or session.get("customer_phone"))
+    if needs_name and needs_reachable:
+        return "your name and either an email address or phone number"
+    if needs_name:
+        return "your name"
+    if needs_reachable:
+        return "either an email address or phone number"
+    return ""
 
 
 def _initial_contact_request_text(session: dict[str, Any]) -> str:
@@ -1469,8 +1486,8 @@ def _handle_confusion_escalation(session: dict[str, Any], request: ChatRequest, 
             "context_summary": _email_context_summary(session),
         }
         assistant_text = (
-            "I can have our sales team help with this. Could you please share your name and either "
-            "your phone number or email address so they can contact you?"
+            "I can have our sales team help with this. Could you please share "
+            f"{_missing_contact_phrase(session)} so they can contact you?"
         )
     elif not session.get("confusion_escalated"):
         _persist_email_transcript_snapshot(session)
@@ -1785,7 +1802,7 @@ def _listing_reference_response(
             }
             assistant_text = (
                 f"I can send your interest in **{title}** to our team. "
-                "Please share your name and either an email address or phone number."
+                f"Please share {_missing_contact_phrase(session)}."
             )
         else:
             _persist_email_transcript_snapshot(session)
@@ -2485,8 +2502,8 @@ def _handle_chat_in_memory(request: ChatRequest) -> ChatResponse:
             queued_actions.append(confusion_action)
             session["pending_contact_actions"] = queued_actions
             contact_notice = (
-                "If you'd like me to send this to our team, please share your name and either "
-                "your phone number or email address."
+                "If you'd like me to send this to our team, please share "
+                f"{_missing_contact_phrase(session)}."
             )
             assistant_text = f"{contact_notice}\n\n{assistant_text}".strip()
         logger.info(

@@ -103,30 +103,31 @@ def _embed(text: str) -> list[float]:
     return response.data[0].embedding
 
 
-def _metadata_filter(
+def _metadata_filter_clauses(
     category: str | None,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> list[tuple[str, dict[str, Any]]]:
+    """Build the Pinecone filter as (tag, clause) pairs so callers can drop clauses by tag."""
     metadata_filters = metadata_filters or {}
-    filters: list[dict[str, Any]] = []
+    filters: list[tuple[str, dict[str, Any]]] = []
     normalized_category = normalize_category(category) if category else None
     if category:
-        filters.append({"category": {"$eq": normalized_category}})
+        filters.append(("category", {"category": {"$eq": normalized_category}}))
 
     make_value = metadata_filters.get("make")
     if make_value:
         values = [value for value in make_filter_values(str(make_value)) if value]
         if len(values) == 1:
-            filters.append({"make": {"$eq": values[0]}})
+            filters.append(("make", {"make": {"$eq": values[0]}}))
         elif values:
-            filters.append({"make": {"$in": values}})
+            filters.append(("make", {"make": {"$in": values}}))
 
     hitch_value = metadata_filters.get("hitch_type") or slots.get("hitch_type")
     if hitch_value:
         hitch = normalize_hitch(str(hitch_value))
         if hitch in _ALLOWED_HITCH_TYPES:
-            filters.append({"hitch_type": {"$eq": hitch}})
+            filters.append(("hitch_type", {"hitch_type": {"$eq": hitch}}))
         else:
             logger.info("pinecone_hitch_filter_rejected | value=%r | normalized=%r", hitch_value, hitch)
 
@@ -134,7 +135,7 @@ def _metadata_filter(
     if normalized_category == "Aluminum" and subcategory_value:
         subcategory = normalize_subcategory(str(subcategory_value))
         if subcategory:
-            filters.append({"subcategory": {"$eq": subcategory}})
+            filters.append(("subcategory", {"subcategory": {"$eq": subcategory}}))
 
     min_length = (
         _parse_length_ft(metadata_filters.get("length_ft"))
@@ -144,13 +145,42 @@ def _metadata_filter(
         or _parse_length_ft(slots.get("trailer_size"))
     )
     if min_length:
-        filters.append({"length_ft_num": {"$gte": min_length}})
+        filters.append(("length_ft_num", {"length_ft_num": {"$gte": min_length}}))
 
+    return filters
+
+
+def _combine_clauses(clauses: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    filters = [clause for _tag, clause in clauses]
     if not filters:
         return {}
     if len(filters) == 1:
         return filters[0]
     return {"$and": filters}
+
+
+def _metadata_filter(
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _combine_clauses(_metadata_filter_clauses(category, slots, metadata_filters))
+
+
+# Pinecone applies metadata filters as hard predicates, so a query that over-constrains
+# (e.g. make=Calico Trailers AND length_ft_num>=19, when every Calico is 16 ft) returns
+# nothing at all rather than a near miss. When the strict query comes back empty, retry
+# while dropping the softest constraints first. Ordering rationale: a length floor is a
+# preference ("at least this long"), hitch/subcategory are secondary specs, and an
+# explicitly named brand is the last thing to give up. Category is never dropped —
+# showing a Flatbed to someone asking for Livestock is worse than showing nothing.
+_RELAXATION_STAGES: tuple[tuple[str, ...], ...] = (
+    (),
+    ("length_ft_num",),
+    ("length_ft_num", "subcategory"),
+    ("length_ft_num", "subcategory", "hitch_type"),
+    ("length_ft_num", "subcategory", "hitch_type", "make"),
+)
 
 
 def _query_text(
@@ -663,7 +693,8 @@ def search_pinecone_listing_result(
     query = _query_text(category, slots, metadata_filters, user_message)
     top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
     max_recommendations = max_recommendations or int(os.getenv("SEARCH_MAX_RECOMMENDATIONS", "5"))
-    metadata_filter = _metadata_filter(category, slots, metadata_filters) or None
+    clauses = _metadata_filter_clauses(category, slots, metadata_filters)
+    metadata_filter = _combine_clauses(clauses) or None
     query_preview = query[:2000] + ("...(truncated)" if len(query) > 2000 else "")
     shown_urls = {str(u).strip() for u in (already_shown_urls or []) if str(u or "").strip()}
 
@@ -688,19 +719,51 @@ def search_pinecone_listing_result(
         query_preview,
     )
 
-    response = _pinecone_index().query(
-        vector=vector,
-        top_k=top_k,
-        include_metadata=True,
-        filter=metadata_filter,
-    )
     shown = shown_urls
     listings: list[dict[str, Any]] = []
-    for match in getattr(response, "matches", None) or response.get("matches", []):
-        item = _clean_match(match)
-        if item["url"] and item["url"] in shown:
+    present_tags = {tag for tag, _clause in clauses}
+    tried: set[str] = set()
+    for dropped in _RELAXATION_STAGES:
+        if not present_tags & set(dropped) and dropped:
+            # Nothing new to drop at this stage; the query would repeat the previous one.
             continue
-        listings.append(item)
+        stage_filter = _combine_clauses(
+            [(tag, clause) for tag, clause in clauses if tag not in dropped]
+        ) or None
+        stage_key = json.dumps(stage_filter, sort_keys=True, default=str)
+        if stage_key in tried:
+            continue
+        tried.add(stage_key)
+
+        response = _pinecone_index().query(
+            vector=vector,
+            top_k=top_k,
+            include_metadata=True,
+            filter=stage_filter,
+        )
+        listings = []
+        for match in getattr(response, "matches", None) or response.get("matches", []):
+            item = _clean_match(match)
+            if item["url"] and item["url"] in shown:
+                continue
+            listings.append(item)
+
+        if listings:
+            if dropped:
+                logger.info(
+                    "pinecone_filter_relaxed | category=%r | dropped=%s | result_count=%s | relaxed_filter=%s",
+                    category,
+                    json.dumps(sorted(present_tags & set(dropped))),
+                    len(listings),
+                    json.dumps(stage_filter, default=str) if stage_filter else "{}",
+                )
+                metadata_filter = stage_filter
+            break
+        logger.info(
+            "pinecone_search_empty | category=%r | dropped=%s",
+            category,
+            json.dumps(sorted(present_tags & set(dropped))),
+        )
 
     rerank_debug: dict[str, Any] = {"applied": False, "reason": "disabled"}
     if RERANK_ENABLED:
