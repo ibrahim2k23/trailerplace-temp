@@ -6160,7 +6160,12 @@ def _apply_mind_category_phase(ctx: ApplyMindContext) -> ChatbotState | None:
 
     if awaiting_slot == _GENERIC_CATEGORY_CHOICE_SLOT:
         chosen_category = resolve_category_from_text(latest_message).category
-        if chosen_category:
+        # Naming two categories at once is a comparison ("what's the difference
+        # between a utility and a flatbed?"), not a choice. Let the adjudicator
+        # answer it so the category question gets re-asked instead of silently
+        # committing to whichever category happened to rank first.
+        comparing_categories = len(resolve_categories_from_text(latest_message)) > 1
+        if chosen_category and not comparing_categories:
             category = chosen_category
             awaiting_slot = None
             reset_result_state = True
@@ -6188,6 +6193,12 @@ def _apply_mind_category_phase(ctx: ApplyMindContext) -> ChatbotState | None:
                 awaiting_slot = None
                 slots_skipped.add(_GENERIC_CATEGORY_CHOICE_SLOT)
                 continue_generic_category_flow = True
+            elif question_turn.answered_active_question and chosen_category:
+                # The category was named as a real answer, question mark and all.
+                category = chosen_category
+                awaiting_slot = None
+                reset_result_state = True
+                continue_generic_category_flow = True
             else:
                 continue_generic_category_flow = False
 
@@ -6207,8 +6218,17 @@ def _apply_mind_category_phase(ctx: ApplyMindContext) -> ChatbotState | None:
                 if make_resolution.make:
                     metadata_filters["make"] = make_resolution.make
                 assistant_text = _GENERIC_CATEGORY_QUESTION
-                if question_turn.reply_to_user:
-                    assistant_text = f"{question_turn.reply_to_user}\n\n{assistant_text}"
+                reply = str(question_turn.reply_to_user or "").strip()
+                if reply:
+                    # The adjudicator's reply usually re-asks the question itself,
+                    # often reworded ("Which type are you interested in?"), so a
+                    # trailing question mark -- not the exact wording -- is what
+                    # tells us the customer has already been asked.
+                    assistant_text = (
+                        reply
+                        if reply.endswith("?")
+                        else f"{reply}\n\n{assistant_text}"
+                    )
                 decision["action"] = "respond"
                 return build_state_return(
                     state,
@@ -7640,6 +7660,8 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
         events = list(state.get("tool_events") or [])
         events.append({"tool": "send_non_sales_faq_email", "result": {"status": "answered_without_contact"}})
         reply = _FAQ_REPLY_FALLBACKS.get(category, "").strip() or _FAQ_GENERIC_FALLBACK
+        # An FAQ asked mid-qualification must not drop the question it interrupted.
+        reply = _append_active_question_if_present(state, reply)
         return build_state_return(state, assistant_text=reply, tool_events=events)
     _persist_email_transcript_snapshot(state)
     result = send_non_sales_faq_email(

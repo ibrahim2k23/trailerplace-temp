@@ -147,7 +147,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         required=["trailer_length_ft"],
         optional=["gate_preferences"],
         questions={
-            "trailer_length_ft": "What length trailer are you looking for?",
+            "trailer_length_ft": "What trailer length are you looking for?",
             "gate_preferences":  "Any preference on gate style — butterfly, swing, or slant load?",
         },
         answer_guidance={
@@ -237,7 +237,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         optional=["race_amenities"],
         questions={
             "vehicle_type":      "What type of race vehicle will you be hauling?",
-            "trailer_length_ft": "What length trailer are you looking for?",
+            "trailer_length_ft": "What trailer length are you looking for?",
             "race_amenities":    "Will you need cabinets, a workspace, or living quarters?",
         },
         answer_guidance={
