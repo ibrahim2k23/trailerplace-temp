@@ -94,6 +94,10 @@ _FAQ_REPLY_FALLBACKS: dict[str, str] = {
     ),
 }
 _FAQ_GENERIC_FALLBACK = "Thanks, I sent that request to the team so they can help you with it."
+# These FAQs are fully answered by their fallback text (phone, address, site), so
+# they are self-service: never hold them for contact details. Every other FAQ
+# category routes to a team member who needs somewhere to reply.
+_SELF_SERVICE_FAQ_CATEGORIES = frozenset({"contact_human", "store_info"})
 _ESCALATION_SENT_REPLY = (
     "I've sent your query to our team, and they'll reach out to you soon. "
     "In the meantime, I can keep helping you narrow down the right trailer."
@@ -7652,7 +7656,7 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
             or "I can help with that here. Could you clarify what information you need?",
         }
     summary = FAQ_CATEGORY_LABELS[category]
-    if not _has_contact(state):
+    if not _has_contact(state) and category in _SELF_SERVICE_FAQ_CATEGORIES:
         # Informational FAQs are self-service: the direct fallback reply already
         # carries the phone/site, so answer it immediately instead of deferring
         # an internal team-email that just loops asking for the customer's
@@ -7663,6 +7667,24 @@ def _faq_email_node(state: ChatbotState) -> ChatbotState:
         # An FAQ asked mid-qualification must not drop the question it interrupted.
         reply = _append_active_question_if_present(state, reply)
         return build_state_return(state, assistant_text=reply, tool_events=events)
+    if not _has_contact(state):
+        # The team has to reply somewhere: hold the email until contact arrives.
+        events = list(state.get("tool_events") or [])
+        events.append({"tool": "send_non_sales_faq_email", "result": {"status": "deferred_missing_contact"}})
+        answer = _FAQ_REPLY_FALLBACKS.get(category, "").strip()
+        request = _missing_contact_request(state, "this request")
+        return {
+            **state,
+            "assistant_text": f"{answer}\n\n{request}".strip() if answer else request,
+            "pending_contact_action": {
+                "type": "faq",
+                "faq_category": category,
+                "summary": summary,
+                "user_message": state.get("user_message") or "",
+                "context_summary": _compact_recent_context(state),
+            },
+            "tool_events": events,
+        }
     _persist_email_transcript_snapshot(state)
     result = send_non_sales_faq_email(
         session_id=state.get("session_id") or "",
