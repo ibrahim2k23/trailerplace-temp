@@ -1,0 +1,10 @@
+name: inventory-weight-not-stock
+tags: [regression, m6]
+# spec M6 step 6: deleting the reference matcher's "any 4-6 digit number is a
+# stock number" heuristic fixes this — a weight/length mention must never be
+# treated as a stock number or trigger an inventory lookup.
+turns:
+  - user: "I need to haul about 7000 lbs of equipment."
+    expect_listings: false
+    expect_state:
+      qualification_complete: false

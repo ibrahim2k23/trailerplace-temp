@@ -1,0 +1,12 @@
+name: explicit-skip
+tags: [regression, m5]
+# spec §Step 8 explicit skip: "skip"/"next"/"I don't know" marks the current
+# question skipped and moves on, without needing a repeated non-answer.
+turns:
+  - user: "I want a tilt trailer."
+    expect_state:
+      category: "Tilt"
+  - user: "Skip this one."
+    expect_state:
+      skipped_slots_contains: "haul_item"
+      pending_question_repeats: 0

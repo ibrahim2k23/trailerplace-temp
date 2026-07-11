@@ -1,0 +1,9 @@
+name: reference-second-listing
+tags: [regression, m6]
+# spec: an ordinal reference to a shown listing ("the second one") resolves
+# from state.shown_listings without triggering a new search.
+turns:
+  - user: "Show me utility trailers, no preference on anything, just show me options."
+    expect_listings: true
+  - user: "Tell me more about the second one."
+    expect_reply_contains_any: ["second"]

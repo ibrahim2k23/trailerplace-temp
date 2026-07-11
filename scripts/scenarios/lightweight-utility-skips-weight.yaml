@@ -1,0 +1,16 @@
+name: lightweight-utility-skips-weight
+tags: [regression, m5]
+# Haul classification (WEIGHT judgment): a Utility load the assistant judges to be
+# lightweight (<= ~1500 lbs — golf cart, ATV, mower, kayak) is known to be light, so
+# the bot must NOT ask the load-weight question. It should move straight past it
+# (to size or straight to results), never "what's the rough total weight?".
+turns:
+  - user: "I'm looking for a utility trailer to haul my golf cart."
+    expect_state:
+      category: "Utility"
+      skipped_slots_contains: "haul_weight_lbs"
+    # The very next thing out of the bot must not be the weight question.
+    expect_reply_not_contains: ["rough total weight", "how much weight", "how heavy", "total weight of your load"]
+  - user: "Just a standard one, nothing fancy."
+    # Still never circles back to ask weight for a load it already knows is light.
+    expect_reply_not_contains: ["rough total weight", "how much weight", "how heavy"]

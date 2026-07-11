@@ -1,0 +1,25 @@
+name: adversarial-faq-midqual-then-answer
+tags: [regression, m9, adversarial]
+# M9 adversarial: an FAQ interrupts qualification, then the user answers the
+# pending question on the very next turn. Two rules collide and both must hold:
+#   1. the FAQ canned text + its gated email fire (Locked Decision: FAQ behavior);
+#   2. the interruption counts as a non-answer, so the pending question is
+#      re-asked ONCE (repeat count 1) — and then, because the user DOES answer it
+#      next turn, the slot fills and the question is never marked skipped.
+turns:
+  - user: "I'm Alan Ford, alan.ford@example.com"
+  - user: "I'm looking for a dump trailer"
+    expect_state:
+      category: "Dump"
+  - user: "before I answer that — do you offer financing?"
+    expect_reply_contains_any: ["financing"]
+    expect_emails_sent: ["FAQ – financing"]
+    expect_state:
+      # The FAQ did not answer the qualification question.
+      pending_question_repeats: 1
+  - user: "sorry, I'll be hauling gravel"
+    expect_state:
+      slot:haul_material: "gravel"
+      pending_question_repeats: 0
+      # Answered, so it must NOT have been auto-skipped by the repeat-once rule.
+      skipped_slots: []

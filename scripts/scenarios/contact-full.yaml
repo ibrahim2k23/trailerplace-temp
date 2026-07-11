@@ -1,0 +1,14 @@
+name: contact-full
+tags: [regression, m5]
+# spec §Contact Collection case 1: name + email + phone given up front -> accept
+# all, never ask again.
+turns:
+  - user: "Hi, I'm John Smith, john@example.com, 555-123-4567. I'm looking for a utility trailer."
+    expect_state:
+      customer_name: "John Smith"
+      customer_email: "john@example.com"
+      customer_phone: "555-123-4567"
+      category: "Utility"
+    expect_reply_not_contains: ["email address", "phone number"]
+  - user: "I'll be hauling a lawn mower, about 500 lbs."
+    expect_reply_not_contains: ["your name", "your email", "your phone"]

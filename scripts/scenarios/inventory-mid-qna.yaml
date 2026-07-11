@@ -1,0 +1,16 @@
+name: inventory-mid-qna
+tags: [regression, m6]
+# spec M6 step 6: an inventory lookup mid-qualification is an interruption —
+# results are shown, the pending question is re-asked after, and category/
+# slots collected so far are untouched.
+turns:
+  - user: "I need a dump trailer for hauling dirt."
+    expect_state:
+      category: "Dump"
+      "slot:haul_material": "dirt"
+    expect_listings: false
+  - user: "Actually, do you have stock #12914?"
+    expect_listings: true
+    expect_state:
+      category: "Dump"
+      "slot:haul_material": "dirt"

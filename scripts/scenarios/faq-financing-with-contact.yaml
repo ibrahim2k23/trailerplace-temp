@@ -1,0 +1,9 @@
+name: faq-financing-with-contact
+tags: [regression, m7]
+# spec §Tools: an FAQ replies with the canned text AND sends an internal email,
+# subject to the contact gate. With contact already given, the email fires.
+turns:
+  - user: "Hi, I'm Jane Doe, reach me at 555-867-5309."
+  - user: "Do you offer financing?"
+    expect_reply_contains_any: ["financing", "979-532-1486"]
+    expect_emails_sent: ["FAQ – financing"]

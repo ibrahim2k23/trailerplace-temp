@@ -1,0 +1,17 @@
+name: contact-partial-name
+tags: [regression, m5]
+# spec §Contact Collection case 5: name given, no email/phone -> ask once for
+# either; if the follow-up is ignored, never ask again.
+turns:
+  - user: "Hi, I'm Maria. I need an enclosed trailer."
+    expect_state:
+      customer_name: "Maria"
+      customer_email: null
+      customer_phone: null
+    expect_reply_contains_any: ["email", "phone"]
+  - user: "I'd rather not share that, but I need it for cargo hauling, roughly 6x10 feet."
+    expect_state:
+      customer_email: null
+      customer_phone: null
+      contact_declined: true
+    expect_reply_not_contains: ["email", "phone number"]

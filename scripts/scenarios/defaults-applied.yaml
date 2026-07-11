@@ -1,0 +1,15 @@
+# Requires the server started with the matching default seeded, e.g.:
+#   CATEGORY_DEFAULTS_JSON='{"Utility": {"item_or_trailer_width_ft": 6.92, "hitch_type": "Bumper Pull"}}' python main.py
+# (see src/domain/defaults.py's env-var hook). No-op / not meaningfully
+# assertable if the server was started without this env var set.
+name: defaults-applied
+tags: [regression, m5]
+# spec §Category default values: on category selection, apply configured
+# defaults, store them, treat as already answered -- do not ask for them
+# unless the user changes them.
+turns:
+  - user: "I want a utility trailer."
+    expect_state:
+      category: "Utility"
+      "slot:hitch_type": "Bumper Pull"
+    expect_reply_not_contains: ["bumper pull or gooseneck", "hitch preference"]

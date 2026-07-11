@@ -1,0 +1,13 @@
+name: contact-ignore-asks-trailer
+tags: [regression, m5]
+# User's first message ignores the (not-yet-issued) contact invite by leading
+# straight with a trailer question; the bot must still answer helpfully and
+# only make the single, optional contact invite -- never block on it.
+turns:
+  - user: "What's the difference between a bumper pull and a gooseneck?"
+    expect_reply_contains_any: ["bumper pull", "gooseneck"]
+    expect_state:
+      category: null
+  - user: "Ok, I'll take a bumper pull. I want a flatbed to haul steel beams, about 5000 lbs."
+    expect_state:
+      category: "Flatbed"

@@ -1,0 +1,10 @@
+name: escalate-quote-no-contact-then-provide
+tags: [regression, m7]
+# spec §Contact-Info Gate: an escalation with no contact stashes the email and
+# asks once for the missing details; when the user provides them, the email sends.
+turns:
+  - user: "Can someone call me with a quote?"
+    expect_reply_not_contains: ["passed your query to our team and it's done"]
+    expect_emails_sent: none
+  - user: "Sure — I'm Mark, 555-222-3333."
+    expect_emails_sent: ["Escalation"]

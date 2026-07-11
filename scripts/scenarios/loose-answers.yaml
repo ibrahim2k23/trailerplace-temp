@@ -1,0 +1,14 @@
+name: loose-answers
+tags: [regression, m5]
+# spec §Loose / no-preference answers: a numeric range stores the smallest
+# value; a non-numeric loose answer stores null and the question is not
+# re-asked (treated as answered).
+turns:
+  - user: "I want a dump trailer, something between 15 and 18 feet."
+    expect_state:
+      category: "Dump"
+      "slot:trailer_length_ft": 15.0
+  - user: "No preference on the weight, whatever you recommend."
+    expect_state:
+      "slot:haul_weight_lbs": null
+    expect_reply_not_contains: ["rough haul weight", "how much weight"]

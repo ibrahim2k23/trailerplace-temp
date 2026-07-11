@@ -1,0 +1,7 @@
+name: inventory-model-typo
+tags: [regression, m6]
+# spec M6 step 6: rapidfuzz partial/typo matching on model_text should find the
+# closest real model even when the user drops punctuation/case.
+turns:
+  - user: "Do you have the 7210 bt?"
+    expect_listings: true

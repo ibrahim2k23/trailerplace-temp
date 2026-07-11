@@ -1,0 +1,9 @@
+name: faq-plus-escalate-one-message
+tags: [regression, m7]
+# Locked Decision (multi-trigger emails): one message can trigger several emails;
+# all fire in order and both canned texts appear in the reply.
+turns:
+  - user: "I'm Jane, 555-100-2000."
+  - user: "Do you offer financing? Also, can someone call me about a quote?"
+    expect_reply_contains_any: ["financing"]
+    expect_emails_sent: ["FAQ – financing", "Escalation"]

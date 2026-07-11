@@ -1,0 +1,12 @@
+name: skip-all-show-results
+tags: [regression, m5]
+# spec §Step 9: user opts out of remaining questions entirely -- mark every
+# remaining required slot skipped and mark qualification complete (Pinecone
+# invocation itself is M6; here we only assert the deterministic gate flips).
+turns:
+  - user: "I want a livestock trailer."
+    expect_state:
+      category: "Livestock"
+  - user: "Just show me what you have, no more questions."
+    expect_state:
+      qualification_complete: true

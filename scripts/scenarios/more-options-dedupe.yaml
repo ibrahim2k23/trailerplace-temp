@@ -1,0 +1,15 @@
+name: more-options-dedupe
+tags: [regression, m6]
+# spec §After Results "more options": a second search must never repeat a URL
+# already shown to the user this session (backend shown_urls, not the frontend).
+turns:
+  - user: "Show me utility trailers."
+    expect_state:
+      category: "Utility"
+    expect_listings: true
+  - user: "No preference on anything else, just show me what you have."
+    expect_state:
+      qualification_complete: true
+    expect_listings: true
+  - user: "Can I see more options?"
+    expect_listings: true

@@ -1,0 +1,9 @@
+name: category-exploration
+tags: [regression, m5]
+# spec §Step 1 intent 2: recommend relevant categories, briefly explain, ask
+# which to explore -- do not select a category on their behalf.
+turns:
+  - user: "What are my options for hauling heavy equipment?"
+    expect_state:
+      category: null
+    expect_reply_contains_any: ["equipment", "flatbed", "tilt", "dump"]

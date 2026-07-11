@@ -1,0 +1,17 @@
+name: category-change-keep-some
+tags: [regression, m6]
+# spec §After Results 4: explicit category switch offers to carry over
+# transferable slots; user picks a subset ("some") before qualification resumes
+# and search fires for the new category.
+turns:
+  - user: "I need a 7x14 dump trailer for hauling dirt, about 3 tons, bumper pull."
+    expect_state:
+      category: "Dump"
+    expect_listings: true
+  - user: "Actually, switch me to an equipment trailer instead."
+    expect_reply_contains_any: ["keep", "requirements"]
+    expect_listings: false
+  - user: "Just keep the length."
+    expect_state:
+      category: "Equipment"
+      "slot:trailer_length_ft": 14.0

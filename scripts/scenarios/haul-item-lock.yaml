@@ -1,0 +1,14 @@
+name: haul-item-lock
+tags: [regression, m5]
+# spec §Mapping Priority: an explicit category name wins over a haul-item word
+# that happens to be a mapping term for another category ("tractor" ->
+# Equipment's cargo terms), and the haul-item answer must never remap the
+# category once it is set (deterministic lock).
+turns:
+  - user: "I want a tilt trailer to haul a tractor."
+    expect_state:
+      category: "Tilt"
+      "slot:haul_item": "tractor"
+  - user: "Around 8000 lbs."
+    expect_state:
+      category: "Tilt"

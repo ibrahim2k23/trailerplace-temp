@@ -1,0 +1,12 @@
+{
+  "_comment": "Golden /chat response contract (M8 §1). Every key here is read by app.py's _process_assistant_reply; customer_email is probed with `\"customer_email\" in data`, so the key must always be present even when null. Values below are illustrative; the test asserts the key set and the types.",
+  "assistant_text": "Sure, I can help.",
+  "listings": [],
+  "sales_phase": "main",
+  "onboarding_api_messages": [],
+  "customer_full_name": "John",
+  "customer_email": null,
+  "customer_phone": "555-1234",
+  "main_prior_messages": null,
+  "thinking_context": null
+}

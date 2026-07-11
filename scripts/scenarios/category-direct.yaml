@@ -1,0 +1,9 @@
+name: category-direct
+tags: [regression, m5]
+# spec §Step 1 intent 3 (category selection) + §Step 2: an explicit category
+# name begins qualification immediately.
+turns:
+  - user: "I'm looking for a dump trailer."
+    expect_state:
+      category: "Dump"
+    expect_reply_contains_any: ["haul", "material", "weight"]

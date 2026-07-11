@@ -1,0 +1,8 @@
+name: inventory-ambiguous-clarify
+tags: [regression, m6]
+# spec M6 step 6: multiple close model candidates with no clear winner ->
+# ask which model they mean, and never state a price before that's resolved.
+turns:
+  - user: "How much is the Diamond C 7210 BT?"
+    expect_reply_contains_any: ["which", "mean"]
+    expect_reply_not_contains: ["$"]

@@ -1,0 +1,15 @@
+name: refine-length-change
+tags: [regression, m6]
+# spec §After Results: a requirement change re-runs search the same turn while
+# keeping every other previously collected slot.
+turns:
+  - user: "I need a 7x20 dump trailer for hauling dirt, about 3 tons, bumper pull."
+    expect_state:
+      category: "Dump"
+      "slot:trailer_length_ft": 20.0
+    expect_listings: true
+  - user: "Actually make it 12 feet long instead."
+    expect_state:
+      "slot:trailer_length_ft": 12.0
+      "slot:trailer_width_ft": 7.0
+    expect_listings: true

@@ -1,0 +1,11 @@
+name: results-shown-alert
+tags: [regression, m7]
+# Locked Decision (system alert emails): every results turn fires a silent
+# [Results Shown to User] alert (gated on contact). Refinements fire it again.
+turns:
+  - user: "I'm Jane, jane@example.com. I want a utility trailer, no preference on anything, just show me options."
+    expect_listings: true
+    expect_emails_sent: ["Results Shown to User"]
+  - user: "Actually show me ones around 12 feet."
+    expect_listings: true
+    expect_emails_sent: ["Results Shown to User"]

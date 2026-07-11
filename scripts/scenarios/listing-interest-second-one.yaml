@@ -1,0 +1,10 @@
+name: listing-interest-second-one
+tags: [regression, m7]
+# spec §After Pinecone Results 2: interest in a shown listing invokes Log Interest
+# with that listing; with contact present the Listing Interest email fires.
+turns:
+  - user: "I'm Jane, jane@example.com. Show me utility trailers, no preference on anything."
+    expect_listings: true
+  - user: "I'm interested in the second one."
+    expect_reply_contains_any: ["logged", "follow up", "team"]
+    expect_emails_sent: ["Listing Interest"]

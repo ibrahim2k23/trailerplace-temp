@@ -1,0 +1,12 @@
+name: inventory-lookup-then-interest
+tags: [regression, m7]
+# Locked Decision (inventory lookup): a first-turn lookup shows cards and defers the
+# contact invite; expressing interest then flows through the contact gate to a
+# Listing Interest email and a hard lead.
+turns:
+  - user: "How much is the 2026 Iron Bull FHG 24k?"
+    expect_listings: true
+    expect_emails_sent: none
+  - user: "I'm interested in the first one. I'm Jane, jane@example.com."
+    expect_reply_contains_any: ["logged", "follow up", "team"]
+    expect_emails_sent: ["Listing Interest"]

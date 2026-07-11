@@ -1,0 +1,21 @@
+name: adversarial-contradictory-sizes
+tags: [regression, m9, adversarial]
+# M9 adversarial: the user contradicts a size they already gave, twice. The LAST
+# value wins (requirement_change semantics, spec §After Results) — the bot must
+# not average the numbers, keep both, or lose the rest of the collected state.
+turns:
+  - user: "I'm Dana, dana@example.com"
+  - user: "I need an equipment trailer to haul a tractor. The tractor is 20 feet long."
+    expect_state:
+      category: "Equipment"
+      slot:haul_length_ft: 20.0
+  - user: "actually no, the tractor is 24 feet long"
+    expect_state:
+      category: "Equipment"
+      slot:haul_length_ft: 24.0
+  - user: "hold on, I think I said 16 feet earlier. Let's go with 16 feet."
+    expect_state:
+      category: "Equipment"
+      slot:haul_length_ft: 16.0
+      # The contradiction must not corrupt the category or drop the cargo.
+      contact_declined: false

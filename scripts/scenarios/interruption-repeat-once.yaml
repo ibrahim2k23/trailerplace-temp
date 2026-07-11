@@ -1,0 +1,16 @@
+name: interruption-repeat-once
+tags: [regression, m5]
+# spec §Step 6, taken directly from the milestone's own example: pause on an
+# interruption, answer it, re-ask the pending question once; if still
+# unanswered, mark it skipped and move on.
+turns:
+  - user: "I want a dump trailer"
+    expect_state:
+      category: "Dump"
+  - user: "what's the difference between tandem and single axles?"
+    expect_reply_contains_any: ["axle"]
+    expect_state:
+      pending_question_repeats: 1
+  - user: "cool thanks"
+    expect_state:
+      skipped_slots_contains: "haul_material"

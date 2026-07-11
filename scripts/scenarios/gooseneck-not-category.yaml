@@ -1,0 +1,9 @@
+name: gooseneck-not-category
+tags: [regression, m5]
+# spec guard: Gooseneck and Bumper Pull are strictly hitch types, never
+# categories or makes -- must never be inferred/returned as a category.
+turns:
+  - user: "I want a gooseneck."
+    expect_state:
+      category: null
+    expect_reply_contains_any: ["hitch", "type of trailer", "which category"]

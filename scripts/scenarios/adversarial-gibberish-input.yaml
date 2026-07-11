@@ -1,0 +1,19 @@
+name: adversarial-gibberish-input
+tags: [regression, m9, adversarial]
+# M9 adversarial: unparseable input. The bot must degrade gracefully — no crash,
+# no invented category, no hallucinated listings, no stock-number match on random
+# digits — and recover the moment the user says something real.
+turns:
+  - user: "asdkjh qwe;lkj 8837 zzzz ###"
+    expect_listings: false
+    expect_state:
+      category: null
+      # Random digits are not a stock number (the deleted _extract_stock heuristic).
+      qualification_complete: false
+  - user: "?????"
+    expect_listings: false
+    expect_state:
+      category: null
+  - user: "sorry, autocorrect. I need a utility trailer for my golf cart"
+    expect_state:
+      category: "Utility"

@@ -1,0 +1,11 @@
+name: inventory-first-message-contact-deferred
+tags: [regression, m6]
+# Locked Decision (session restore / M4/M6): a first-turn inventory lookup
+# defers the initial contact invite to the next user turn instead of asking
+# for name/email/phone alongside the lookup results.
+turns:
+  - user: "How much is the 2026 Iron Bull FHG24K?"
+    expect_listings: true
+    expect_reply_not_contains: ["email", "phone number"]
+  - user: "Thanks, that's helpful."
+    expect_reply_contains_any: ["name", "email", "phone"]

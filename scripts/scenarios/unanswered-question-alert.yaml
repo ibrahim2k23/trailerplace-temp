@@ -1,0 +1,13 @@
+name: unanswered-question-alert
+tags: [regression, m7]
+# Locked Decision (system alert emails): a qualification question marked skipped
+# after two non-answers fires a silent [Unanswered Question] alert. The reply must
+# never mention any email.
+turns:
+  - user: "I'm Jane, jane@example.com. I want a dump trailer."
+    expect_state: {category: "Dump"}
+  - user: "What's the difference between tandem and single axles?"
+    expect_reply_not_contains: ["email", "notified our team", "forwarded"]
+  - user: "Cool, thanks."
+    expect_emails_sent: ["Unanswered Question"]
+    expect_reply_not_contains: ["email"]

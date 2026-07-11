@@ -1,0 +1,12 @@
+name: category-info-vs-select
+tags: [regression, m5]
+# spec §Step 2: "What is a utility trailer?" is an information request, not a
+# selection -- must NOT start qualification.
+turns:
+  - user: "What is a utility trailer?"
+    expect_state:
+      category: null
+    expect_reply_contains_any: ["utility"]
+  - user: "Ok, I actually want one for hauling lawn equipment."
+    expect_state:
+      category: "Utility"

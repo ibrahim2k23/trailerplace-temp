@@ -1,0 +1,11 @@
+name: brand-only
+tags: [regression, m5]
+# spec §Brand Handling "Brand mentioned without category": store the brand,
+# do not assume it's the category, show that brand's available categories and
+# ask which one to explore.
+turns:
+  - user: "Do you carry Diamond C trailers?"
+    expect_state:
+      category: null
+      brand_preference: "Diamond C"
+    expect_reply_contains_any: ["which", "type", "category"]

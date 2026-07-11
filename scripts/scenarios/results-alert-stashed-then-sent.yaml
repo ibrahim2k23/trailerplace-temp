@@ -1,0 +1,11 @@
+name: results-alert-stashed-then-sent
+tags: [regression, m7]
+# Locked Decision (system alert emails): a results alert with no contact is stashed
+# silently (no ask, no mention). When the user later volunteers contact, the stashed
+# [Results Shown to User] alert sends and the lead upgrades to hard.
+turns:
+  - user: "How much is the 2026 Iron Bull FHG 24k?"
+    expect_listings: true
+    expect_emails_sent: none
+  - user: "I'm Jane, my number is 555-444-1212."
+    expect_emails_sent: ["Results Shown to User"]

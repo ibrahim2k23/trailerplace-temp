@@ -1,0 +1,10 @@
+name: brand-filter-search
+tags: [regression, m6]
+# Locked Decision (2026-07-07): brand preference is a hard Pinecone `make`
+# filter — every returned card should be the requested make.
+turns:
+  - user: "I want a Diamond C dump trailer, 7x14, hauling dirt, about 3 tons, bumper pull."
+    expect_state:
+      category: "Dump"
+      brand_preference: "Diamond C"
+    expect_listings: true

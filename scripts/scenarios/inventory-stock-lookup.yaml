@@ -1,0 +1,7 @@
+name: inventory-stock-lookup
+tags: [regression, m6]
+# spec M6 step 6: an explicit stock number is a direct inventory lookup on any
+# turn, bypassing qualification/Pinecone entirely.
+turns:
+  - user: "Do you have stock #12914?"
+    expect_listings: true

@@ -1,0 +1,24 @@
+# Secrets — .env holds live OpenAI/Pinecone/Graph/DB credentials. Never commit it.
+.env
+*.env
+!.env.example
+
+# Observability output
+turns.jsonl
+*.jsonl
+logs/
+_verify_logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db

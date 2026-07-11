@@ -1,0 +1,15 @@
+name: clarification-term
+tags: [regression, m5]
+# spec §Category clarification rules (office_trailer_use): an ambiguous trigger
+# term asks a clarification question first and resolves via the given option
+# set before mapping a category.
+turns:
+  - user: "I need an office trailer."
+    expect_state:
+      category: null
+      clarification_key: "office_trailer_use"
+    expect_reply_contains_any: ["fiber", "telecom", "general office"]
+  - user: "It's for fiber splicing work."
+    expect_state:
+      category: "Fiber"
+      clarification_key: null

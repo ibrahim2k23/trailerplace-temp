@@ -1,0 +1,9 @@
+name: brand-typo
+tags: [regression, m5]
+# spec §Field Extraction brand rule: typo'd/variant brand names must resolve
+# to the canonical known make (Analyze LLM does this, not code-side regex).
+turns:
+  - user: "I want a dimond c trailer."
+    expect_state:
+      brand_preference: "Diamond C"
+      category: null

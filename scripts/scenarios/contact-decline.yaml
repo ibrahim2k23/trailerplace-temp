@@ -1,0 +1,14 @@
+name: contact-decline
+tags: [regression, m5]
+# spec §Contact Collection "User Declines Contact Information": the user
+# ignores the initial contact invite entirely and jumps straight to a trailer
+# question -> continue immediately, no insistence, no second ask.
+turns:
+  - user: "I don't want to give my info, just tell me about dump trailers."
+    expect_state:
+      customer_name: null
+      contact_declined: true
+    expect_reply_contains_any: ["dump"]
+    expect_reply_not_contains: ["email", "phone number", "your name"]
+  - user: "What material can they haul?"
+    expect_reply_not_contains: ["email", "phone number", "your name"]

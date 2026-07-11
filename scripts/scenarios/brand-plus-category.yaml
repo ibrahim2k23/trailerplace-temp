@@ -1,0 +1,10 @@
+name: brand-plus-category
+tags: [regression, m5]
+# spec §Brand Handling "Brand + category mentioned": store the brand, map the
+# category, begin that category's flow immediately -- do not re-ask category.
+turns:
+  - user: "I want a Diamond C utility trailer."
+    expect_state:
+      category: "Utility"
+      brand_preference: "Diamond C"
+    expect_reply_not_contains: ["what type of trailer", "which category"]

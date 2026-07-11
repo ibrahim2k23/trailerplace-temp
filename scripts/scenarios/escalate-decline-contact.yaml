@@ -1,0 +1,12 @@
+name: escalate-decline-contact
+tags: [regression, m7]
+# spec §Contact-Info Gate: user declines contact -> the email tool is NOT invoked,
+# the bot never re-asks, and the conversation continues politely.
+turns:
+  - user: "Can someone call me with a quote?"
+    expect_emails_sent: none
+  - user: "No, I'd rather not share my contact info."
+    expect_emails_sent: none
+  - user: "What types of trailers do you carry?"
+    expect_reply_contains_any: ["trailer"]
+    expect_emails_sent: none

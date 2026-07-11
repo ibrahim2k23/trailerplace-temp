@@ -1,0 +1,31 @@
+name: adversarial-category-change-twice
+tags: [regression, m9, adversarial]
+# M9 adversarial: two explicit category switches in one conversation. Each switch
+# must build a pending_category_change and WAIT for the keep/drop answer rather
+# than auto-applying (spec §After Results 4) — so `category` is still the old one
+# on the switch turn itself. The second switch must not be blocked or confused by
+# the first one's resolution.
+turns:
+  - user: "I'm Marco, marco@example.com"
+  - user: "I want a dump trailer"
+    expect_state:
+      category: "Dump"
+  - user: "it's for hauling gravel, about 3 tons"
+    expect_state:
+      category: "Dump"
+  - user: "actually, show me tilt trailers instead"
+    # Pending, not applied: category is unchanged until the user answers keep/drop.
+    expect_state:
+      category: "Dump"
+    expect_reply_contains_any: ["keep", "carry over", "start"]
+  - user: "keep all of them"
+    expect_state:
+      category: "Tilt"
+      pending_category_change: null
+  - user: "you know what, switch to equipment trailers"
+    expect_state:
+      category: "Tilt"
+  - user: "none of them, start fresh"
+    expect_state:
+      category: "Equipment"
+      pending_category_change: null

@@ -1,0 +1,30 @@
+name: adversarial-paragraph-requirements
+tags: [regression, m9, adversarial]
+# M9 adversarial: a whole paragraph pasted in one message. Every field must be
+# extracted from the single turn (spec §Field Extraction: extraction applies to
+# EVERY message, even unasked fields), units converted by the Analyze LLM
+# ("7'6\"" -> 7.5, "two tons" -> 4000), the brand typo canonicalized, and the
+# non-searchable extras parked in non_metadata_features rather than as slots.
+# The bot must then NOT re-ask anything it already has.
+turns:
+  - user: >-
+      Hi there, my name is Priya Raman and you can reach me at priya.raman@example.com
+      or 555-402-1199. I run a small landscaping outfit outside Houston and I'm in the
+      market for an equipment trailer. I mostly move a compact tractor around, it weighs
+      about two tons and it's roughly 12 feet long. I'd want the trailer around 7'6" wide,
+      gooseneck if you have it, and honestly a set of ramps and LED lights would be great.
+      Budget is flexible. What have you got?
+    expect_state:
+      category: "Equipment"
+      customer_name: "Priya Raman"
+      customer_email: "priya.raman@example.com"
+      slot:haul_weight_lbs: 4000.0
+      slot:haul_length_ft: 12.0
+      # extracted.hitch_type is a list ([one] = clear preference), stored as-is.
+      slot:hitch_type: ["Gooseneck"]
+    # Extras are not searchable metadata; they must not become qualification slots.
+    expect_reply_not_contains: ["what is your name", "what's your name"]
+  - user: "yes that's everything"
+    # Nothing left to ask: the required slots all came from the paragraph.
+    expect_state:
+      category: "Equipment"
