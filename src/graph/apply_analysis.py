@@ -15,12 +15,15 @@ from src.domain.normalizer import normalize_category
 from src.domain.slot_map import (
     _SLOT_METADATA_FILTER_MAP,
     brand_is_actually_a_hitch,
+    can_autofill_slot,
+    equivalent_slots,
     is_recognized_slot_value,
     normalize_answer_for_slot,
     normalize_hitch_answer,
     normalize_slot_targets,
     sanitize_non_metadata_features,
     slot_value_kind,
+    slots_of_kind,
 )
 from src.domain.trailer_fields import get_trailer_fields
 from src.domain.units import parse_dimensions
@@ -110,21 +113,26 @@ def _start_category(state: dict[str, Any], category: str) -> None:
         _set_slot(state, key, value, "default")
 
 
-# On a category change we drop every collected feature EXCEPT these three measurements
-# (length, width, payload). Each canonical dimension may live under any of the listed
-# slot keys depending on how it was originally captured (direct extraction vs. a slot
-# answer that maps to a metadata target).
-_DIMENSION_SLOT_KEYS: dict[str, tuple[str, ...]] = {
-    "length": ("trailer_length_ft", "length_ft"),
-    "width": ("trailer_width_ft", "width_ft", "item_or_trailer_width_ft"),
-    "payload": ("payload_lbs", "haul_weight_lbs", "payload_need"),
+# On a category change we drop every collected feature EXCEPT the measurements. A
+# measurement can be sitting under ANY of the names its kind is known by — a length is
+# `trailer_length_ft` on Livestock, `haul_length_ft` on Equipment, `vehicle_length_ft` on
+# Car Hauler — so we look for it under all of them rather than a hand-listed few.
+_DIMENSION_KINDS: dict[str, str] = {
+    "length": "length_ft",
+    "width": "width_ft",
+    "height": "height_ft",
+    "payload": "payload_lbs",
 }
-# When re-seeding a kept dimension into the new category, write it under every key that
-# search's metadata-filter map reads, so the carried value actually filters results.
+_DIMENSION_SLOT_KEYS: dict[str, tuple[str, ...]] = {
+    dim: slots_of_kind(kind) for dim, kind in _DIMENSION_KINDS.items()
+}
+# When re-seeding a kept dimension into the new category, write it under the canonical slot;
+# _fill_category_slot_aliases then copies it into whatever name the new category asks by.
 _DIMENSION_TARGET_SLOTS: dict[str, tuple[str, ...]] = {
     "length": ("trailer_length_ft",),
     "width": ("trailer_width_ft",),
-    "payload": ("payload_lbs", "haul_weight_lbs", "payload_need"),
+    "height": ("trailer_height_ft",),
+    "payload": ("payload_lbs",),
 }
 
 
@@ -529,6 +537,37 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         _set_slot(state, pending, None)
 
 
+def _fill_category_slot_aliases(state: dict[str, Any]) -> None:
+    """Answer this category's questions with measurements the customer ALREADY gave us.
+
+    Every category names the same measurements differently — Equipment asks for
+    `haul_length_ft`, Livestock for `trailer_length_ft`, Car Hauler for
+    `vehicle_length_ft` — but they are one fact, and search normalizes them to one
+    `length_ft` target anyway. Qualification, though, was matching on the NAME: tell us
+    "an equipment trailer, 20 ft" and the 20 landed in `trailer_length_ft`, leaving
+    `haul_length_ft` empty, so we turned around and asked for a length we had just been
+    given. This copies each known measurement into whatever name the current category asks
+    by, for a category chosen mid-sentence and for one switched into later alike.
+
+    A skipped slot stays skipped: they declined to answer it, and a number from elsewhere is
+    not a change of heart.
+    """
+    category = state.get("category")
+    if not category:
+        return
+    spec = get_trailer_fields(category)
+    slots = state.setdefault("slots", {})
+    skipped = state.get("skipped_slots", []) or []
+    for slot in list(required_slots_for_state(state)) + list(spec.optional):
+        if slot in slots or slot in skipped or not can_autofill_slot(slot):
+            continue
+        for sibling in equivalent_slots(slot):
+            value = slots.get(sibling)
+            if _is_number(value):
+                _set_slot(state, slot, float(value), state.get("slot_sources", {}).get(sibling, "user"))
+                break
+
+
 # Utility's weight qualification slot — the "what's the rough total weight?" question.
 UTILITY_WEIGHT_SLOT = "haul_weight_lbs"
 
@@ -636,6 +675,7 @@ def apply_analysis_to_state(state: dict[str, Any]) -> dict[str, Any]:
     if not _apply_clarification(state, state["turn"]):
         _apply_category(state, state["turn"])
     _apply_extraction(state, state["turn"])
+    _fill_category_slot_aliases(state)
     _refresh_pending_change_dimensions(state)
     _inject_width_question(state, haul)
     _skip_weight_for_lightweight(state, haul)

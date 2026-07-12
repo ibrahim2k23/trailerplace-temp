@@ -249,6 +249,51 @@ def slot_value_kind(slot_name: str) -> str | None:
     return _SLOT_VALUE_KIND.get(slot_name)
 
 
+# Every category asks for the same handful of measurements under its own name: a trailer
+# length is `trailer_length_ft` on Livestock, `haul_length_ft` on Equipment,
+# `vehicle_length_ft` on Car Hauler. They are the same fact. Grouping them by kind is what
+# lets a value the customer already gave satisfy whichever name the current category uses,
+# instead of us asking for the same number a second time.
+_SLOTS_BY_KIND: dict[str, tuple[str, ...]] = {}
+for _slot, _kind in _SLOT_VALUE_KIND.items():
+    _SLOTS_BY_KIND.setdefault(_kind, ())
+    _SLOTS_BY_KIND[_kind] += (_slot,)
+# The generic keys search writes its parsed values under are part of the group too.
+for _kind in ("length_ft", "width_ft", "height_ft", "payload_lbs"):
+    _SLOTS_BY_KIND.setdefault(_kind, ())
+    if _kind not in _SLOTS_BY_KIND[_kind]:
+        _SLOTS_BY_KIND[_kind] += (_kind,)
+
+# Slots that may DONATE a value to a same-kind sibling but must never RECEIVE one:
+#   trailer_size / cargo_size ask for several numbers at once, so a lone length does not
+#     answer them — we would skip a question the customer never got.
+#   bin_size is a yardage, which only coincides with a length by a business rule; a trailer
+#     length carried in from another category is not a bin size the customer chose.
+_NO_AUTOFILL_SLOTS = frozenset({"trailer_size", "cargo_size", "bin_size"})
+
+
+def slots_of_kind(kind: str) -> tuple[str, ...]:
+    """Every slot name that holds a value of this kind, generic keys included."""
+    return _SLOTS_BY_KIND.get(kind, ())
+
+
+def equivalent_slots(slot_name: str) -> tuple[str, ...]:
+    """The other slot names that hold the same fact as ``slot_name``."""
+    kind = _SLOT_VALUE_KIND.get(slot_name) or (slot_name if slot_name in _SLOTS_BY_KIND else None)
+    if kind is None:
+        return ()
+    return tuple(name for name in _SLOTS_BY_KIND.get(kind, ()) if name != slot_name)
+
+
+def can_autofill_slot(slot_name: str) -> bool:
+    return slot_name not in _NO_AUTOFILL_SLOTS and _SLOT_VALUE_KIND.get(slot_name) in {
+        "length_ft",
+        "width_ft",
+        "height_ft",
+        "payload_lbs",
+    }
+
+
 def is_recognized_slot_value(slot_name: str, value: Any) -> bool:
     """True when ``value`` is already in the clean, parsed form for this slot's kind
     (a number for a dimension/payload slot, a single-item canonical list for hitch_type,
