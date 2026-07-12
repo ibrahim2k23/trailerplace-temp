@@ -55,6 +55,11 @@ class ChatbotConversation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     lead: Mapped[ChatbotLead] = relationship(back_populates="conversations")
+    # The unit of work orders inserts by RELATIONSHIP, not by the raw foreign key. Without
+    # this, a session's FIRST turn — the one flush where the conversation row and its turn
+    # row are both new — could emit the chatbot_turns INSERT first and violate
+    # chatbot_turns_session_id_fkey. It worked most of the time purely by luck of ordering.
+    turns: Mapped[list["ChatbotTurn"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
 
 
 class ChatbotTurn(Base):
@@ -69,6 +74,8 @@ class ChatbotTurn(Base):
     request_message: Mapped[str] = mapped_column(Text, nullable=False)
     response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    conversation: Mapped[ChatbotConversation] = relationship(back_populates="turns")
 
 
 class ChatbotOutbox(Base):

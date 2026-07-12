@@ -201,6 +201,9 @@ def _run_turn(request: ChatRequest, turn_id: str) -> ChatResponse:
             if row is None:
                 row = ChatbotConversation(session_id=sid, lead_id=uuid.UUID(lead_uuid), conversation=[])
                 db_session.add(row)
+                # The turn and outbox rows below reference this session_id. Land the parent
+                # first so their INSERTs can never race ahead of it inside one flush.
+                db_session.flush()
             snapshot = to_snapshot(_get_session(request.session_id))
             row.state_snapshot = copy.deepcopy(snapshot)
             row.state_schema_version = snapshot["state_schema_version"]

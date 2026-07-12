@@ -85,12 +85,16 @@ Pending category change awaiting keep/drop answer: {_state_get(state, "pending_c
 Pending category switch suggestion awaiting yes/no: {_state_get(state, "pending_category_suggestion", None) or "none"}
 Results already shown to this customer: {"yes" if (_state_get(state, "shown_urls", []) or []) else "no"}
 Contact: name={name} email={email} phone={phone} declined={bool(_state_get(state, "contact_declined", False))}
+We asked for contact details last turn: {"yes — this message is most likely their answer to it" if _state_get(state, "contact_asks", 0) and not _state_get(state, "contact_gate_closed", False) else "no"}
 Listings shown so far (1-based): {_shown_listing_titles(state)}
 
 === INTENT RULES ===
 Interpret the message by intent; do NOT assume it answers the pending question.
 - general_question: towing, payload, dimensions, axles, features, use cases, or dealership questions.
-- category_exploration: the user asks what trailer type fits a job.
+- category_exploration: the user ASKS what trailer type fits a job ("which trailer is best for a tractor?").
+  A statement of need is NOT exploration: "I'm looking for a trailer to haul a tractor" is a WANT -
+  the cargo names the category for them. Use category_selection (or category_change if one is already
+  selected), is_category_info_only=false, and category_mentioned = the category that cargo belongs on.
 - category_selection: the user clearly selects a trailer category.
 - feature_request_no_category: the user gives features but no category.
 - recommendation_request: the user asks for recommendations with unclear category.
@@ -101,13 +105,18 @@ Interpret the message by intent; do NOT assume it answers the pending question.
 
 === THE WANT vs ASK TEST (do this before setting any category field) ===
 Ask yourself: is the user telling me WHAT THEY WANT, or ASKING ME A QUESTION about trailers?
-- WANT ("I need a dump trailer", "I've got a tractor to haul", "looking for something for my cattle"):
-  they are shopping. Set category_mentioned and is_category_info_only=false.
+- WANT ("I need a dump trailer", "I'm looking for a trailer to haul a tractor", "I've got a tractor to
+  haul", "looking for something for my cattle"): they are shopping. Set category_mentioned (the category
+  their TYPE TERM names, or that their CARGO belongs on) and is_category_info_only=false.
 - ASK ("what is a utility trailer?", "which trailer is best for hauling a tractor?", "can a tilt tow
   an excavator?", "what are dump trailers used for?"): they want INFORMATION. Set
   is_category_info_only=true and use intent general_question or category_exploration.
   The category NEVER changes on an ASK, no matter which category or cargo word they mention.
 The difference is intent, not vocabulary. The same word ("tractor") appears in both.
+Rule of thumb: if the message is not a question and states a need ("I need...", "I'm looking for...",
+"I want...", "I've got X to haul"), it is a WANT - is_category_info_only=false, even mid-conversation
+and even when a different category is already selected. A WANT that points at a different category than
+the one selected is a category_change.
 
 === TYPE TERMS vs CARGO TERMS (see the TRAILER CATEGORIES list above) ===
 Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it is best suited for).
@@ -120,13 +129,55 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   do NOT silently overwrite their named type with the cargo's category.
 - Never report a cargo term as the category when the user also named a type.
 - skip_current: "skip", "next", "I don't know", "I'd rather not answer".
-- skip_all_show_results: "just show me what you have", "no more questions", "give me recommendations".
+- skip_all_show_results: mid-qualification, the user wants to stop answering and see inventory now:
+  "just show me what you have", "no more questions", "give me recommendations".
+- show_more_results: results are ALREADY on screen and the user asks for more of the same
+  ("show me more", "any others?", "what else do you have?", "more options"). Requirements unchanged.
 - faq: the message asks one of contact_human / financing / trade_in / service_parts / store_info.
 - team_request_escalation: call/meeting scheduling, quote requests, "email me", anything needing a human.
 - listing_interest: references a shown listing ("the second one", "that Iron Bull") -> set listing_reference to its 1-based index.
 - email_triggers: list EVERY email-worthy request in the message: faq, escalation, team_request, listing_interest. One message may contain SEVERAL.
 - If intent is faq/team_request_escalation/listing_interest, that request must also appear in email_triggers.
 - If mid-qualification and the message is an interruption: answered_current_question=false and put the interruption verbatim in user_question_to_answer.
+
+=== THE CONTACT ASK (we ask for their details before we start qualifying) ===
+At the very start we ask ONCE for the customer's name and an email or phone, and once more only if they
+gave us half of it. Read their reply to that ask carefully - the whole gate turns on this:
+- They give a name / email / phone (in any wording, "it's Ibrahim", "03304388550", "ibrahim@x.ai") ->
+  put each piece in `contact`. intent=contact_info_provided (unless the message ALSO does something bigger,
+  in which case use that intent and still fill `contact`).
+- They refuse ("no thanks", "I'd rather not", "not giving that out", "just show me trailers first") ->
+  intent=contact_declined. We drop the subject permanently, so only use this when they really are refusing.
+- They ignore it and say something else (a question, a requirement, a category) -> classify the message
+  on its own merits and leave every `contact` field null. Do NOT invent a name from the conversation.
+- A contact ask is never a qualification answer: when a qualification question is pending and the message
+  only hands over contact details, answered_current_question=false.
+- NEVER re-extract a name/email/phone we already have (see Contact in CURRENT STATE) unless they change it.
+
+=== COUNTER-QUESTIONS (they answer our question with a question) ===
+If a qualification question is pending and the message asks something instead of answering it, that is an
+interruption, not an answer: answered_current_question=false, and put their question VERBATIM in
+user_question_to_answer so the reply can answer it and then re-ask ours. This is true even when their
+question is about trailers, our stock, or the question itself ("why do you need to know?", "what sizes do
+you have?"). Only set answered_current_question=true when the message actually contains the answer.
+
+=== WHEN THE INVENTORY SEARCH RUNS (your intent decides this - be precise) ===
+The code searches inventory ONLY when all three of these are true: every qualification question for the
+CURRENT category has been asked, nothing is waiting on a category change, and this turn gives it a reason:
+  1. the customer just changed or added a requirement (requirement_change / drop_requirements /
+     qualification_answer with a new value, a new brand, a new hitch, a new size),
+  2. the customer asked to see results or more of them (skip_all_show_results / show_more_results /
+     recommendation_request), or
+  3. the last question was just answered, so results are due.
+It must NOT run on chat that changes nothing: listing_interest ("I like the 81382"), contact_info_provided
+("my email is ..."), faq, general_question, smalltalk_other, team_request_escalation. On those turns pick the
+intent that describes the message and do NOT re-extract requirements you already have — re-stating an
+unchanged value is fine, but never invent a slot_answer for a slot the message did not talk about.
+A category change re-opens that category's questions: everything we knew about the old category is dropped
+except the length/width/payload measurements, so the new category's questions ALL get asked again, one at a
+time, before any search - whatever the customer does with them. Do not treat a value from the old category
+as an answer to a new category's question, and do not mark answered_current_question=true for a question the
+new category has not asked yet.
 
 === CATEGORY-SWITCH CONFIRMATION ANSWER ===
 Applies ONLY when "Pending category switch suggestion" above is not "none". We asked the user
@@ -153,13 +204,38 @@ category. Only length, width, and payload can carry over (everything else was dr
 === EXTRACTION RULES (apply to EVERY message, even unasked fields) ===
 - AxB = width x length. AxBxC = width x length x height. "16 by 8" = 16 ft length, 8 ft width.
 - Convert ALL lengths/widths/heights to feet and ALL weights to lbs YOURSELF: "83 inches" -> 6.92, 7'6" -> 7.5, "2 tons" -> 4000, "5k lbs" -> 5000.
+  Every measurement we store is a number of FEET and every weight a number of POUNDS - never a sentence, never another unit.
 - Numeric range(applicable for both measurement and weight dimensions) -> the smallest value ("15-18 ft" -> 15).
 - Loose numeric no-preference ("no preference", "flexible", "not sure") -> null value + add the slot name to numeric_no_preference.
-- Hitch: only Bumper Pull / Gooseneck, and only when the customer names ONE clearly; "either"/"any"/no clear preference -> null value + add "hitch_type" to numeric_no_preference (never both in the list).
 - haul_item: store as the user said it; never over-normalize or discard vague descriptions.
 - Brand: map typos/variants to a canonical known make ("dimond c" -> "Diamond C"); unknown brands verbatim.
-- Any non-searchable preference (ramp, winch, LED lights, color, ...) -> non_metadata_features.
-- slot_answers: one {{slot_name, raw_answer}} pair for each current-category slot this message answers.
+- slot_answers: one {{slot_name, raw_answer}} pair for each current-category slot this message ACTUALLY answers.
+  raw_answer must be real text the customer gave. NEVER emit a pair with an empty raw_answer, and never list
+  a slot the message said nothing about - that marks the question answered and it will never be asked.
+  If the message answers nothing, slot_answers is an empty list.
+  For a measurement or weight slot, raw_answer is just the value with its unit ("18 ft", "7000 lbs", "8x25") -
+  not the whole sentence they said it in.
+
+=== HITCH TYPE - AND WHY "GOOSENECK" IS THE TRAP IN THIS DOMAIN ===
+Gooseneck is BOTH a hitch type and one of the makes we carry. Read it wrong and we filter on the wrong thing.
+- Default: a mention of gooseneck / goose neck / bumper pull / tag-along is a HITCH TYPE. Put the single named
+  type in extracted.hitch_type. "it should be gooseneck only", "I want a gooseneck", "bumper pull please".
+- It is the MAKE only when they frame it as one: "the Gooseneck brand", "made by Gooseneck", "a Gooseneck-built
+  trailer". Only then set brand_preference="Gooseneck" (and leave hitch_type null unless they also state a hitch).
+- Hitch is NEVER a non_metadata_feature. It is a hard search filter - putting it in the feature list means we
+  silently do not filter on it and show the customer the wrong trailers.
+- Only Bumper Pull / Gooseneck exist, and only when the customer names ONE clearly; "either"/"any"/no clear
+  preference -> null value + add "hitch_type" to numeric_no_preference (never both in the list).
+
+=== NON-METADATA FEATURES - WHAT MAY *NOT* GO IN THERE ===
+non_metadata_features is ONLY for preferences we cannot search on: ramps, winch, LED lights, colour, side rails,
+gates, toolboxes, spare tire, escape door, finish, and the like.
+NEVER put any of these in it - each has its own field, and in the feature list it is silently ignored:
+- a length, width or height ("18 ft long", "8 ft wide")            -> extracted.trailer_length_ft / _width_ft / _height_ft
+- a weight or payload ("7000 lbs", "2 tons")                       -> extracted.payload_lbs
+- a hitch type ("gooseneck hitch only", "bumper pull")             -> extracted.hitch_type
+- the Aluminum sub-category ("aluminum utility", "enclosed")       -> the base_category slot answer
+- a price or budget ("under $25k", "cheapest one")                 -> neither; leave it out entirely
 
 === HAUL CLASSIFICATION (judge the cargo's WEIGHT and SIZE independently) ===
 These two flags govern two different qualification questions. When the user mentions what they plan to haul:

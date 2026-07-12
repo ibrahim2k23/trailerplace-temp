@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 
 from src.config import settings
+from src.graph.contact_gate import contact_gate_pending
 from src.graph.nodes.analyze import make_analyze_node
 from src.graph.nodes.apply_analysis import apply_analysis_node
 from src.graph.nodes.email_actions import email_actions_node
@@ -14,21 +15,74 @@ from src.graph.state import SessionState
 from src.llm.client import LLMClient, OpenAILLMClient
 
 
+# The customer asking, in so many words, to see (more) inventory. Always worth a search,
+# even when nothing about their requirements changed.
+_SHOW_RESULTS_INTENTS = {"skip_all_show_results", "show_more_results", "recommendation_request"}
+
+# Turns that are conversation, not shopping. These never search, however the extractor
+# happened to fill the slots — a question about a listing, or "which trailer suits a
+# tractor?", is not a request for a fresh set of results. Anything such a message did change
+# stays flagged, and lands on the next turn that IS a search.
+#
+# Handing over contact details is deliberately NOT on this list. The opening gate defers the
+# customer's actual request by a turn, so the moment they clear the gate is the moment we owe
+# them the results they asked for. It cannot cause a spurious search either: a contact reply
+# on its own changes nothing a search is built from, so search_pending stays false.
+_NON_SEARCH_INTENTS = {
+    "general_question",
+    "category_exploration",
+    "faq",
+    "team_request_escalation",
+    "listing_interest",
+    "inventory_lookup",
+    "smalltalk_other",
+}
+
+
+def should_search(state: dict) -> bool:
+    """Whether this turn earns a Pinecone query.
+
+    Search is a tool call, not a turn type: it runs when every question has been asked
+    (answered, skipped or waved off) AND there is actually something new to look up —
+    either the customer just changed what they're after, or they asked to see more. It
+    must NOT run again simply because qualification finished several turns ago: "I like
+    the second one" and "here's my email" are conversation, not a new query.
+    """
+    if not state.get("qualification_complete"):
+        return False
+    if state.get("pending_category_change") or state.get("pending_category_suggestion"):
+        return False
+    turn = state.get("turn")
+    if turn:
+        if turn.intent in _SHOW_RESULTS_INTENTS:
+            return True
+        if turn.intent in _NON_SEARCH_INTENTS or turn.is_category_info_only:
+            return False
+    return bool(state.get("search_pending"))
+
+
 def _route(state: dict) -> str:
     turn = state.get("turn")
     if turn and turn.intent == "inventory_lookup" and turn.inventory_lookup.is_lookup and turn.inventory_lookup.confidence != "low":
         return "inventory_lookup"
+    # The opening contact ask comes before anything else. What they asked for is already
+    # recorded in state — it just waits a turn while we ask who we're talking to.
+    if contact_gate_pending(state):
+        return "respond"
     if state.get("clarification_key"):
         return "respond"
+    # A category move (or a suggested one) always pauses to ask before anything else:
+    # the new category's questions are unanswered, so there is nothing to search on yet.
     if state.get("pending_category_change") or state.get("pending_category_suggestion"):
         return "respond"
-    if state.get("qualification_complete") or (turn and turn.intent == "skip_all_show_results"):
-        return "search"
+    # Qualification is the gate for everything else. It re-checks the current category's
+    # required slots every turn, so a category change re-opens the questions instead of
+    # falling through to a stale qualification_complete=True.
     return "qualification"
 
 
 def _after_qualification(state: dict) -> str:
-    return "search" if state.get("qualification_complete") else "respond"
+    return "search" if should_search(state) else "respond"
 
 
 def build_graph(client: LLMClient | None = None):

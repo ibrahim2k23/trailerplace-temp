@@ -7,6 +7,9 @@ from src.graph.apply_analysis import INJECTED_WIDTH_QUESTION, INJECTED_WIDTH_SLO
 def qualification_node(state: dict) -> dict:
     outcome = state.setdefault("turn_outcome", {})
     if not state.get("category"):
+        # No category means nothing to search, whatever else happened this turn ("just show
+        # me what you have" before they've told us what they want).
+        state["qualification_complete"] = False
         outcome["next_question"] = "What type of trailer are you looking for?"
         return state
     spec = get_trailer_fields(state["category"])

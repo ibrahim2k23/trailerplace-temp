@@ -310,18 +310,47 @@ def test_category_change_keep_all_carries_measurements():
     say(state, "make it 18 ft long")
     apply_with(state, sample_analysis(category_mentioned=None, slot_answers=[], extracted={**_empty_extracted(), "trailer_length_ft": 18.0}))
     assert state["slots"]["trailer_length_ft"] == 18.0
-    # An explicit switch is held pending, offering only the carried measurements.
+    # The switch takes effect at once (so anything said in the same breath lands in the new
+    # category), and we still pause to ask which measurements to carry over.
     say(state, "switch me to a dump trailer instead")
-    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[]))
-    assert state["category"] == "Tilt"
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["qualification_complete"] is False
     assert state["pending_category_change"]["new_category"] == "Dump"
     assert state["pending_category_change"]["dimensions"] == {"length": 18.0}
-    # Keeping all carries the measurements and drops every other feature.
+    # Keeping all keeps the carried measurements.
     say(state, "keep all of them")
     apply_with(state, sample_analysis(keep_fields_answer="all", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
     assert state["category"] == "Dump"
     assert state["pending_category_change"] is None
     assert state["slots"]["trailer_length_ft"] == 18.0
+
+
+def test_category_change_keeps_measurements_given_in_the_same_message():
+    # "switch to a dump trailer, 20 ft" — the 20 is a statement about the DUMP trailer, so it
+    # must survive the switch and be the value we offer to carry over (not the stale 26).
+    state = new_session_state("s1")
+    state["category"] = "Livestock"
+    state["slots"] = {"trailer_length_ft": 26.0, "trailer_width_ft": 8.0}
+    state["slot_sources"] = {"trailer_length_ft": "user", "trailer_width_ft": "user"}
+    say(state, "let's go with a dump trailer, it should be 20 ft long")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Dump",
+            extracted={**_empty_extracted(), "trailer_length_ft": 20.0},
+            slot_answers=[{"slot_name": "trailer_length_ft", "raw_answer": "20ft"}],
+        ),
+    )
+    assert state["category"] == "Dump"
+    assert state["slots"]["trailer_length_ft"] == 20.0
+    assert state["pending_category_change"]["dimensions"] == {"length": 20.0, "width": 8.0}
+    # "start fresh" drops the leftover width but NOT the length they just gave us.
+    say(state, "no, start fresh")
+    apply_with(state, sample_analysis(keep_fields_answer="none", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["slots"]["trailer_length_ft"] == 20.0
+    assert "trailer_width_ft" not in state["slots"]
 
 
 # --- Rule 1: no category chosen yet ------------------------------------------------
@@ -442,7 +471,7 @@ def test_category_change_keep_some_drops_non_dimension_features():
     state["slots"] = {"trailer_length_ft": 20.0, "trailer_width_ft": 8.0, "haul_item": "cattle"}
     state["brand_preference"] = "Galyean"
     state["non_metadata_features"] = ["swing gate"]
-    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[]))
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
     assert state["pending_category_change"]["dimensions"] == {"length": 20.0, "width": 8.0}
     apply_with(state, sample_analysis(keep_fields_answer="some", kept_fields=["trailer_length_ft"], category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
     assert state["category"] == "Dump"
@@ -530,7 +559,10 @@ def test_no_preference_and_width_injection_cases():
     state["category"] = "Equipment"
     analysis = sample_analysis(
         category_mentioned=None,
-        extracted={**sample_analysis().extracted.model_dump(), "numeric_no_preference": ["haul_weight_lbs"]},
+        # No width given anywhere (the default sample carries a 7x14 size answer) —
+        # otherwise there is nothing left to ask.
+        extracted={**_empty_extracted(), "numeric_no_preference": ["haul_weight_lbs"]},
+        slot_answers=[],
         haul_classification={"is_lightweight_utility_load": False, "needs_width_question": True, "haul_item_matched": "tractor"},
     )
     apply_with(state, analysis)

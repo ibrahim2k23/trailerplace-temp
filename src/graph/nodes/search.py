@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from src.config import settings
-from src.domain.slot_map import _SLOT_METADATA_FILTER_MAP, normalize_slot_value
+from src.domain.slot_map import normalize_slot_targets
 from src.graph.apply_analysis import _current_user_text
 from src.search.pinecone_search import search_pinecone_listings
 
@@ -25,10 +25,7 @@ def _build_metadata_filters(state: dict) -> dict[str, Any]:
     for slot_name, value in slots.items():
         if value is None:
             continue
-        for target_key in _SLOT_METADATA_FILTER_MAP.get(slot_name, ()):
-            normalized = normalize_slot_value(category, target_key, value)
-            if normalized is not None:
-                filters[target_key] = normalized
+        filters.update(normalize_slot_targets(category, slot_name, value))
 
     hitch_value = slots.get("hitch_type")
     if isinstance(hitch_value, list) and len(hitch_value) == 1:
@@ -91,6 +88,7 @@ def search_node(state: dict) -> dict:
     state.setdefault("shown_listings", []).extend(results)
     state["shown_urls"] = sorted(set(shown_urls) | new_urls)
     state["last_search_filters"] = metadata_filters
+    state["search_pending"] = False
 
     outcome["listings"] = results
     outcome["search_ran"] = True

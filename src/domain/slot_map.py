@@ -8,7 +8,9 @@ from src.domain.normalizer import normalize_category
 from src.domain.units import (
     _range_candidates,
     parse_dimensions,
+    parse_length_ft,
     parse_length_ft_loose,
+    parse_weight_lbs,
     parse_weight_lbs_loose,
 )
 
@@ -29,6 +31,12 @@ _SLOT_VALUE_KIND = {
     "payload_need": "payload_lbs",
     "total_weight": "payload_lbs",
     "bin_size": "length_ft",
+    # Combined size questions ("size preference (length / width)?"). Their own value is the
+    # LENGTH in feet — the width/height they also carry are stored under their own slots.
+    # Without a kind here they kept the raw sentence ("I'd rather keep it 18ft"), which then
+    # travelled verbatim into the search query text.
+    "cargo_size": "length_ft",
+    "trailer_size": "length_ft",
     "hitch_type": "hitch_type",
     "base_category": "subcategory",
 }
@@ -77,6 +85,78 @@ def normalize_subcategory_answer(raw_answer: Any) -> Any:
         return None
     matches = resolve_categories_from_text(text)
     return matches[0] if matches else None
+
+
+# "I want it in Gooseneck" is a hitch. "I want a Gooseneck" is... also usually a hitch —
+# even though Gooseneck is a real make we carry. We only read it as the make when the
+# customer frames it as one.
+_EXPLICIT_BRAND_RE = re.compile(r"\b(brand|make|manufacturer|manufactured|made\s+by)\b", re.IGNORECASE)
+
+
+def brand_is_actually_a_hitch(brand: Any, user_text: str) -> bool:
+    """True when a 'brand' the extractor reported is really a hitch preference.
+
+    Gooseneck is both a hitch type and a make in our catalogue. Read as a make it silently
+    narrows the search to one manufacturer; read as a hitch it filters on the thing the
+    customer actually cares about. So it is only a make when they say so.
+    """
+    return normalize_hitch_answer(brand) is not None and not _EXPLICIT_BRAND_RE.search(user_text or "")
+
+
+# A "feature" is something we CANNOT filter on. Sizes, weights, hitch type, the Aluminum
+# sub-category and price all have homes of their own; parked in non_metadata_features they
+# are silently dropped from the search instead of filtering it.
+_PRICE_RE = re.compile(
+    r"\$|\b(price[ds]?|pricing|budget|cost|costs|afford\w*)\b|\b(?:under|below|over|up\s+to)\s*\d",
+    re.IGNORECASE,
+)
+_MEASUREMENT_WORDS = re.compile(
+    r"\b(ft|foot|feet|in|inch|inches|lb|lbs|pound|pounds|ton|tons|kg|"
+    r"long|length|wide|width|tall|height|high|weigh\w*|weight|payload|capacity|gvwr|"
+    r"trailer|trailers|about|around|roughly|approx\w*|max|maximum|min|minimum|at|least|"
+    r"under|below|over|up|to|less|more|than|"
+    r"a|an|the|of|is|be|should|only|please|prefer\w*|need|want|k)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_only_a_measurement_or_price(feature: str) -> bool:
+    """True when the phrase says nothing beyond a size, a weight or a price.
+
+    "18 ft long" and "$20,000 budget" are requirements, not features. "16 ft ramps" IS a
+    feature — after the number and the filler words, a real noun ("ramps") survives.
+    """
+    text = str(feature or "").strip().lower()
+    if not text:
+        return True
+    is_measurement = parse_length_ft(text) is not None or parse_weight_lbs(text) is not None
+    is_price = bool(_PRICE_RE.search(text))
+    if not (is_measurement or is_price):
+        return False
+    remainder = _PRICE_RE.sub(" ", text)
+    remainder = re.sub(r"[\d.,'\"×x-]+", " ", remainder)
+    remainder = _MEASUREMENT_WORDS.sub(" ", remainder)
+    return not re.search(r"[a-z]", remainder)
+
+
+def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
+    """Split the extractor's feature list into real features and a hitch preference.
+
+    Returns ``(features_to_keep, hitch_value_or_None)``. A hitch stated as a feature
+    ("gooseneck hitch only") is a filter we own, not a nice-to-have, so it is lifted out;
+    a bare size/weight/price is dropped (its value is already in its own slot).
+    """
+    kept: list[str] = []
+    hitch: Any = None
+    for feature in features or []:
+        found = normalize_hitch_answer(feature)
+        if found:
+            hitch = hitch or found
+            continue
+        if _is_only_a_measurement_or_price(feature):
+            continue
+        kept.append(feature)
+    return kept, hitch
 
 
 _SLOT_METADATA_FILTER_MAP = {
@@ -136,6 +216,32 @@ def normalize_slot_value(category: str, key: str, value: Any) -> Any:
         return parse_weight_lbs_loose(value)
 
     return value
+
+
+_DIMENSION_TARGETS = {"length_ft", "width_ft", "height_ft"}
+
+
+def normalize_slot_targets(category: str, slot_name: str, value: Any) -> dict[str, Any]:
+    """Every Pinecone metadata target this one answer fills, with its parsed number.
+
+    A combined size question ("Do you have a size preference (length / width)?") maps to
+    several dimension targets, but a lone number answering it states ONE of them - and it
+    is the length. Copying that number into width_ft (and height_ft) too would invent a
+    requirement the customer never gave and wreck the fit rerank, so a single number only
+    spreads across the targets when the answer really does carry several dimensions
+    ("8x25", "8x20x7").
+    """
+    targets = _SLOT_METADATA_FILTER_MAP.get(slot_name, ())
+    dimension_targets = set(targets) & _DIMENSION_TARGETS
+    one_number_only = len(dimension_targets) > 1 and parse_dimensions(value) is None
+    filled: dict[str, Any] = {}
+    for target in targets:
+        if one_number_only and target in {"width_ft", "height_ft"}:
+            continue
+        parsed = normalize_slot_value(category, target, value)
+        if parsed is not None:
+            filled[target] = float(parsed) if _is_number(parsed) else parsed
+    return filled
 
 
 def slot_value_kind(slot_name: str) -> str | None:

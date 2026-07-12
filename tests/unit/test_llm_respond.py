@@ -39,6 +39,24 @@ def test_respond_prompt_embeds_canned_strings_and_listings():
     assert "We carry:" in system
 
 
+def test_no_search_this_turn_is_not_presented_as_out_of_stock():
+    # A turn with no search used to render as "LISTINGS ... (0)" / "none", which the model
+    # read as an out-of-stock report and told a mid-qualification customer we had no utility
+    # trailers. Empty must say "no search ran", and the already-shown listings must stay in
+    # the reference block rather than being offered up as this turn's results.
+    analysis = sample_analysis()
+    state = {
+        "category": "Utility",
+        "messages": [{"role": "user", "content": "I'd rather keep it 18ft"}],
+        "shown_listings": _listings("https://example.test/old-livestock"),
+    }
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What will you be hauling?"})
+    assert "NO SEARCH RAN" in system
+    assert "NOT an out-of-stock signal" in system
+    assert "REFERENCE ONLY" in system
+    assert "https://example.test/old-livestock" in system
+
+
 def test_respond_prompt_inventory_match_statuses_and_suppression():
     analysis = sample_analysis(intent="inventory_lookup")
     for status in ("exact", "no_exact", "ambiguous"):
@@ -54,13 +72,23 @@ def test_respond_prompt_inventory_match_statuses_and_suppression():
         assert "do NOT ask for name/email/phone" in system
 
 
-def test_respond_prompt_contact_ask_and_fake_llm():
-    output = ReplyOutput(assistant_text="Hi John", cited_listing_urls=[])
+def test_contact_gate_ask_owns_the_whole_turn():
+    # The opening contact ask must not share the turn with a qualification question — one of
+    # the two always gets ignored, and it is usually ours.
+    output = ReplyOutput(assistant_text="Hi! Who am I speaking with?", cited_listing_urls=[])
     llm = FakeLLM([output])
     analysis = sample_analysis()
-    result = respond_turn(llm, {"messages": [{"role": "user", "content": "hello"}]}, analysis, {"contact_ask": True})
+    state = {"messages": [{"role": "user", "content": "I need a dump trailer"}], "contact_asks": 1}
+    outcome = {
+        "contact_ask": True,
+        "contact_gate_missing": ["name", "email or phone"],
+        "next_question": "What material will you be hauling?",  # must be suppressed
+    }
+    result = respond_turn(llm, state, analysis, outcome)
     assert result == output
-    assert "First-turn contact invite" in llm.calls[0]["system"]
+    system = llm.calls[0]["system"]
+    assert "ASK ONLY FOR CONTACT DETAILS THIS TURN: their name and email or phone" in system
+    assert "What material will you be hauling?" not in system
     assert llm.calls[0]["schema"] is ReplyOutput
 
 

@@ -18,6 +18,9 @@ class SessionState(TypedDict, total=False):
     contact_prompted_initial: bool
     contact_followup_pending: str | None
     contact_declined: bool
+    contact_asks: int
+    contact_gate_closed: bool
+    contact_repeat_charged: bool
     pending_email_actions: list[dict]
     category: str | None
     clarification_key: str | None
@@ -29,6 +32,7 @@ class SessionState(TypedDict, total=False):
     pending_question_slot: str | None
     pending_question_repeats: int
     qualification_complete: bool
+    search_pending: bool
     pending_category_change: dict | None
     pending_category_suggestion: dict | None
     shown_listings: list[dict]
@@ -64,6 +68,9 @@ def new_session_state(session_id: str) -> SessionState:
         "contact_prompted_initial": False,
         "contact_followup_pending": None,
         "contact_declined": False,
+        "contact_asks": 0,
+        "contact_gate_closed": False,
+        "contact_repeat_charged": False,
         "pending_email_actions": [],
         "category": None,
         "clarification_key": None,
@@ -75,6 +82,7 @@ def new_session_state(session_id: str) -> SessionState:
         "pending_question_slot": None,
         "pending_question_repeats": 0,
         "qualification_complete": False,
+        "search_pending": False,
         "pending_category_change": None,
         "pending_category_suggestion": None,
         "shown_listings": [],

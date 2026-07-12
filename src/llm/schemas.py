@@ -59,7 +59,7 @@ class TurnAnalysis(StrictBaseModel):
     intent: Literal[
         "general_question", "category_exploration", "category_selection",
         "feature_request_no_category", "recommendation_request",
-        "qualification_answer", "skip_current", "skip_all_show_results",
+        "qualification_answer", "skip_current", "skip_all_show_results", "show_more_results",
         "requirement_change", "drop_requirements", "category_change",
         "listing_interest", "faq", "team_request_escalation",
         "inventory_lookup", "contact_info_provided", "contact_declined", "smalltalk_other",

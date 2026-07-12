@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src import conversation_store
@@ -13,13 +14,17 @@ from src.domain.defaults import defaults_for
 from src.domain.normalizer import normalize_category
 from src.domain.slot_map import (
     _SLOT_METADATA_FILTER_MAP,
+    brand_is_actually_a_hitch,
     is_recognized_slot_value,
     normalize_answer_for_slot,
-    normalize_slot_value,
+    normalize_hitch_answer,
+    normalize_slot_targets,
+    sanitize_non_metadata_features,
     slot_value_kind,
 )
 from src.domain.trailer_fields import get_trailer_fields
 from src.domain.units import parse_dimensions
+from src.graph.contact_gate import contact_ask_outstanding, update_contact_gate
 from src.llm.schemas import HaulClassification, TurnAnalysis
 
 WIDTH_EXCLUDED_CATEGORIES = {"Roll Off", "Enclosed", "Fiber", "Race Trailer", "Diesel Tank"}
@@ -68,21 +73,26 @@ def _apply_contact(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     if analysis.intent == "contact_declined":
         state["contact_declined"] = True
         state["contact_followup_pending"] = None
+        state["contact_repeat_charged"] = False
+        update_contact_gate(state, gave_contact_this_turn=False)
         return
+    gave_contact = bool(contact.name or contact.email or contact.phone)
     if contact.name:
         state["customer_name"] = contact.name
     if contact.email:
         state["customer_email"] = contact.email
     if contact.phone:
         state["customer_phone"] = contact.phone
-    if contact.name or contact.email or contact.phone:
+    if gave_contact:
         state["contact_followup_pending"] = None
+        state["contact_repeat_charged"] = False
         conversation_store.update_lead_contact(
             session_id=state["session_id"],
             full_name=state.get("customer_name"),
             email=state.get("customer_email"),
             phone=state.get("customer_phone"),
         )
+    update_contact_gate(state, gave_contact_this_turn=gave_contact)
 
 
 def _current_user_text(state: dict[str, Any]) -> str:
@@ -140,7 +150,9 @@ def _kept_dimension_names(kept_fields: list[str]) -> set[str]:
     return names
 
 
-def _switch_category(state: dict[str, Any], new_category: str, kept_dims: dict[str, float]) -> None:
+def _switch_category(
+    state: dict[str, Any], new_category: str, kept_dims: dict[str, float], source: str = "user"
+) -> None:
     """Move to ``new_category``, dropping every feature except the kept measurements.
 
     Metadata slots, non-metadata features, brand, hitch, haul item, injected questions
@@ -163,26 +175,80 @@ def _switch_category(state: dict[str, Any], new_category: str, kept_dims: dict[s
         _set_slot(state, key, value, "default")
     for dim, value in kept_dims.items():
         for key in _DIMENSION_TARGET_SLOTS[dim]:
-            _set_slot(state, key, value)
+            _set_slot(state, key, value, source)
+    # Respond keys off this to keep the reply to the switch + the next question, nothing else.
+    state.setdefault("turn_outcome", {})["category_just_changed"] = new_category
     conversation_store.update_lead_item_of_interest(state["session_id"], new_category)
 
 
+# Marks a measurement that came from the PREVIOUS category rather than from something the
+# customer said about the new one. Only these can be dropped by the keep/drop answer.
+CARRIED_SLOT_SOURCE = "carried"
+
+
 def _begin_category_change(state: dict[str, Any], new_category: str) -> None:
-    """Switch to ``new_category``, pausing to ask which measurements to carry over."""
+    """Move to ``new_category`` now, then ask which old measurements to carry over.
+
+    The switch happens immediately so that anything the customer said in the SAME message
+    ("switch me to an equipment trailer, 20 ft") lands in the new category's slots when
+    extraction runs later this turn — the old code deferred the switch until the keep/drop
+    answer and wiped those values on the way through. The carried measurements are tagged
+    ``carried`` so a later "start fresh" can drop exactly those, and nothing the customer
+    stated for the new category.
+    """
     carried = _carried_dimensions(state.get("slots", {}))
     state["pending_category_suggestion"] = None
+    _switch_category(state, new_category, carried, source=CARRIED_SLOT_SOURCE)
     if carried:
         state["pending_category_change"] = {"new_category": new_category, "dimensions": carried}
+
+
+def _drop_unkept_carried_dimensions(
+    state: dict[str, Any], offered: dict[str, float], kept: set[str]
+) -> None:
+    """Drop the carried-over measurements the customer did not ask to keep.
+
+    A measurement they have since restated themselves is theirs, not a leftover, so it is
+    never dropped here — that is what the ``carried`` source tag distinguishes.
+    """
+    for dim in offered:
+        if dim in kept:
+            continue
+        for key in _DIMENSION_SLOT_KEYS[dim]:
+            if state.get("slot_sources", {}).get(key) == CARRIED_SLOT_SOURCE:
+                state.get("slots", {}).pop(key, None)
+                state.get("slot_sources", {}).pop(key, None)
+
+
+def _refresh_pending_change_dimensions(state: dict[str, Any]) -> None:
+    """Re-read the offered measurements from live slots before we ask about them.
+
+    The customer may have restated one in the very message that changed the category
+    ("...and make it 20 ft"); the keep/drop question must offer 20, not the stale 26.
+    """
+    change = state.get("pending_category_change")
+    if not isinstance(change, dict):
+        return
+    live = _carried_dimensions(state.get("slots", {}))
+    offered = {dim: live[dim] for dim in change.get("dimensions", {}) if dim in live}
+    if offered:
+        change["dimensions"] = offered
     else:
-        _switch_category(state, new_category, {})
+        state["pending_category_change"] = None
 
 
 # Intents where the user is actually shopping (so a category may move). Everything else -
-# general_question, category_exploration, faq, inventory_lookup, smalltalk, ... - is a
-# question ABOUT trailers and must never move the category.
+# general_question, faq, inventory_lookup, smalltalk, ... - is a question ABOUT trailers
+# and must never move the category.
+#
+# category_exploration is in the list on purpose: "I'm looking for a trailer to haul a
+# tractor" is a WANT the model often labels exploration. What separates asking from wanting
+# is is_category_info_only, which _wants_category_action checks first — a genuine "which
+# trailer suits a tractor?" sets that flag and still cannot move the category.
 _CATEGORY_ACTION_INTENTS = {
     "category_selection",
     "category_change",
+    "category_exploration",
     "feature_request_no_category",
     "recommendation_request",
     "qualification_answer",
@@ -275,19 +341,29 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         if analysis.category_confirm_answer == "no":
             return
 
-    # (b) Answer to a pending keep/drop question from a category change.
-    if state.get("pending_category_change") and analysis.keep_fields_answer:
+    # (b) A pending keep/drop question from a category change. The category already moved
+    # when the change was requested; all that is left is to honour the drops.
+    #
+    # It gets exactly ONE turn, answered or not. If the customer replies with something
+    # else entirely ("I think 18ft would be good"), we keep the measurements we offered and
+    # move on — leaving the question pending would block qualification (and therefore every
+    # remaining question) forever.
+    if state.get("pending_category_change"):
         change = state["pending_category_change"]
         offered = change.get("dimensions", {})
-        if analysis.keep_fields_answer == "all":
-            kept = dict(offered)
-        elif analysis.keep_fields_answer == "some":
-            keep_names = _kept_dimension_names(analysis.kept_fields)
-            kept = {dim: value for dim, value in offered.items() if dim in keep_names}
-        else:  # "none"
-            kept = {}
-        _switch_category(state, change["new_category"], kept)
-        return
+        answer = analysis.keep_fields_answer
+        if answer == "some":
+            kept = _kept_dimension_names(analysis.kept_fields)
+        elif answer == "none":
+            kept = set()
+        else:  # "all", or no answer at all — they moved on, so keep what we offered
+            kept = set(offered)
+        _drop_unkept_carried_dimensions(state, offered, kept)
+        state["pending_category_change"] = None
+        if answer:
+            return
+        # No keep/drop answer: this message was about something else, so let the normal
+        # category rules below read it.
 
     # An informational question never moves the category, no matter what it mentions.
     if not _wants_category_action(analysis):
@@ -369,10 +445,9 @@ def _store_slot_answer(state: dict[str, Any], category: str, slot_name: str, raw
     answer for any of these is null (no preference) rather than raw text — free-text
     slots (haul_item and similar) have no kind and are always stored exactly as given.
     """
-    for target_key in _SLOT_METADATA_FILTER_MAP.get(slot_name, ()):
-        parsed = normalize_slot_value(category or "", target_key, raw_answer)
+    for target_key, parsed in normalize_slot_targets(category or "", slot_name, raw_answer).items():
         if _is_number(parsed):
-            _set_slot(state, target_key, float(parsed))
+            _set_slot(state, target_key, parsed)
     _store_dimension_pair(state, category or "", slot_name, raw_answer)
     value = normalize_answer_for_slot(category or "", slot_name, raw_answer)
     if not is_recognized_slot_value(slot_name, value) and is_recognized_slot_value(slot_name, state.get("slots", {}).get(slot_name)):
@@ -388,11 +463,25 @@ def _store_slot_answer(state: dict[str, Any], category: str, slot_name: str, raw
 
 def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     category = state.get("category") or ""
-    if analysis.extracted.brand_preference:
-        state["brand_preference"] = analysis.extracted.brand_preference
-    for feature in analysis.extracted.non_metadata_features:
+    user_text = _current_user_text(state)
+
+    # Features are only the things we cannot filter on. A hitch, a size, a weight or a price
+    # parked in this list is a requirement we would silently fail to apply — lift the hitch
+    # out and drop the rest (their values already live in their own slots).
+    features, hitch_from_features = sanitize_non_metadata_features(analysis.extracted.non_metadata_features)
+    for feature in features:
         if feature not in state.setdefault("non_metadata_features", []):
             state["non_metadata_features"].append(feature)
+
+    if analysis.extracted.brand_preference:
+        brand = analysis.extracted.brand_preference
+        if brand_is_actually_a_hitch(brand, user_text):
+            # "I want a gooseneck" is a hitch, not the Gooseneck make — reading it as a make
+            # would quietly restrict every result to one manufacturer.
+            hitch_from_features = hitch_from_features or normalize_hitch_answer(brand)
+        else:
+            state["brand_preference"] = brand
+
     for key in analysis.extracted.numeric_no_preference:
         _set_slot(state, key, None)
     if analysis.extracted.haul_item:
@@ -402,6 +491,8 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         # "either is fine") is not one — treat it the same as no preference (null).
         hitch = analysis.extracted.hitch_type
         _set_slot(state, "hitch_type", list(hitch) if len(hitch) == 1 else None)
+    if hitch_from_features and not state.get("slots", {}).get("hitch_type"):
+        _set_slot(state, "hitch_type", hitch_from_features)
     numeric_map = {
         "trailer_length_ft": analysis.extracted.trailer_length_ft,
         "trailer_width_ft": analysis.extracted.trailer_width_ft,
@@ -415,6 +506,21 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         if value is not None and (key in valid_slots or key.startswith("trailer_")):
             _set_slot(state, key, value)
     for answer in analysis.slot_answers:
+        # A blank raw_answer is not an answer. Seen live: answering the length question for
+        # Livestock, the extractor ALSO emitted haul_item='', haul_weight_lbs='' and
+        # hitch_type='' — slots Livestock never asks about. Stored, those mark questions
+        # answered that were never asked and put junk like haul_item="" into the search
+        # query text. A slot name we understand nowhere (neither this category's spec nor a
+        # known kind/filter target) is noise too.
+        if not str(answer.raw_answer or "").strip():
+            continue
+        known = (
+            answer.slot_name in valid_slots
+            or slot_value_kind(answer.slot_name) is not None
+            or answer.slot_name in _SLOT_METADATA_FILTER_MAP
+        )
+        if not known:
+            continue
         _store_slot_answer(state, category, answer.slot_name, answer.raw_answer)
     # A question the LLM marked answered must advance even if it was vague/partial and
     # produced no parseable value (spec: loose answer -> null, never re-ask).
@@ -427,14 +533,33 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
 UTILITY_WEIGHT_SLOT = "haul_weight_lbs"
 
 
+# Every slot that can already tell us how wide the trailer needs to be.
+_WIDTH_SLOTS = (INJECTED_WIDTH_SLOT, "trailer_width_ft", "width_ft")
+
+
+def _width_already_known(state: dict[str, Any]) -> bool:
+    """True once the customer has told us a width — as a number, or as an explicit
+    no-preference (a slot present with a null value)."""
+    slots = state.get("slots", {}) or {}
+    return any(key in slots for key in _WIDTH_SLOTS)
+
+
 def _inject_width_question(state: dict[str, Any], haul: HaulClassification) -> None:
     # needs_width_question is a SIZE judgment: the cargo is large/wide/a vehicle, so we
     # need the trailer wide enough — inject the width question. (Independent of weight.)
     category = state.get("category")
     if not category or category in WIDTH_EXCLUDED_CATEGORIES:
         return
-    if haul.needs_width_question and INJECTED_WIDTH_SLOT not in state.setdefault("injected_required_slots", []):
-        state["injected_required_slots"].append(INJECTED_WIDTH_SLOT)
+    injected = state.setdefault("injected_required_slots", [])
+    if _width_already_known(state):
+        # They already gave us a width ("20ft long, 6ft wide"). Asking "how wide is that item
+        # or trailer?" anyway reads as if we weren't listening — and, worse, it keeps
+        # qualification open on a question that is already answered, so the search never runs.
+        if INJECTED_WIDTH_SLOT in injected:
+            injected.remove(INJECTED_WIDTH_SLOT)
+        return
+    if haul.needs_width_question and INJECTED_WIDTH_SLOT not in injected:
+        injected.append(INJECTED_WIDTH_SLOT)
 
 
 def _skip_weight_for_lightweight(state: dict[str, Any], haul: HaulClassification) -> None:
@@ -455,12 +580,19 @@ def _apply_skips_and_repeats(state: dict[str, Any], analysis: TurnAnalysis) -> N
         _mark_skipped(state, pending)
         state["pending_question_slot"] = None
         state["pending_question_repeats"] = 0
-    elif analysis.intent == "skip_all_show_results":
+    elif analysis.intent in {"skip_all_show_results", "show_more_results"}:
         for slot in required_slots_for_state(state):
             if slot not in state.get("slots", {}):
                 _mark_skipped(state, slot)
         state["qualification_complete"] = True
     elif pending and not analysis.answered_current_question and analysis.intent not in {"category_selection", "qualification_answer"}:
+        if contact_ask_outstanding(state):
+            # We interrupted them to ask for contact details, so of course they didn't answer
+            # the qualification question. Charge that detour ONE strike, not one per turn —
+            # otherwise our own detour skips their question out from under them.
+            if state.get("contact_repeat_charged"):
+                return
+            state["contact_repeat_charged"] = True
         state["pending_question_repeats"] = int(state.get("pending_question_repeats", 0)) + 1
         if state["pending_question_repeats"] >= 2:
             _mark_skipped(state, pending)
@@ -480,17 +612,39 @@ def _apply_requirement_changes(state: dict[str, Any], analysis: TurnAnalysis) ->
         state["slot_sources"] = {}
 
 
+def _search_inputs(state: dict[str, Any]) -> str:
+    """Everything a Pinecone search is built from, as a comparable string."""
+    return json.dumps(
+        {
+            "category": state.get("category"),
+            "brand_preference": state.get("brand_preference"),
+            "slots": state.get("slots", {}) or {},
+            "skipped_slots": sorted(state.get("skipped_slots", []) or []),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
 def apply_analysis_to_state(state: dict[str, Any]) -> dict[str, Any]:
     analysis: TurnAnalysis = state["turn"]
     state["turn_outcome"] = {"canned_keys": [], "emails_sent": [], "system_email_triggers": []}
+    search_inputs_before = _search_inputs(state)
     _apply_contact(state, analysis)
     haul = enforce_haul_classification_invariant(analysis.haul_classification)
     state["turn"] = analysis.model_copy(update={"haul_classification": haul})
     if not _apply_clarification(state, state["turn"]):
         _apply_category(state, state["turn"])
     _apply_extraction(state, state["turn"])
+    _refresh_pending_change_dimensions(state)
     _inject_width_question(state, haul)
     _skip_weight_for_lightweight(state, haul)
     _apply_requirement_changes(state, state["turn"])
     _apply_skips_and_repeats(state, state["turn"])
+    if _search_inputs(state) != search_inputs_before:
+        # Something a search is built from moved, so the results on screen are stale. This
+        # stays set until a search actually runs (the change may land several turns before
+        # qualification finishes), and it is what keeps chat-only turns — a listing the
+        # customer likes, their email address — from re-querying Pinecone for nothing.
+        state["search_pending"] = True
     return state
