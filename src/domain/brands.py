@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import difflib
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -108,6 +110,35 @@ def make_prompt_block() -> str:
         category_text = ", ".join(categories) if categories else "category unavailable"
         lines.append(f"- {make}: {category_text}")
     return "\n".join(lines)
+
+
+# Words that appear in a make's name but carry no identifying weight — "trailer" would
+# otherwise match the word "trailer" in almost any message and hand us a brand filter the
+# customer never asked for.
+_GENERIC_MAKE_WORDS = frozenset({"trailer", "trailers", "inc", "llc", "co", "company", "industries", "mfg"})
+
+
+def brand_mentioned_in_text(brand: str, text: str) -> bool:
+    """Did the customer actually NAME this brand in this message?
+
+    The extractor will happily report a make it read off a listing already on screen — so a
+    turn that only hands over an email address comes back with brand_preference="Iron Bull
+    Trailers", which then silently narrows every later search to one manufacturer. A brand is
+    a brand only when they said it, typos included ("dimond c" -> Diamond C).
+    """
+    words = re.findall(r"[a-z0-9&]+", (text or "").lower())
+    brand_words = [
+        word
+        for word in re.findall(r"[a-z0-9&]+", (brand or "").lower())
+        if len(word) >= 3 and word not in _GENERIC_MAKE_WORDS
+    ]
+    if not words or not brand_words:
+        return False
+    return any(
+        word == brand_word or difflib.SequenceMatcher(None, word, brand_word).ratio() >= 0.8
+        for brand_word in brand_words
+        for word in words
+    )
 
 
 def categories_for_make(make: str) -> tuple[str, ...]:

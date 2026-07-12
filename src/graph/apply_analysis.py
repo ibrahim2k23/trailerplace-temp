@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from src import conversation_store
+from src.domain.brands import brand_mentioned_in_text
 from src.domain.categories import (
     category_clarification_question,
     resolve_category_clarification_answer,
@@ -469,6 +470,22 @@ def _store_slot_answer(state: dict[str, Any], category: str, slot_name: str, raw
         _set_slot(state, "trailer_length_ft", value)
 
 
+def _brand_only_points_at_a_listing(state: dict[str, Any], analysis: TurnAnalysis, brand: str) -> bool:
+    """Is this brand name being used to POINT at a listing rather than to ask for that make?
+
+    "I like the Iron Bull one" is how people pick a trailer off a list — it names the make,
+    but it is a finger, not a filter. Recording it as a brand preference would narrow every
+    later search to that one manufacturer on the strength of them liking a single trailer.
+    """
+    if analysis.intent != "listing_interest" and analysis.listing_reference is None:
+        return False
+    for listing in state.get("shown_listings") or []:
+        make = listing.get("make") if isinstance(listing, dict) else getattr(listing, "make", None)
+        if make and brand_mentioned_in_text(str(make), brand):
+            return True
+    return False
+
+
 def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     category = state.get("category") or ""
     user_text = _current_user_text(state)
@@ -487,8 +504,13 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
             # "I want a gooseneck" is a hitch, not the Gooseneck make — reading it as a make
             # would quietly restrict every result to one manufacturer.
             hitch_from_features = hitch_from_features or normalize_hitch_answer(brand)
-        else:
+        elif brand_mentioned_in_text(brand, user_text) and not _brand_only_points_at_a_listing(state, analysis, brand):
             state["brand_preference"] = brand
+        # Otherwise the extractor read the make off a listing already on screen rather than
+        # off the customer. Seen live: a turn that only gave a name and email came back with
+        # brand_preference="Iron Bull Trailers" — which then filtered every later search to
+        # that one manufacturer. A brand preference has to be something they said, and said
+        # as a preference.
 
     for key in analysis.extracted.numeric_no_preference:
         _set_slot(state, key, None)

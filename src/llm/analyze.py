@@ -135,8 +135,18 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   ("show me more", "any others?", "what else do you have?", "more options"). Requirements unchanged.
 - faq: the message asks one of contact_human / financing / trade_in / service_parts / store_info.
 - team_request_escalation: call/meeting scheduling, quote requests, "email me", anything needing a human.
-- listing_interest: references a shown listing ("the second one", "that Iron Bull") -> set listing_reference to its 1-based index.
-- email_triggers: list EVERY email-worthy request in the message: faq, escalation, team_request, listing_interest. One message may contain SEVERAL.
+- listing_interest: references a shown listing -> set listing_reference to its 1-based index in the
+  "Listings shown so far" list above. They may point at it ANY way: by position ("the second one", "the last
+  one"), by MAKE ("the Iron Bull one", "that Diamond C"), by stock number ("the 81382"), or by a detail
+  ("the gooseneck one", "the $9,995 one"). Match it against the shown list and give the index.
+  A make used this way is NOT a brand preference — leave brand_preference null. They are pointing at one
+  trailer, not asking us to only ever show them that manufacturer.
+  If the make is ambiguous (two Iron Bulls on screen) and nothing else narrows it, still set
+  intent=listing_interest but leave listing_reference null rather than guessing.
+- email_triggers: list EVERY email-worthy request made in THIS message: faq, escalation, team_request, listing_interest. One message may contain SEVERAL.
+  Only what they ask for NOW. A request from an earlier turn is already recorded — re-emitting it (because they
+  are still talking about that trailer, or have just given us their email so we can act on it) sends the team
+  the same lead twice. Handing over contact details is not itself a new request: email_triggers stays empty.
 - If intent is faq/team_request_escalation/listing_interest, that request must also appear in email_triggers.
 - If mid-qualification and the message is an interruption: answered_current_question=false and put the interruption verbatim in user_question_to_answer.
 
@@ -209,6 +219,9 @@ category. Only length, width, and payload can carry over (everything else was dr
 - Loose numeric no-preference ("no preference", "flexible", "not sure") -> null value + add the slot name to numeric_no_preference.
 - haul_item: store as the user said it; never over-normalize or discard vague descriptions.
 - Brand: map typos/variants to a canonical known make ("dimond c" -> "Diamond C"); unknown brands verbatim.
+  ONLY when the customer NAMES the brand in THIS message as something they want. Never read a make off a
+  listing we showed them or one they referenced ("I like the 2nd one" states no brand preference — leave
+  brand_preference null). A brand lifted from a listing filters every later search to that one manufacturer.
 - slot_answers: one {{slot_name, raw_answer}} pair for each current-category slot this message ACTUALLY answers.
   raw_answer must be real text the customer gave. NEVER emit a pair with an empty raw_answer, and never list
   a slot the message said nothing about - that marks the question answered and it will never be asked.

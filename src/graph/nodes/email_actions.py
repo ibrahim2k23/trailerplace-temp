@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from src import conversation_store
+from src.domain.brands import brand_mentioned_in_text
+from src.graph.apply_analysis import _current_user_text
 from src.tools import email_sender
 
 logger = logging.getLogger(__name__)
@@ -26,10 +29,40 @@ def _listing_get(listing: Any, key: str, default: Any = "") -> Any:
     return listing.get(key, default) if isinstance(listing, dict) else getattr(listing, key, default)
 
 
+def _listing_index_from_text(shown: list, text: str) -> int | None:
+    """Which shown listing are they pointing at, when they don't use its number?
+
+    People pick a trailer the way they'd point at one on a lot — "the Iron Bull one", "the
+    81382". Only a match that is UNAMBIGUOUS counts: if two Iron Bulls are on screen, "the
+    Iron Bull one" identifies nothing, and we would rather log the interest without a
+    specific trailer than log the wrong one.
+    """
+    lowered = (text or "").lower()
+    if not lowered or not shown:
+        return None
+
+    # A stock number is exact — prefer it over anything else.
+    for index, listing in enumerate(shown, 1):
+        haystack = f"{_listing_get(listing, 'title')} {_listing_get(listing, 'url')}"
+        for stock in re.findall(r"\d{4,6}", haystack):
+            if re.search(rf"(?<!\d){stock}(?!\d)", lowered):
+                return index
+
+    by_make = [
+        index
+        for index, listing in enumerate(shown, 1)
+        if _listing_get(listing, "make") and brand_mentioned_in_text(str(_listing_get(listing, "make")), lowered)
+    ]
+    return by_make[0] if len(by_make) == 1 else None
+
+
 def _resolve_listing_interest(state: dict, trigger: Any) -> dict[str, Any]:
     """Pick the selected/unselected/fallback canned variant (spec §Tools, M7 step 3)."""
     shown = state.get("shown_listings") or []
     ref = getattr(trigger, "listing_reference", None)
+    if not (ref and 1 <= ref <= len(shown)):
+        # They referred to it by make or stock number rather than by position.
+        ref = _listing_index_from_text(shown, _current_user_text(state))
     base = {"kind": "listing_interest", "reason": "Listing Interest", "event_type": "interested_listing", "is_system": False}
     if ref and 1 <= ref <= len(shown):
         listing = shown[ref - 1]
@@ -148,6 +181,25 @@ def _emit_event(state: dict, outcome: dict, resolved: dict[str, Any]) -> None:
         conversation_store.promote_lead_to_hard(state.get("session_id", ""))
 
 
+def _dedupe(resolved: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the same request appearing twice in one batch.
+
+    A trigger stashed while we waited for contact details, plus the extractor helpfully
+    re-emitting that same trigger on the turn the details arrive, is one request — not two.
+    Seen live: the team got the same Listing Interest email twice.
+    """
+    seen: set[tuple] = set()
+    unique: list[dict[str, Any]] = []
+    for event in resolved:
+        key = (event["kind"], event.get("canned_key"), event.get("item_of_interest"), event.get("description"))
+        if key in seen:
+            logger.info("TOOL email: dropping duplicate %s trigger in this batch", event["kind"])
+            continue
+        seen.add(key)
+        unique.append(event)
+    return unique
+
+
 def email_actions_node(state: dict) -> dict:
     """Process every email trigger (customer + system + stashed) under the contact gate.
 
@@ -199,7 +251,7 @@ def email_actions_node(state: dict) -> dict:
 
     # 5. Contact complete → send the whole batch (stashed + new); else stash + ask.
     if _contact_complete(state):
-        to_process = stashed + resolved_new
+        to_process = _dedupe(stashed + resolved_new)
         state["pending_email_actions"] = []
         state["contact_followup_pending"] = None
         for resolved in to_process:
@@ -208,7 +260,7 @@ def email_actions_node(state: dict) -> dict:
         if customer_reasons:
             outcome["email_status"] = f"sent: {customer_reasons}"
     else:
-        state["pending_email_actions"] = stashed + resolved_new
+        state["pending_email_actions"] = _dedupe(stashed + resolved_new)
         missing = _missing_pieces(state)
         # Only customer-initiated triggers ask for contact; system alerts wait silently.
         if has_customer and missing:

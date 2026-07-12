@@ -43,12 +43,7 @@ def inventory_lookup_node(state: dict) -> dict:
         state.get("session_id"), result["match_status"], len(matches), result.get("requested_label"),
     )
 
-    shown_urls = set(state.get("shown_urls", []) or [])
-    new_matches = [item for item in matches if not (item.get("url") and item["url"] in shown_urls)]
-    state.setdefault("shown_listings", []).extend(new_matches)
-    new_urls = {item["url"] for item in new_matches if item.get("url")}
-    state["shown_urls"] = sorted(shown_urls | new_urls)
-
+    # Recorded as shown by respond, from what it actually cited — see nodes/respond.py.
     outcome["listings"] = matches
     outcome["inventory_result"] = result
     outcome["inventory_match_status"] = result["match_status"]

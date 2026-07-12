@@ -66,10 +66,10 @@ def test_matches_appended_and_deduped(monkeypatch):
         _match("https://example.com/1"),
         _match("https://example.com/already-shown"),
     ]
-    # shown_listings/shown_urls only gain the URL that was not already shown.
-    new_shown_urls = [item["url"] for item in state["shown_listings"]]
-    assert new_shown_urls == ["https://example.com/1"]
-    assert set(state["shown_urls"]) == {"https://example.com/already-shown", "https://example.com/1"}
+    # Finding a match is not showing it. Respond records what actually reached the customer
+    # (nodes/respond.py::_record_shown_listings), so the lookup leaves shown_* alone.
+    assert state["shown_listings"] == []
+    assert set(state["shown_urls"]) == {"https://example.com/already-shown"}
 
 
 def test_qualification_state_untouched_by_lookup(monkeypatch):

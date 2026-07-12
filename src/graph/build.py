@@ -38,6 +38,10 @@ _NON_SEARCH_INTENTS = {
     "smalltalk_other",
 }
 
+# Kept off the blocklist above so the opening gate can deliver the request it deferred — but
+# only then. See should_search.
+_CONTACT_INTENTS = {"contact_info_provided", "contact_declined"}
+
 
 def should_search(state: dict) -> bool:
     """Whether this turn earns a Pinecone query.
@@ -57,6 +61,11 @@ def should_search(state: dict) -> bool:
         if turn.intent in _SHOW_RESULTS_INTENTS:
             return True
         if turn.intent in _NON_SEARCH_INTENTS or turn.is_category_info_only:
+            return False
+        if turn.intent in _CONTACT_INTENTS and state.get("shown_urls"):
+            # Handing over contact details searches ONLY when it clears the opening gate and
+            # the results they asked for are still owed. Once results are on screen, an email
+            # address is just an email address — it is not a new query.
             return False
     return bool(state.get("search_pending"))
 

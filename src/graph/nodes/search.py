@@ -84,9 +84,10 @@ def search_node(state: dict) -> dict:
         state.get("session_id"), len(results), brand_relaxed, [r.get("url") for r in results],
     )
 
-    new_urls = {item["url"] for item in results if item.get("url")}
-    state.setdefault("shown_listings", []).extend(results)
-    state["shown_urls"] = sorted(set(shown_urls) | new_urls)
+    # NOT recorded as shown here: respond decides what actually reaches the customer, and it
+    # is respond that records it. Marking them shown from this side told the team we had
+    # presented six trailers the customer never saw, and locked those six out of every later
+    # "show me more".
     state["last_search_filters"] = metadata_filters
     state["search_pending"] = False
 

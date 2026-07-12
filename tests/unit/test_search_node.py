@@ -118,7 +118,10 @@ def test_already_shown_urls_passed_through_for_dedupe(monkeypatch):
     state["shown_urls"] = ["u1"]
     search_module.search_node(state)
     assert calls[0]["already_shown_urls"] == ["u1"]
-    assert set(state["shown_urls"]) == {"u1", "u2"}
+    # Finding a listing is not showing it: respond records what actually reached the
+    # customer (nodes/respond.py::_record_shown_listings), so search leaves this alone.
+    assert set(state["shown_urls"]) == {"u1"}
+    assert [item["url"] for item in state["turn_outcome"]["listings"]] == ["u2"]
 
 
 def test_result_shape_matches_app_listing_parser(monkeypatch):
