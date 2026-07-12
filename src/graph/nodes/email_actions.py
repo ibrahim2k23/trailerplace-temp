@@ -90,16 +90,19 @@ def _contact_complete(state: dict) -> bool:
     return bool(state.get("customer_name")) and bool(state.get("customer_email") or state.get("customer_phone"))
 
 
-def _missing_piece(state: dict) -> str | None:
+def _missing_pieces(state: dict) -> list[str]:
+    """Every contact piece still missing — we ask for all of them at once rather than
+    dragging the customer through one question per piece."""
+    missing: list[str] = []
     if not state.get("customer_name"):
-        return "name"
+        missing.append("name")
     if not (state.get("customer_email") or state.get("customer_phone")):
-        return "contact_method"
-    return None
+        missing.append("email or phone")
+    return missing
 
 
-def _missing_label(missing: str | None) -> str:
-    return "name" if missing == "name" else "email or phone"
+def _missing_label(missing: list[str]) -> str:
+    return " and ".join(missing)
 
 
 def _emit_event(state: dict, outcome: dict, resolved: dict[str, Any]) -> None:
@@ -176,15 +179,25 @@ def email_actions_node(state: dict) -> dict:
             outcome["canned_keys"].append(key)
 
     stashed: list[dict[str, Any]] = list(state.get("pending_email_actions") or [])
+    has_customer = any(not r["is_system"] for r in resolved_new)
 
-    # 3. Declined → drop the whole batch silently, never ask again (spec §Contact-Info Gate).
+    # 3. A customer who ASKS us to act — "I want this trailer", "have someone call me",
+    #    a FAQ — has reopened the question of how we reach them, even if they brushed off
+    #    the opening invite. Ask again for whatever we are missing. (An earlier decline
+    #    still permanently closes the OPENING gate; contact_gate_closed is untouched.)
+    if has_customer and not _contact_complete(state) and state.get("contact_declined"):
+        state["contact_declined"] = False
+
+    # 4. Declined → drop the whole batch silently and reply as normal. Reached when they
+    #    turn down the ask above, or when only system alerts (results_shown) are waiting:
+    #    those never chase a customer for their details.
     if state.get("contact_declined"):
         state["pending_email_actions"] = []
         state["contact_followup_pending"] = None
         outcome["email_status"] = "skipped (user declined)"
         return state
 
-    # 4. Contact complete → send the whole batch (stashed + new); else stash + ask once.
+    # 5. Contact complete → send the whole batch (stashed + new); else stash + ask.
     if _contact_complete(state):
         to_process = stashed + resolved_new
         state["pending_email_actions"] = []
@@ -196,11 +209,11 @@ def email_actions_node(state: dict) -> dict:
             outcome["email_status"] = f"sent: {customer_reasons}"
     else:
         state["pending_email_actions"] = stashed + resolved_new
-        has_customer = any(not r["is_system"] for r in resolved_new)
-        missing = _missing_piece(state)
+        missing = _missing_pieces(state)
         # Only customer-initiated triggers ask for contact; system alerts wait silently.
         if has_customer and missing:
-            state["contact_followup_pending"] = missing
-            outcome["email_status"] = f"deferred — ask once for the missing contact piece(s): {_missing_label(missing)}"
+            state["contact_followup_pending"] = ", ".join(missing)
+            outcome["email_status"] = f"deferred — ask for the missing contact piece(s): {_missing_label(missing)}"
+            outcome["contact_followup_missing"] = missing
 
     return state

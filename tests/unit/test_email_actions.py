@@ -62,7 +62,8 @@ def test_partial_contact_stashes_and_asks(_persistence_off_with_fake_sender):
     # FAQ answer still delivered even though the email waits.
     assert "financing" in outcome["canned_keys"]
     assert outcome["emails_sent"] == []
-    assert result["contact_followup_pending"] == "contact_method"
+    # We name every piece still missing, so one ask covers them all.
+    assert result["contact_followup_pending"] == "email or phone"
     assert len(result["pending_email_actions"]) == 1
     assert "deferred" in outcome["email_status"]
     assert _persistence_off_with_fake_sender.sent == []

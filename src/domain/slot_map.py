@@ -264,12 +264,30 @@ for _kind in ("length_ft", "width_ft", "height_ft", "payload_lbs"):
     if _kind not in _SLOTS_BY_KIND[_kind]:
         _SLOTS_BY_KIND[_kind] += (_kind,)
 
-# Slots that may DONATE a value to a same-kind sibling but must never RECEIVE one:
+# The same is true of the "what are you hauling?" question. Every category asks it under its
+# own name — `haul_item` on Equipment/Utility/Tilt/Flatbed, `haul_material` on Dump,
+# `vehicle_type` on Car Hauler/Race, `use_case` on Enclosed — but the customer only ever tells
+# us once ("random things, wood to pipes to furniture"). These are NOT in _SLOT_VALUE_KIND on
+# purpose: they are free text, and giving them a parse kind would run them through the numeric
+# normalizer and null them out. They only ever share values with each other.
+_CARGO_SLOTS: tuple[str, ...] = (
+    "haul_item",
+    "haul_material",
+    "vehicle_type",
+    "use_case",
+    "fiber_use_case",
+    "equipment_list",
+)
+
+# Slots that may DONATE a value to a sibling but must never RECEIVE one:
 #   trailer_size / cargo_size ask for several numbers at once, so a lone length does not
 #     answer them — we would skip a question the customer never got.
 #   bin_size is a yardage, which only coincides with a length by a business rule; a trailer
 #     length carried in from another category is not a bin size the customer chose.
 _NO_AUTOFILL_SLOTS = frozenset({"trailer_size", "cargo_size", "bin_size"})
+
+# One slot can stand in for another only within its own group.
+_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = tuple(_SLOTS_BY_KIND.values()) + (_CARGO_SLOTS,)
 
 
 def slots_of_kind(kind: str) -> tuple[str, ...]:
@@ -279,19 +297,19 @@ def slots_of_kind(kind: str) -> tuple[str, ...]:
 
 def equivalent_slots(slot_name: str) -> tuple[str, ...]:
     """The other slot names that hold the same fact as ``slot_name``."""
-    kind = _SLOT_VALUE_KIND.get(slot_name) or (slot_name if slot_name in _SLOTS_BY_KIND else None)
-    if kind is None:
-        return ()
-    return tuple(name for name in _SLOTS_BY_KIND.get(kind, ()) if name != slot_name)
+    siblings: list[str] = []
+    for group in _ALIAS_GROUPS:
+        if slot_name in group:
+            siblings.extend(name for name in group if name != slot_name)
+    return tuple(dict.fromkeys(siblings))
 
 
 def can_autofill_slot(slot_name: str) -> bool:
-    return slot_name not in _NO_AUTOFILL_SLOTS and _SLOT_VALUE_KIND.get(slot_name) in {
-        "length_ft",
-        "width_ft",
-        "height_ft",
-        "payload_lbs",
-    }
+    if slot_name in _NO_AUTOFILL_SLOTS:
+        return False
+    if slot_name in _CARGO_SLOTS:
+        return True
+    return _SLOT_VALUE_KIND.get(slot_name) in {"length_ft", "width_ft", "height_ft", "payload_lbs"}
 
 
 def is_recognized_slot_value(slot_name: str, value: Any) -> bool:

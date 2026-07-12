@@ -563,8 +563,14 @@ def _fill_category_slot_aliases(state: dict[str, Any]) -> None:
             continue
         for sibling in equivalent_slots(slot):
             value = slots.get(sibling)
+            source = state.get("slot_sources", {}).get(sibling, "user")
             if _is_number(value):
-                _set_slot(state, slot, float(value), state.get("slot_sources", {}).get(sibling, "user"))
+                _set_slot(state, slot, float(value), source)
+                break
+            # The cargo question is free text — "random things, wood to pipes to furniture"
+            # answers Dump's haul_material just as it answered haul_item.
+            if isinstance(value, str) and value.strip():
+                _set_slot(state, slot, value, source)
                 break
 
 

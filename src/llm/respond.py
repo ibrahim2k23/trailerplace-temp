@@ -143,6 +143,22 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         lines.append(f"- Canned text(s) - EACH must appear verbatim or near-verbatim: {canned}")
     if _outcome_get(turn_outcome, "email_status"):
         lines.append(f"- Email status: {_outcome_get(turn_outcome, 'email_status')}.")
+    followup_missing = _outcome_get(turn_outcome, "contact_followup_missing", []) or []
+    if followup_missing:
+        wanted = " and ".join(followup_missing)
+        lines.append(
+            f"- They asked us to DO something (log their interest, set up a call, answer an FAQ) and we cannot "
+            f"pass it to the team without their {wanted}. Do the thing they asked FIRST (answer them, confirm the "
+            f"listing, give the store number), THEN ask for their {wanted} in one short sentence so the team can "
+            "follow up. Ask for every missing piece together, not one per turn. If they say no, we drop it and "
+            "never chase them - so ask once, warmly, and do not pressure."
+        )
+    if _outcome_get(turn_outcome, "email_status") == "skipped (user declined)":
+        lines.append(
+            "- They declined to share contact details, so nothing was sent to the team. Answer them normally and "
+            "helpfully (store number, website, next steps they can take themselves). Do NOT ask for their details "
+            "again this turn, and do not imply anyone will call them back."
+        )
     if analysis.user_question_to_answer:
         lines.append(f'- Interruption to answer first: "{analysis.user_question_to_answer}"')
         if _outcome_get(turn_outcome, "next_question"):

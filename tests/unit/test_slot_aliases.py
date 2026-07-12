@@ -88,6 +88,78 @@ def test_features_given_before_a_category_land_in_it_afterwards():
     assert next_question(state) == "What type of vehicle will you be hauling (make/model or class)?"
 
 
+def test_the_cargo_question_is_one_question_under_many_names():
+    assert "haul_material" in equivalent_slots("haul_item")
+    assert "vehicle_type" in equivalent_slots("haul_item")
+    assert "use_case" in equivalent_slots("haul_item")
+    assert "haul_item" in equivalent_slots("haul_material")
+    # It never leaks across groups: cargo is not a measurement.
+    assert "trailer_length_ft" not in equivalent_slots("haul_item")
+
+
+def test_cargo_given_before_a_category_answers_that_categorys_cargo_question():
+    # Seen live: "a trailer to haul random things, ~6000 lbs" -> haul_item. Then they pick
+    # Dump, whose cargo question is `haul_material`, and we asked "what material will you be
+    # hauling?" — a question they had just answered.
+    state = new_session_state("s1")
+    say(state, "a trailer to haul random things, around 6000 lbs")
+    apply_with(
+        state,
+        sample_analysis(intent="feature_request_no_category", category_mentioned=None,
+                        extracted={**_empty_extracted(), "haul_item": "random things", "payload_lbs": 6000.0},
+                        slot_answers=[]),
+    )
+    say(state, "I think I'd like a dump trailer")
+    apply_with(state, sample_analysis(intent="category_selection", category_mentioned="Dump",
+                                      extracted=_empty_extracted(), slot_answers=[]))
+    assert state["slots"]["haul_material"] == "random things"
+    assert next_question(state) is None  # nothing left to ask — Dump is fully qualified
+    assert state["qualification_complete"] is True
+
+
+def test_cargo_maps_to_vehicle_type_and_use_case_too():
+    car = new_session_state("s1")
+    say(car, "I need to haul my Mustang, 3500 lbs, 16ft")
+    apply_with(car, sample_analysis(intent="feature_request_no_category", category_mentioned=None,
+                                    extracted={**_empty_extracted(), "haul_item": "my Mustang",
+                                               "payload_lbs": 3500.0, "trailer_length_ft": 16.0},
+                                    slot_answers=[]))
+    say(car, "a car hauler then")
+    apply_with(car, sample_analysis(intent="category_selection", category_mentioned="Car Hauler",
+                                    extracted=_empty_extracted(), slot_answers=[]))
+    assert car["slots"]["vehicle_type"] == "my Mustang"
+    assert car["slots"]["vehicle_length_ft"] == 16.0
+    assert next_question(car) is None
+
+    enclosed = new_session_state("s2")
+    say(enclosed, "something to carry my woodworking tools")
+    apply_with(enclosed, sample_analysis(intent="feature_request_no_category", category_mentioned=None,
+                                         extracted={**_empty_extracted(), "haul_item": "woodworking tools"},
+                                         slot_answers=[]))
+    say(enclosed, "an enclosed trailer")
+    apply_with(enclosed, sample_analysis(intent="category_selection", category_mentioned="Enclosed",
+                                         extracted=_empty_extracted(), slot_answers=[]))
+    assert enclosed["slots"]["use_case"] == "woodworking tools"
+    # A cargo description does not answer a SIZE question — that one still gets asked.
+    assert next_question(enclosed) == "What's the rough size of the cargo you need to fit (length × width × height)?"
+
+
+def test_a_hitch_named_before_the_category_answers_equipments_hitch_question():
+    state = new_session_state("s1")
+    say(state, "something gooseneck, 20ft, 9000 lbs")
+    apply_with(state, sample_analysis(intent="feature_request_no_category", category_mentioned=None,
+                                      extracted={**_empty_extracted(), "hitch_type": ["Gooseneck"],
+                                                 "trailer_length_ft": 20.0, "payload_lbs": 9000.0},
+                                      slot_answers=[]))
+    say(state, "make it an equipment trailer for my skid steer")
+    apply_with(state, sample_analysis(intent="category_selection", category_mentioned="Equipment",
+                                      extracted={**_empty_extracted(), "haul_item": "skid steer"}, slot_answers=[]))
+    assert state["slots"]["hitch_type"] == ["Gooseneck"]
+    assert state["slots"]["haul_length_ft"] == 20.0
+    # Equipment asks for hitch — we already have it, so it is not asked again.
+    assert next_question(state) is None
+
+
 def test_a_skipped_question_stays_skipped():
     # They declined to give a length. A number arriving under another name is not consent to
     # fill it in for them.
