@@ -5,7 +5,6 @@ from typing import Any
 
 from src.config import settings
 from src.domain.slot_map import normalize_slot_targets
-from src.graph.apply_analysis import _current_user_text
 from src.search.pinecone_search import search_pinecone_listings
 
 logger = logging.getLogger(__name__)
@@ -43,19 +42,21 @@ def search_node(state: dict) -> dict:
     category = state.get("category")
     slots = state.get("slots", {}) or {}
     metadata_filters = _build_metadata_filters(state)
-    user_message = _current_user_text(state)
+    # Every non-searchable preference they have voiced so far (sliding gates, tandem axle, ramp),
+    # not just this turn's — the embedding query is the customer's full spec, not their last line.
+    requested_features = list(state.get("non_metadata_features", []) or [])
     shown_urls = state.get("shown_urls", []) or []
 
     logger.info(
-        "TOOL search: session=%s category=%s filters=%s already_shown=%d",
-        state.get("session_id"), category, metadata_filters, len(shown_urls),
+        "TOOL search: session=%s category=%s filters=%s features=%s already_shown=%d",
+        state.get("session_id"), category, metadata_filters, requested_features, len(shown_urls),
     )
 
     results = search_pinecone_listings(
         category=category,
         slots=slots,
         metadata_filters=metadata_filters,
-        user_message=user_message,
+        requested_features=requested_features,
         already_shown_urls=shown_urls,
         top_k=settings.search_top_k,
         max_recommendations=settings.search_max_recommendations,
@@ -72,7 +73,7 @@ def search_node(state: dict) -> dict:
             category=category,
             slots=slots,
             metadata_filters=relaxed_filters,
-            user_message=user_message,
+            requested_features=requested_features,
             already_shown_urls=shown_urls,
             top_k=settings.search_top_k,
             max_recommendations=settings.search_max_recommendations,

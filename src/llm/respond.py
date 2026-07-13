@@ -75,9 +75,12 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
     if _outcome_get(turn_outcome, "clarification_question"):
         lines.append(f'- Clarification question to ask: "{_outcome_get(turn_outcome, "clarification_question")}"')
     if _outcome_get(turn_outcome, "next_question"):
-        lines.append(f'- Next qualification question to ask: "{_outcome_get(turn_outcome, "next_question")}"')
+        lines.append(f'- The ONE thing to find out this turn: "{_outcome_get(turn_outcome, "next_question")}"')
         lines.append(
-            "  Your reply MUST end by asking exactly this question, once. It is the only question in the reply."
+            "  Ask for it ONCE, at the end of your reply, in your own words - the wording above is the "
+            "information we need, not a script, so phrase it the way an experienced salesperson would in "
+            "this conversation. Do NOT lead up to it with a paraphrase of the same question and then repeat "
+            "it verbatim: the reply contains exactly one question mark, and no other question."
         )
     changed_to = _outcome_get(turn_outcome, "category_just_changed")
     if changed_to and _outcome_get(turn_outcome, "next_question"):
@@ -89,9 +92,10 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         )
     if _outcome_get(turn_outcome, "next_question") and not _state_get(state, "category"):
         lines.append(
-            "- No trailer category chosen yet: briefly acknowledge anything they told us (name, size, etc.), then simply ask "
-            "what TYPE of trailer they're looking for. Mention a handful of example categories from our lineup "
-            f"({advertised_categories_line()}) and add that we carry many more. "
+            "- No trailer category chosen yet: briefly acknowledge anything they told us (name, size, cargo), then ask "
+            "the ONE question above - which TYPE of trailer they want - naming a handful of example categories from our "
+            f"lineup ({advertised_categories_line()}) inside that same question, and add that we carry many more. "
+            "The category ask happens once, in one sentence; do not set it up first and then ask it again. "
             "Do NOT mention listings, stock, or availability, and do NOT say we do or don't have something - no search has run yet."
         )
     if int(_state_get(state, "pending_question_repeats", 0) or 0) == 1:
@@ -163,9 +167,9 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         lines.append(f'- Interruption to answer first: "{analysis.user_question_to_answer}"')
         if _outcome_get(turn_outcome, "next_question"):
             lines.append(
-                "  Answer it in 1-2 sentences, then re-ask the pending qualification question in the SAME reply. "
-                "Never end the turn without re-asking it - an unanswered question they were never re-asked is a "
-                "question we lose."
+                "  Answer it in 1-2 sentences, then ask the pending qualification question - once, at the end of "
+                "the SAME reply. Never end the turn without asking it: an unanswered question they were never "
+                "asked again is a question we lose."
             )
     return lines
 
@@ -220,8 +224,8 @@ Write the next assistant reply. Warm, concise, conversational; never pushy or re
 {decision_lines}
 
 === RULES ===
-- Answer the user's question FIRST, then re-ask the pending qualification question once, in the same reply. Answering without re-asking loses the question.
-- When a "Next qualification question" is given above, the reply ends with it. Ask that one question and no other.
+- Answer the user's question FIRST, then ask the pending qualification question once, in the same reply. Answering without asking it loses the question.
+- ONE question per reply. When a question is given above, the reply ends with it, asked a single time and in your own natural words - never the same ask twice (once paraphrased, once verbatim), never a second question tacked on. Any question we listed is the information we need, not a script to recite.
 - Never re-ask anything already collected, skipped, or marked no-preference.
 - When presenting listings: show EVERY listing in the block below, in the exact order given - never omit, add, or reorder any, and never filter by how well a size or feature matches. For EVERY listing shown, put its exact URL in cited_listing_urls.
 - Optional fields (width, payload, hitch, height) are missing on many trailers - that is expected. Show the fields that are present and skip the missing lines; a missing field is NEVER a reason to drop a listing.

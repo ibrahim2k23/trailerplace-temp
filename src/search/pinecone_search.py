@@ -160,22 +160,135 @@ def _metadata_filter(
     return {"$and": filters}
 
 
+# The query vector is compared against listing vectors built by normalizer.build_embedding_text
+# ("Title | Make: X | Category: Livestock | Length: 24 ft 0 in | ... | Details: ..."), so the query
+# mirrors that shape: the customer's requirements as a spec sheet, not as chat.
+_SLOT_QUERY_LABELS: dict[str, str] = {
+    "make": "Make",
+    "brand": "Make",
+    "subcategory": "Subcategory",
+    "hitch_type": "Hitch Type",
+    "color": "Color",
+    "axles": "Axles",
+    "trailer_material": "Material",
+    "floor": "Floor",
+    "length_ft": "Length",
+    "trailer_length_ft": "Length",
+    "haul_length_ft": "Length",
+    "vehicle_length_ft": "Length",
+    "trailer_size": "Length",
+    "width_ft": "Width",
+    "trailer_width_ft": "Width",
+    "item_or_trailer_width_ft": "Width",
+    "height_ft": "Height",
+    "payload_lbs": "Payload Capacity",
+    "payload_need": "Payload Capacity",
+    "haul_weight_lbs": "Payload Capacity",
+    "total_weight": "Payload Capacity",
+}
+
+_QUERY_LABEL_ORDER = [
+    "Make",
+    "Category",
+    "Subcategory",
+    "Hitch Type",
+    "Length",
+    "Width",
+    "Height",
+    "Payload Capacity",
+    "Color",
+    "Axles",
+    "Material",
+    "Floor",
+]
+
+_QUERY_LABEL_UNITS = {"Length": "ft", "Width": "ft", "Height": "ft", "Payload Capacity": "lbs"}
+
+
+def _join_values(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(item).strip() for item in value if str(item or "").strip())
+    return str(value).strip()
+
+
+def _format_field_value(label: str, value: Any) -> str:
+    text = _join_values(value)
+    unit = _QUERY_LABEL_UNITS.get(label)
+    if not unit or not text:
+        return text
+    if isinstance(value, bool):
+        return text
+    if isinstance(value, (int, float)):
+        return f"{value:g} {unit}"
+    return f"{text} {unit}" if re.fullmatch(r"\d+(\.\d+)?", text) else text
+
+
+def _add_detail(details: list[str], text: str) -> None:
+    """Add a free-text preference, keeping the most specific phrasing of it.
+
+    Slot and feature lists overlap ("gate preferences: sliding gates" from a slot, "sliding
+    gates" from the feature list); repeating the same words dilutes the embedding.
+    """
+    text = text.strip(" ;,")
+    if not text:
+        return
+    lowered = text.lower()
+    if any(lowered in existing.lower() for existing in details):
+        return
+    details[:] = [existing for existing in details if existing.lower() not in lowered]
+    details.append(text)
+
+
+def _detail_phrase(key: str, value: Any) -> str:
+    text = _join_values(value)
+    if not text:
+        return ""
+    label = key.replace("_", " ").strip()
+    if not label or label.lower() in text.lower() or text.lower() in label.lower():
+        return text
+    return f"{label}: {text}"
+
+
 def _query_text(
     category: str | None,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any],
-    user_message: str,
+    requested_features: list[str] | None = None,
 ) -> str:
-    parts = [user_message.strip()]
+    """Embed everything the customer asked for - and nothing else.
+
+    The raw user message is deliberately NOT prepended: it is one turn of chat ("20ft sounds
+    good to me"), it drowns the accumulated requirements in conversational filler, and every
+    requirement it does carry is already in slots/filters by the time we search.
+    """
+    fields: dict[str, str] = {}
+    details: list[str] = []
+
     if category:
-        parts.append(f"Category: {category}")
-    for key, value in sorted((slots or {}).items()):
-        if value not in (None, "", [], {}):
-            parts.append(f"{key}: {value}")
-    for key, value in sorted((metadata_filters or {}).items()):
-        if value not in (None, "", [], {}):
-            parts.append(f"filter_{key}: {value}")
-    return " | ".join(p for p in parts if p)
+        fields["Category"] = str(category).strip()
+
+    # Filters first, then slots: a filter is the resolved value, a slot may be the raw phrasing.
+    for source in (metadata_filters or {}, slots or {}):
+        for key, value in source.items():
+            if value in (None, "", [], {}):
+                continue
+            label = _SLOT_QUERY_LABELS.get(key)
+            if label:
+                text = _format_field_value(label, value)
+                if text:
+                    fields.setdefault(label, text)
+                continue
+            _add_detail(details, _detail_phrase(key, value))
+
+    for feature in requested_features or []:
+        _add_detail(details, str(feature or ""))
+
+    ordered = [label for label in _QUERY_LABEL_ORDER if fields.get(label)]
+    ordered += [label for label in fields if label not in _QUERY_LABEL_ORDER]
+    parts = [f"{label}: {fields[label]}" for label in ordered]
+    if details:
+        parts.append(f"Details: {'; '.join(details)}")
+    return " | ".join(parts)
 
 
 def _clean_match(match: Any) -> dict[str, Any]:
@@ -661,13 +774,14 @@ def search_pinecone_listing_result(
     category: str | None,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any] | None = None,
-    user_message: str,
+    requested_features: list[str] | None = None,
     already_shown_urls: list[str] | None = None,
     top_k: int | None = None,
     max_recommendations: int | None = None,
 ) -> PineconeListingSearchResult:
     metadata_filters = metadata_filters or {}
-    query = _query_text(category, slots, metadata_filters, user_message)
+    # "trailer" only when we know literally nothing — the embeddings API rejects an empty input.
+    query = _query_text(category, slots, metadata_filters, requested_features) or "trailer"
     top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
     max_recommendations = max_recommendations or int(os.getenv("SEARCH_MAX_RECOMMENDATIONS", "5"))
     metadata_filter = _metadata_filter(category, slots, metadata_filters) or None
@@ -749,7 +863,7 @@ def search_pinecone_listings(
     category: str | None,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any] | None = None,
-    user_message: str,
+    requested_features: list[str] | None = None,
     already_shown_urls: list[str] | None = None,
     top_k: int | None = None,
     max_recommendations: int | None = None,
@@ -758,7 +872,7 @@ def search_pinecone_listings(
         category=category,
         slots=slots,
         metadata_filters=metadata_filters,
-        user_message=user_message,
+        requested_features=requested_features,
         already_shown_urls=already_shown_urls,
         top_k=top_k,
         max_recommendations=max_recommendations,
