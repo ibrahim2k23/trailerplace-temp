@@ -86,6 +86,23 @@ def test_brand_is_actually_a_hitch_reads_the_framing():
     assert not brand_is_actually_a_hitch("Galyean", "I like Galyean")
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("insulated enclosed trailer", "insulated"),
+        ("black 16 ft Cargo Craft enclosed trailer with a winch", "winch"),
+        ("Diamond C equipment trailer with a rear ramp door", "rear ramp door"),
+        ("gooseneck livestock trailer with butterfly gates", "butterfly gates"),
+        ("white utility trailer", None),
+    ],
+)
+def test_feature_sanitizer_removes_metadata_identity_words(raw, expected):
+    kept, hitch = sanitize_non_metadata_features([raw])
+    assert kept == ([expected] if expected else [])
+    if raw.startswith("gooseneck"):
+        assert hitch == ["Gooseneck"]
+
+
 def test_combined_size_slots_store_feet_not_a_sentence():
     # trailer_size / cargo_size had no value kind, so they kept the raw sentence — which then
     # travelled verbatim into the Pinecone query text.

@@ -240,15 +240,35 @@ Gooseneck is BOTH a hitch type and one of the makes we carry. Read it wrong and 
 - Only Bumper Pull / Gooseneck exist, and only when the customer names ONE clearly; "either"/"any"/no clear
   preference -> null value + add "hitch_type" to numeric_no_preference (never both in the list).
 
-=== NON-METADATA FEATURES - WHAT MAY *NOT* GO IN THERE ===
-non_metadata_features is ONLY for preferences we cannot search on: ramps, winch, LED lights, colour, side rails,
-gates, toolboxes, spare tire, escape door, finish, and the like.
-NEVER put any of these in it - each has its own field, and in the feature list it is silently ignored:
-- a length, width or height ("18 ft long", "8 ft wide")            -> extracted.trailer_length_ft / _width_ft / _height_ft
-- a weight or payload ("7000 lbs", "2 tons")                       -> extracted.payload_lbs
-- a hitch type ("gooseneck hitch only", "bumper pull")             -> extracted.hitch_type
-- the Aluminum sub-category ("aluminum utility", "enclosed")       -> the base_category slot answer
-- a price or budget ("under $25k", "cheapest one")                 -> neither; leave it out entirely
+=== NON-METADATA FEATURES - STRICT FEATURE-ONLY EXTRACTION ===
+`non_metadata_features` contains ONLY the actual equipment, construction, convenience, or functional
+feature the customer requested and which has no dedicated metadata field. Examples: "insulated", "rear
+ramp door", "electric winch", "LED interior lights", "side rails", "butterfly gates", "toolbox",
+"spare tire", "escape door".
+
+Return each feature as a short, self-contained value. Remove every word that merely describes the trailer's
+identity or its searchable metadata. Never copy the surrounding noun phrase verbatim.
+- "an insulated enclosed trailer"                              -> ["insulated"]
+- "a black 16 ft Cargo Craft enclosed trailer with a winch"   -> ["winch"]
+- "a Diamond C equipment trailer with a rear ramp door"        -> ["rear ramp door"]
+- "an aluminum utility trailer with LED lights"                -> ["LED lights"]
+- "gooseneck livestock trailer with butterfly gates"           -> ["butterfly gates"]
+
+NEVER include any of the following in `non_metadata_features`, alone or attached to a real feature:
+- trailer identity nouns: "trailer", "trailers", model year, stock number, title, or model name
+- any known make/brand from KNOWN MAKES/BRANDS
+- any category, category synonym, or sub-category from TRAILER CATEGORIES (for example "enclosed",
+  "equipment", "utility", "livestock", "tilt", "aluminum")
+- a hitch type ("gooseneck", "bumper pull", "tag-along") -> extracted.hitch_type
+- a length, width, or height -> extracted.trailer_length_ft / _width_ft / _height_ft
+- a weight, payload, capacity, or GVWR -> extracted.payload_lbs when applicable
+- a colour ("black", "white", "silver", etc.)
+- a price or budget ("under $25k", "cheapest one")
+
+Do not combine an actual feature with the current/mentioned category: output "insulated", never
+"insulated enclosed". Do not repeat or expand a feature from earlier conversation context. Extract only
+features newly stated in the LATEST USER MESSAGE; already-collected features remain in state automatically.
+If removing metadata leaves no real functional feature, return an empty list.
 
 === HAUL CLASSIFICATION (judge the cargo's WEIGHT and SIZE independently) ===
 These two flags govern two different qualification questions. When the user mentions what they plan to haul:

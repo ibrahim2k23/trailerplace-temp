@@ -119,6 +119,62 @@ _MEASUREMENT_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Defensive cleanup for occasional extractor leakage. The Analyze prompt is the
+# primary classifier, but category/make words must not become feature requirements
+# even when the model returns a surrounding noun phrase such as "insulated enclosed
+# trailer". Longest phrases are removed first.
+_NON_FEATURE_IDENTITY_PHRASES = (
+    "race trailer", "car hauler", "toy hauler", "roll off", "roll-off",
+    "diesel tank", "fuel tank", "tank trailer", "box trailer", "v nose", "v-nose",
+    "command trailer", "flat bed", "flatbed", "dump trailer", "full tilt",
+    "enclosed", "equipment", "utility", "fiber", "livestock", "tilt", "dump",
+    "aluminum", "subcategory", "category", "trailer", "trailers",
+)
+_NON_FEATURE_COLOURS = (
+    "black", "white", "gray", "grey", "silver", "red", "blue", "green",
+    "yellow", "orange", "brown", "tan", "beige", "charcoal", "bronze",
+    "gold", "maroon", "burgundy", "purple",
+)
+_FEATURE_FILLER_RE = re.compile(
+    r"\b(?:a|an|the|with|and|or|in|on|of|by|from|made|year|model|stock|number|"
+    r"hitch|only|preferred|preference|please)\b",
+    re.IGNORECASE,
+)
+_FEATURE_DIMENSION_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:ft|foot|feet|in|inch|inches|lb|lbs|pound|pounds|tons?|kg)\b",
+    re.IGNORECASE,
+)
+
+
+def _remove_phrase(text: str, phrase: str) -> str:
+    words = [re.escape(word) for word in re.findall(r"\w+", phrase)]
+    if not words:
+        return text
+    pattern = r"(?<!\w)" + r"[\s-]+".join(words) + r"(?!\w)"
+    return re.sub(pattern, " ", text, flags=re.IGNORECASE)
+
+
+def _clean_feature_only_value(value: Any) -> str:
+    """Remove searchable trailer identity/metadata from a feature noun phrase."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    # Lazy import avoids making brand inventory loading part of module import.
+    from src.domain.brands import known_makes
+
+    removable = sorted(
+        (*known_makes(), *_NON_FEATURE_IDENTITY_PHRASES, *_NON_FEATURE_COLOURS),
+        key=len,
+        reverse=True,
+    )
+    for phrase in removable:
+        text = _remove_phrase(text, str(phrase))
+    text = re.sub(r"\b(?:19|20)\d{2}\b", " ", text)
+    text = _FEATURE_DIMENSION_RE.sub(" ", text)
+    text = _FEATURE_FILLER_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(" ,;:-")
+
 
 def _is_only_a_measurement_or_price(feature: str) -> bool:
     """True when the phrase says nothing beyond a size, a weight or a price.
@@ -152,10 +208,15 @@ def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
         found = normalize_hitch_answer(feature)
         if found:
             hitch = hitch or found
-            continue
         if _is_only_a_measurement_or_price(feature):
             continue
-        kept.append(feature)
+        cleaned = _clean_feature_only_value(feature)
+        if (
+            cleaned
+            and not _is_only_a_measurement_or_price(cleaned)
+            and cleaned.casefold() not in {value.casefold() for value in kept}
+        ):
+            kept.append(cleaned)
     return kept, hitch
 
 

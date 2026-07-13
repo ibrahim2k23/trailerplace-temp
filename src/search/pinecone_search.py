@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from openai import OpenAI
 from pinecone import Pinecone
+from rapidfuzz import fuzz
 
 from src.domain.brands import make_filter_values
 from src.domain.make_aliases import MAKE_ALIASES as MAKE_ALIAS_MAP
@@ -55,6 +56,12 @@ MAKE_RERANK_VERBOSE_LOGS = (os.getenv("MAKE_RERANK_VERBOSE_LOGS") or "0").strip(
     "yes",
     "on",
 }
+FEATURE_RERANK_WEIGHT = 0.80
+FIT_RERANK_WEIGHT = 0.20
+FEATURE_MATCH_THRESHOLD = 0.70
+FEATURE_RERANK_VERBOSE_LOGS = (
+    os.getenv("FEATURE_RERANK_VERBOSE_LOGS") or "1"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Stage precedence:
 # 1) fit rerank (length-first, strict no under-length)
@@ -297,6 +304,9 @@ def _clean_match(match: Any) -> dict[str, Any]:
     if score is None and isinstance(match, dict):
         score = match.get("score")
     price = metadata.get("price_display") or metadata.get("price")
+    raw_features = metadata.get("features") or []
+    if isinstance(raw_features, str):
+        raw_features = [raw_features]
     return {
         "title": metadata.get("title") or "",
         "condition": metadata.get("condition") or "New",
@@ -321,6 +331,13 @@ def _clean_match(match: Any) -> dict[str, Any]:
         "floor": metadata.get("floor"),
         "url": metadata.get("url") or "",
         "relevance_score": score,
+        # Kept only while ranking. search_pinecone_listings strips this internal
+        # evidence before results enter conversation state or the API response.
+        "features": [
+            str(value).strip()
+            for value in raw_features
+            if str(value or "").strip()
+        ],
         "match_evidence_text": metadata.get("match_evidence_text") or "",
     }
 
@@ -577,6 +594,7 @@ def _rerank_listings_by_fit(
     extreme_ratio: float,
     length_weight: float,
     missing_dim_penalty: float,
+    retain_all: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     needs_present = any(x is not None for x in (required_length_ft, required_payload_lbs, required_width_ft, required_height_ft))
     if not listings or not needs_present:
@@ -717,18 +735,26 @@ def _rerank_listings_by_fit(
             }
         )
 
-    # Strict policy: prefer non-failing entries first.
+    # The legacy/no-feature path drops failing entries whenever a non-failing
+    # option exists. Feature-aware search sets retain_all=True so every hard-
+    # filtered Pinecone candidate reaches the combined 80/20 scorer.
     nonfailing = [e for e in entries if e["fail_count"] == 0]
-    fallback_pool = entries if not nonfailing else nonfailing
+    fallback_pool = entries if retain_all or not nonfailing else nonfailing
     ranked_entries = sorted(
         fallback_pool,
         key=lambda e: (
+            e["fail_count"] if retain_all else 0,
             e["missing_count"],
             e["length_overage"],
             e["penalty"],
             -e["base_score"],
         ),
     )
+    fit_rank_by_fetch_pos = {
+        entry["fetch_pos"]: rank for rank, entry in enumerate(ranked_entries, 1)
+    }
+    for entry in entries:
+        entry["fit_rank"] = fit_rank_by_fetch_pos.get(entry["fetch_pos"])
 
     if RERANK_VERBOSE_LOGS:
         decision_rank = {id(e): i for i, e in enumerate(ranked_entries, 1)}
@@ -766,6 +792,313 @@ def _rerank_listings_by_fit(
         "required_width_ft": required_width_ft,
         "required_height_ft": required_height_ft,
         "candidate_count": len(entries),
+        "retained_candidate_count": len(ranked_entries),
+        "fit_entries": entries if retain_all else [],
+    }
+
+
+def _normalize_feature_phrase(value: Any) -> str:
+    text = str(value or "").casefold()
+    # Treat common feature abbreviations such as A/C as one token ("ac").
+    text = re.sub(r"(?<=\w)/(?=\w)", "", text)
+    text = re.sub(r"[^\w]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _feature_token_similarity(requested_token: str, candidate_token: str) -> float:
+    """Compare word forms without a hand-maintained feature vocabulary.
+
+    Edit similarity naturally connects productive forms such as insulation/insulated,
+    electrical/electric, rails/rail, and lights/light. Very short tokens (AC, LED, TV)
+    must match exactly because fuzzy matching them creates too many coincidences.
+    """
+    if min(len(requested_token), len(candidate_token)) <= 3:
+        return 1.0 if requested_token == candidate_token else 0.0
+    return fuzz.ratio(requested_token, candidate_token) / 100.0
+
+
+def _feature_match_details(
+    requested_features: list[str], match_sources: list[str]
+) -> tuple[float, list[dict[str, Any]]]:
+    stored = []
+    all_candidate_tokens: list[tuple[str, str]] = []
+    for source in match_sources:
+        normalized = _normalize_feature_phrase(source)
+        if not normalized:
+            continue
+        tokens = normalized.split()
+        stored.append((source, tokens))
+        all_candidate_tokens.extend((source, token) for token in tokens)
+    details: list[dict[str, Any]] = []
+    scores: list[float] = []
+
+    for requested in requested_features:
+        requested_norm = _normalize_feature_phrase(requested)
+        requested_tokens = requested_norm.split()
+        token_matches: list[dict[str, Any]] = []
+        for requested_token in requested_tokens:
+            best_source = ""
+            best_candidate_token = ""
+            best_similarity = 0.0
+            for source, candidate_token in all_candidate_tokens:
+                similarity = _feature_token_similarity(requested_token, candidate_token)
+                if similarity > best_similarity:
+                    best_source = source
+                    best_candidate_token = candidate_token
+                    best_similarity = similarity
+            token_matches.append(
+                {
+                    "requested_token": requested_token,
+                    "matched_token": best_candidate_token or None,
+                    "source": best_source or None,
+                    "similarity": round(best_similarity, 6),
+                    "accepted": best_similarity >= FEATURE_MATCH_THRESHOLD,
+                }
+            )
+
+        best_raw = (
+            sum(match["similarity"] for match in token_matches) / len(token_matches)
+            if token_matches
+            else 0.0
+        )
+        # Every word in a clean feature phrase matters. This prevents "enclosed" alone
+        # from satisfying "insulated enclosed" while retaining inflectional matches.
+        accepted = bool(token_matches) and all(match["accepted"] for match in token_matches)
+        score = best_raw if accepted else 0.0
+        scores.append(score)
+        best_feature = max(
+            stored,
+            key=lambda item: (
+                sum(
+                    max(
+                        (_feature_token_similarity(token, candidate) for candidate in item[1]),
+                        default=0.0,
+                    )
+                    for token in requested_tokens
+                )
+                / len(requested_tokens)
+                if requested_tokens
+                else 0.0
+            ),
+            default=(None, []),
+        )[0]
+        details.append(
+            {
+                "requested": requested,
+                "best_stored_feature": best_feature,
+                "raw_similarity": round(best_raw, 6),
+                "accepted": accepted,
+                "score": round(score, 6),
+                "token_matches": token_matches,
+            }
+        )
+
+    coverage = sum(scores) / len(scores) if scores else 0.0
+    return round(coverage, 6), details
+
+
+def _candidate_feature_match_sources(listing: dict[str, Any]) -> list[str]:
+    """Return deduplicated searchable phrases from all candidate evidence.
+
+    match_evidence_text is the exact readable text embedded at ingest time, so
+    splitting it into fields lets feature reranking inspect core fields and
+    arbitrary info/specification values in addition to the explicit features.
+    """
+    candidates: list[str] = []
+    candidates.extend(str(value) for value in (listing.get("features") or []))
+    candidates.extend(
+        str(listing.get(key) or "") for key in ("title", "model", "trim")
+    )
+    evidence = str(listing.get("match_evidence_text") or "")
+    candidates.extend(re.split(r"[|\n;]+", evidence))
+
+    unique: dict[str, str] = {}
+    for candidate in candidates:
+        text = re.sub(r"\s+", " ", str(candidate or "")).strip(" ,")
+        normalized = _normalize_feature_phrase(text)
+        if normalized:
+            unique.setdefault(normalized, text)
+    return list(unique.values())
+
+
+def _combined_feature_fit_rerank(
+    listings: list[dict[str, Any]],
+    *,
+    requested_features: list[str],
+    required_length_ft: Optional[float],
+    required_payload_lbs: Optional[float],
+    required_width_ft: Optional[float],
+    required_height_ft: Optional[float],
+    metadata_filter: dict[str, Any] | None,
+    query_text: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Rank every hard-filtered Pinecone candidate with an 80/20 blend.
+
+    Unlike the legacy fit reranker, this never removes dimensionally failing
+    candidates. Fit only supplies the secondary 20% ordering signal.
+    """
+    if not listings:
+        return listings, {
+            "applied": False,
+            "reason": "no_listings",
+            "requested_features": requested_features,
+        }
+
+    _, fit_debug = _rerank_listings_by_fit(
+        listings,
+        required_length_ft=required_length_ft,
+        required_payload_lbs=required_payload_lbs,
+        required_width_ft=required_width_ft,
+        required_height_ft=required_height_ft,
+        warn_ratio=RERANK_WARN_RATIO,
+        extreme_ratio=RERANK_EXTREME_RATIO,
+        length_weight=RERANK_LENGTH_WEIGHT,
+        missing_dim_penalty=RERANK_MISSING_DIM_PENALTY,
+        retain_all=True,
+    )
+    fit_entries = fit_debug.get("fit_entries") or []
+    if not fit_entries:
+        # With no dimension/weight requirement, the existing order is the
+        # Pinecone cosine order, so it becomes the secondary fit-order signal.
+        fit_entries = [
+            {
+                "listing": listing,
+                "fetch_pos": pos,
+                "fit_rank": pos,
+                "base_score": float(listing.get("relevance_score") or 0.0),
+                "penalty": 0.0,
+                "fail_count": 0,
+                "missing_count": 0,
+                "length_ratio": None,
+                "weight_ratio": None,
+                "width_ratio": None,
+                "height_ratio": None,
+                "length_overage": 999.0,
+                "fit_score": float(listing.get("relevance_score") or 0.0),
+            }
+            for pos, listing in enumerate(listings, 1)
+        ]
+
+    candidate_count = len(fit_entries)
+    scored: list[dict[str, Any]] = []
+    for entry in fit_entries:
+        listing = entry["listing"]
+        fit_rank = int(entry.get("fit_rank") or entry["fetch_pos"])
+        fit_order_score = (
+            1.0
+            if candidate_count == 1
+            else 1.0 - ((fit_rank - 1) / (candidate_count - 1))
+        )
+        stored_features = list(listing.get("features") or [])
+        match_sources = _candidate_feature_match_sources(listing)
+        feature_coverage, feature_matches = _feature_match_details(
+            requested_features, match_sources
+        )
+        final_score = (
+            FEATURE_RERANK_WEIGHT * feature_coverage
+            + FIT_RERANK_WEIGHT * fit_order_score
+        )
+        scored.append(
+            {
+                "listing": listing,
+                "fetch_pos": entry["fetch_pos"],
+                "fit_rank": fit_rank,
+                "pinecone_score": float(listing.get("relevance_score") or 0.0),
+                "feature_coverage": round(feature_coverage, 6),
+                "fit_order_score": round(fit_order_score, 6),
+                "final_score": round(final_score, 6),
+                "feature_matches": feature_matches,
+                "stored_features": stored_features,
+                "match_source_count": len(match_sources),
+                "penalty": entry.get("penalty", 0.0),
+                "fail_count": entry.get("fail_count", 0),
+                "missing_count": entry.get("missing_count", 0),
+                "length_ratio": entry.get("length_ratio"),
+                "weight_ratio": entry.get("weight_ratio"),
+                "width_ratio": entry.get("width_ratio"),
+                "height_ratio": entry.get("height_ratio"),
+            }
+        )
+
+    scored.sort(
+        key=lambda item: (
+            -item["final_score"],
+            -item["feature_coverage"],
+            item["fit_rank"],
+            -item["pinecone_score"],
+            item["fetch_pos"],
+        )
+    )
+
+    analysis_candidates: list[dict[str, Any]] = []
+    for final_rank, item in enumerate(scored, 1):
+        listing = item["listing"]
+        diagnostic = {
+            "fetch_position": item["fetch_pos"],
+            "fit_position": item["fit_rank"],
+            "final_position": final_rank,
+            "title": listing.get("title"),
+            "url": listing.get("url"),
+            "make": listing.get("make"),
+            "pinecone_cosine_similarity": item["pinecone_score"],
+            "requested_features": requested_features,
+            "stored_features": item["stored_features"],
+            "match_source_count": item["match_source_count"],
+            "feature_matches": item["feature_matches"],
+            "feature_coverage": item["feature_coverage"],
+            "fit_order_score": item["fit_order_score"],
+            "feature_weight": FEATURE_RERANK_WEIGHT,
+            "fit_weight": FIT_RERANK_WEIGHT,
+            "final_score": item["final_score"],
+            "length": listing.get("length"),
+            "width": listing.get("width"),
+            "height": listing.get("height"),
+            "payload_capacity": listing.get("payload_capacity"),
+            "gvwr": listing.get("gvwr"),
+            "length_ratio": item["length_ratio"],
+            "weight_ratio": item["weight_ratio"],
+            "width_ratio": item["width_ratio"],
+            "height_ratio": item["height_ratio"],
+            "fit_penalty": item["penalty"],
+            "fit_fail_count": item["fail_count"],
+            "fit_missing_count": item["missing_count"],
+            "rank_movement": {
+                "pinecone_to_fit": item["fetch_pos"] - item["fit_rank"],
+                "fit_to_final": item["fit_rank"] - final_rank,
+            },
+        }
+        analysis_candidates.append(diagnostic)
+        if FEATURE_RERANK_VERBOSE_LOGS:
+            logger.info(
+                "feature_fit_candidate | %s",
+                json.dumps(diagnostic, ensure_ascii=False, default=str),
+            )
+
+    matched_candidates = sum(
+        1 for item in scored if item["feature_coverage"] > 0.0
+    )
+    logger.info(
+        "feature_fit_summary | candidates=%s matched_candidates=%s feature_weight=%.2f fit_weight=%.2f threshold=%.2f metadata_filter=%s query_text=%r final_urls=%s",
+        candidate_count,
+        matched_candidates,
+        FEATURE_RERANK_WEIGHT,
+        FIT_RERANK_WEIGHT,
+        FEATURE_MATCH_THRESHOLD,
+        json.dumps(metadata_filter or {}, default=str),
+        query_text,
+        [item["listing"].get("url") for item in scored],
+    )
+    return [item["listing"] for item in scored], {
+        "applied": True,
+        "candidate_count": candidate_count,
+        "matched_candidate_count": matched_candidates,
+        "requested_features": requested_features,
+        "feature_weight": FEATURE_RERANK_WEIGHT,
+        "fit_weight": FIT_RERANK_WEIGHT,
+        "feature_match_threshold": FEATURE_MATCH_THRESHOLD,
+        "hard_metadata_filter": metadata_filter or {},
+        "embedding_query_text": query_text,
+        "candidates": analysis_candidates,
     }
 
 
@@ -780,6 +1113,11 @@ def search_pinecone_listing_result(
     max_recommendations: int | None = None,
 ) -> PineconeListingSearchResult:
     metadata_filters = metadata_filters or {}
+    requested_features = [
+        str(feature).strip()
+        for feature in (requested_features or [])
+        if str(feature or "").strip()
+    ]
     # "trailer" only when we know literally nothing — the embeddings API rejects an empty input.
     query = _query_text(category, slots, metadata_filters, requested_features) or "trailer"
     top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
@@ -824,7 +1162,34 @@ def search_pinecone_listing_result(
         listings.append(item)
 
     rerank_debug: dict[str, Any] = {"applied": False, "reason": "disabled"}
-    if RERANK_ENABLED:
+    make_debug: dict[str, Any]
+    match_analysis: dict[str, Any] = {}
+    if requested_features:
+        required_length_ft = _required_length_ft_from_filters(slots, metadata_filters)
+        required_payload_lbs = _required_payload_lbs_from_filters(slots, metadata_filters)
+        required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
+        required_height_ft = _required_height_ft_from_filters(slots, metadata_filters)
+        listings, match_analysis = _combined_feature_fit_rerank(
+            listings,
+            requested_features=requested_features,
+            required_length_ft=required_length_ft,
+            required_payload_lbs=required_payload_lbs,
+            required_width_ft=required_width_ft,
+            required_height_ft=required_height_ft,
+            metadata_filter=metadata_filter,
+            query_text=query,
+        )
+        rerank_debug = {
+            "applied": True,
+            "mode": "combined_feature_fit",
+            "candidate_count": len(listings),
+        }
+        make_debug = {
+            "applied": False,
+            "reason": "feature_order_preserved",
+            "category": normalize_category(category) if category else None,
+        }
+    elif RERANK_ENABLED:
         required_length_ft = _required_length_ft_from_filters(slots, metadata_filters)
         required_payload_lbs = _required_payload_lbs_from_filters(slots, metadata_filters)
         required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
@@ -841,11 +1206,17 @@ def search_pinecone_listing_result(
             missing_dim_penalty=RERANK_MISSING_DIM_PENALTY,
         )
         logger.info("rerank_debug=%s", json.dumps(rerank_debug, default=str))
-    listings, make_debug = _apply_category_make_preference(
-        listings,
-        category=category,
-        max_recommendations=max_recommendations,
-    )
+        listings, make_debug = _apply_category_make_preference(
+            listings,
+            category=category,
+            max_recommendations=max_recommendations,
+        )
+    else:
+        listings, make_debug = _apply_category_make_preference(
+            listings,
+            category=category,
+            max_recommendations=max_recommendations,
+        )
     logger.info("make_rerank_debug=%s", json.dumps(make_debug, default=str))
 
     return PineconeListingSearchResult(
@@ -854,7 +1225,7 @@ def search_pinecone_listing_result(
         metadata_filter=metadata_filter,
         rerank_debug=rerank_debug,
         make_debug=make_debug,
-        match_analysis={},
+        match_analysis=match_analysis,
     )
 
 
@@ -878,6 +1249,10 @@ def search_pinecone_listings(
         max_recommendations=max_recommendations,
     )
     return [
-        {key: value for key, value in item.items() if key != "match_evidence_text"}
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"match_evidence_text", "features"}
+        }
         for item in result.listings
     ]

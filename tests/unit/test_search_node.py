@@ -109,6 +109,45 @@ def test_zero_result_brand_fallback_reruns_without_make(monkeypatch):
     assert state["turn_outcome"]["result_count"] == 2
 
 
+def test_feature_search_keeps_requested_make_strict(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        search_module,
+        "search_pinecone_listings",
+        _fake_search(calls, [[]]),
+    )
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["qualification_complete"] = True
+    state["brand_preference"] = "Diamond C"
+    state["non_metadata_features"] = ["electric winch"]
+
+    search_module.search_node(state)
+
+    assert len(calls) == 1
+    assert calls[0]["metadata_filters"]["make"] == "Diamond C"
+    assert calls[0]["requested_features"] == ["electric winch"]
+    assert "brand_relaxed" not in state["turn_outcome"]
+
+
+def test_search_repairs_feature_phrases_saved_by_older_analyzer(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        search_module,
+        "search_pinecone_listings",
+        _fake_search(calls, [[]]),
+    )
+    state = new_session_state("s1")
+    state["category"] = "Enclosed"
+    state["qualification_complete"] = True
+    state["non_metadata_features"] = ["insulated", "insulated enclosed trailer"]
+
+    search_module.search_node(state)
+
+    assert calls[0]["requested_features"] == ["insulated"]
+    assert state["non_metadata_features"] == ["insulated"]
+
+
 def test_already_shown_urls_passed_through_for_dedupe(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[_listing("u2")]]))

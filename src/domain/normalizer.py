@@ -19,6 +19,7 @@ CATEGORY_MAP = {
     "livestock": "Livestock",
     "cattle": "Livestock",
     "tilt": "Tilt",
+    "tilt trailer": "Tilt",
     "aluminum": "Aluminum",
     "car hauler": "Car Hauler",
     "fiber": "Fiber",

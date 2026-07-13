@@ -35,7 +35,13 @@ class ExtractedFields(StrictBaseModel):
     hitch_type: list[Literal["Bumper Pull", "Gooseneck"]] | None = Field(description="A single clear hitch preference, or null (including when the customer says either/any/no preference).")
     haul_item: str | None = Field(description="Cargo or item to haul, in the user's words.")
     brand_preference: str | None = Field(description="Canonical known make, or unknown brand verbatim.")
-    non_metadata_features: list[str] = Field(description="Preferences not directly searchable as metadata.")
+    non_metadata_features: list[str] = Field(
+        description=(
+            "Only newly stated functional/equipment features with no dedicated metadata field; "
+            "exclude makes, categories/subcategories, trailer/model words, hitches, dimensions, "
+            "weights, colours, and prices."
+        )
+    )
     numeric_no_preference: list[str] = Field(description="Slot names where the user gave no numeric preference.")
 
 

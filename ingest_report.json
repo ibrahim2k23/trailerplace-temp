@@ -1,0 +1,13 @@
+{
+  "input_rows": 276,
+  "valid_json_rows": 276,
+  "invalid_json_rows": 0,
+  "changed_embedding_hashes": 276,
+  "skipped_unchanged_vectors": 0,
+  "embedding_failures": 0,
+  "vector_upsert_failures": 0,
+  "embedded_vectors": 276,
+  "upserted_vectors": 276,
+  "elapsed_seconds": 21.88,
+  "quarantined_rows": 0
+}

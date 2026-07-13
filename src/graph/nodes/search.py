@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from src.config import settings
-from src.domain.slot_map import normalize_slot_targets
+from src.domain.slot_map import normalize_slot_targets, sanitize_non_metadata_features
 from src.search.pinecone_search import search_pinecone_listings
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,12 @@ def search_node(state: dict) -> dict:
     metadata_filters = _build_metadata_filters(state)
     # Every non-searchable preference they have voiced so far (sliding gates, tandem axle, ramp),
     # not just this turn's — the embedding query is the customer's full spec, not their last line.
-    requested_features = list(state.get("non_metadata_features", []) or [])
+    requested_features, _ = sanitize_non_metadata_features(
+        state.get("non_metadata_features", []) or []
+    )
+    # Repair feature phrases persisted by an older Analyze prompt as well:
+    # ["insulated", "insulated enclosed"] becomes ["insulated"].
+    state["non_metadata_features"] = requested_features
     shown_urls = state.get("shown_urls", []) or []
 
     logger.info(
@@ -63,7 +68,9 @@ def search_node(state: dict) -> dict:
     )
 
     brand_relaxed = False
-    if not results and metadata_filters.get("make"):
+    # A requested make remains a hard constraint in feature-aware search. The
+    # legacy/no-feature path keeps its existing zero-result make relaxation.
+    if not results and metadata_filters.get("make") and not requested_features:
         relaxed_filters = {key: value for key, value in metadata_filters.items() if key != "make"}
         logger.info(
             "TOOL search: session=%s zero results with make filter, relaxing and retrying filters=%s",
