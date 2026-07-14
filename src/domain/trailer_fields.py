@@ -147,7 +147,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
         required=["trailer_length_ft"],
         optional=["gate_preferences"],
         questions={
-            "trailer_length_ft": "What length trailer are you looking for?",
+            "trailer_length_ft": "What trailer length are you looking for?",
             "gate_preferences":  "Any preference on gate style — butterfly, swing, or slant load?",
         },
         answer_guidance={
@@ -383,3 +383,27 @@ def get_trailer_fields_as_dict(trailer_type: str) -> dict:
 def list_all_categories() -> list[str]:
     """Return all supported trailer categories."""
     return sorted(_SPECS.keys())
+
+
+# Optional slots whose answer is NOT a descriptive feature: a hitch is a hard search filter and
+# base_category is the Aluminum subcategory filter. Both have a home of their own; copied into the
+# feature list they would be matched as loose text instead of filtering the search.
+_NON_FEATURE_OPTIONAL_SLOTS = {"hitch_type", "base_category"}
+
+
+def feature_like_optional_slots(trailer_type: str) -> list[str]:
+    """The optional slots for this category whose answer doubles as a non-metadata feature.
+
+    An optional answer like "butterfly gates", "scissor lift", "drive-over fenders" or "lined walls"
+    describes equipment we hold NO metadata field for, so a slot value alone can never reach the
+    search: the only thing that acts on it is the non-metadata feature matcher. These slots are
+    therefore mirrored into ``non_metadata_features`` as well as stored under their own name.
+    Numeric/measurement slots (trailer_size, crew_size, ...) are excluded - they are sizes, not
+    features, and they already have their own filters.
+    """
+    spec = get_trailer_fields(trailer_type)
+    return [
+        slot
+        for slot in spec.optional
+        if slot not in _NUMERIC_OR_MEASUREMENT_SLOTS and slot not in _NON_FEATURE_OPTIONAL_SLOTS
+    ]

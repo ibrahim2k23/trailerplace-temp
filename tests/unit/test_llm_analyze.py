@@ -34,6 +34,9 @@ def test_analyze_prompt_contains_required_blocks():
     assert "HAUL CLASSIFICATION" in system
     assert "AxB = width x length" in system
     assert "83 inches" in system and "6.92" in system
+    assert '"3 ft sides" -> trailer_height_ft=3' in system
+    assert '"3 inch walls" ->' in system and "trailer_height_ft=0.25" in system
+    assert '"20 footer" or "20-footer" ->' in system and "trailer_length_ft=20" in system
     assert messages == state["messages"]
 
 

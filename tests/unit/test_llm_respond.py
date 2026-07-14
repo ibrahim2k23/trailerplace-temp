@@ -12,6 +12,17 @@ def _listings(*urls: str) -> list[dict]:
     return [{"title": f"Trailer {i}", "url": url} for i, url in enumerate(urls, 1)]
 
 
+def _reply(*cited: str, lead: str = "Here they are:") -> ReplyOutput:
+    """A reply that actually PRESENTS the listings it cites.
+
+    A listing only counts as shown when its URL is in assistant_text — the only field the customer
+    ever sees. So a fixture that cites a URL has to render it too, or it is modelling the very bug
+    respond_with_all_listings exists to catch.
+    """
+    cards = "\n".join(f"{i}. [Trailer {i}]({url})" for i, url in enumerate(cited, 1))
+    return ReplyOutput(assistant_text=f"{lead}\n{cards}", cited_listing_urls=list(cited))
+
+
 def test_respond_prompt_embeds_canned_strings_and_listings():
     analysis = sample_analysis()
     state = {"category": "Dump", "messages": [{"role": "user", "content": "finance and call me"}], "customer_name": "John"}
@@ -97,8 +108,8 @@ def test_dropped_listings_trigger_one_repair_retry():
     # list). Ranking is the reranker's job, so a short reply is a defect: name what it left
     # out and re-ask once.
     listings = _listings("https://x.test/a", "https://x.test/b", "https://x.test/c")
-    short = ReplyOutput(assistant_text="Here are 2", cited_listing_urls=["https://x.test/a", "https://x.test/b"])
-    full = ReplyOutput(assistant_text="Here are 3", cited_listing_urls=[l["url"] for l in listings])
+    short = _reply("https://x.test/a", "https://x.test/b")
+    full = _reply(*[l["url"] for l in listings])
     llm = FakeLLM([short, full])
 
     result = respond_with_all_listings(
@@ -112,9 +123,32 @@ def test_dropped_listings_trigger_one_repair_retry():
     assert "https://x.test/c" in repair_system
 
 
+def test_announced_but_unrendered_listings_trigger_a_retry():
+    # Seen live: the reply said "Here are some trailers that match your requirements:" and stopped,
+    # yet reported all the URLs in cited_listing_urls. The customer sees assistant_text and nothing
+    # else, so those trailers were never shown — and were then recorded as shown, locking them out
+    # of "show me more". A cited URL that is not in the reply text is a dropped listing.
+    listings = _listings("https://x.test/a", "https://x.test/b")
+    announced = ReplyOutput(
+        assistant_text="Here are some trailers that match your requirements:",
+        cited_listing_urls=[l["url"] for l in listings],
+    )
+    full = _reply(*[l["url"] for l in listings])
+    llm = FakeLLM([announced, full])
+
+    result = respond_with_all_listings(
+        llm, {"messages": [{"role": "user", "content": "show me"}]}, sample_analysis(),
+        {"listings": listings, "search_ran": True, "result_count": 2},
+    )
+
+    assert result is full
+    assert len(llm.calls) == 2
+    assert "assistant_text" in llm.calls[1]["system"]
+
+
 def test_complete_reply_is_returned_without_a_retry():
     listings = _listings("https://x.test/a", "https://x.test/b")
-    full = ReplyOutput(assistant_text="Here are 2", cited_listing_urls=[l["url"] for l in listings])
+    full = _reply(*[l["url"] for l in listings])
     llm = FakeLLM([full])
 
     result = respond_with_all_listings(
@@ -128,8 +162,8 @@ def test_complete_reply_is_returned_without_a_retry():
 def test_retry_that_still_drops_listings_falls_back_to_the_first_draft():
     # Never loop or fail the turn on a stubborn model — one retry, then ship the best draft.
     listings = _listings("https://x.test/a", "https://x.test/b")
-    short = ReplyOutput(assistant_text="Just one", cited_listing_urls=["https://x.test/a"])
-    still_short = ReplyOutput(assistant_text="Still one", cited_listing_urls=["https://x.test/a"])
+    short = _reply("https://x.test/a", lead="Just one")
+    still_short = _reply("https://x.test/a", lead="Still one")
     llm = FakeLLM([short, still_short])
 
     result = respond_with_all_listings(
@@ -138,3 +172,104 @@ def test_retry_that_still_drops_listings_falls_back_to_the_first_draft():
 
     assert result == short
     assert len(llm.calls) == 2
+
+
+def test_listing_reference_counts_within_the_batch_on_screen():
+    # Seen live: after a "show me more", "I like the 5th one" was resolved against the CUMULATIVE
+    # 12 listings instead of the 6 on screen — and respond, never told the reference at all, quoted
+    # a trailer the customer had not picked. The index means the 5th of what they can see.
+    batch_one = _listings(*[f"https://x.test/old{i}" for i in range(1, 7)])
+    batch_two = _listings(*[f"https://x.test/new{i}" for i in range(1, 7)])
+    state = {
+        "category": "Livestock",
+        "shown_listings": batch_one + batch_two,
+        "last_shown_listings": batch_two,
+        "messages": [{"role": "user", "content": "I like the 5th one"}],
+    }
+    analysis = sample_analysis(intent="listing_interest", listing_reference=5)
+
+    system, _ = build_respond_prompt(state, analysis, {})
+
+    assert "https://x.test/new5" in system
+    # ...and not the 5th of the whole history, nor the last one it happened to see.
+    assert "ALREADY RESOLVED" in system
+    resolved = system.split("ALREADY RESOLVED")[1].split("\n")[0]
+    assert "old5" not in resolved and "new6" not in resolved
+
+
+def test_no_category_and_nothing_to_go_on_asks_plainly_instead_of_recommending():
+    # Seen live: the customer handed over their name and email and got four trailer types
+    # recommended back. They had told us NOTHING about the trailer, so there was nothing to
+    # recommend from — the type question is a plain question until they give us something.
+    state = {"messages": [{"role": "user", "content": "It's Ibrahim, ibrahim@x.test"}], "slots": {}}
+    analysis = sample_analysis(intent="contact_info_provided", category_mentioned=None)
+
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you after?"})
+
+    assert "Ask it as ONE plain sentence" in system
+    assert "do NOT list, suggest, or bullet any trailer types" in system
+
+
+def test_a_feature_with_no_category_gets_the_structured_recommendation():
+    state = {"messages": [{"role": "user", "content": "something with a rear ramp"}], "slots": {}, "non_metadata_features": ["rear ramp"]}
+    analysis = sample_analysis(intent="feature_request_no_category", category_mentioned=None)
+
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you after?"})
+
+    assert "RECOMMENDING TRAILER TYPES" in system
+    assert "given us something to go on, so RECOMMEND" in system
+
+
+def test_asking_for_a_recommendation_gets_the_structured_recommendation():
+    state = {"messages": [{"role": "user", "content": "I can't decide, what do you recommend?"}], "slots": {}}
+    analysis = sample_analysis(intent="recommendation_request", category_mentioned=None)
+
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you after?"})
+
+    assert "so RECOMMEND" in system
+
+
+def test_relaxed_search_results_are_presented_as_alternatives():
+    # These listings came back only because we dropped the hard filters, so they are the closest
+    # we have, not matches. Presenting them silently as matches would be a lie the customer only
+    # discovers on the listing page.
+    listings = _listings("https://x.test/a")
+    state = {"category": "Dump", "messages": [{"role": "user", "content": "24ft gooseneck"}]}
+    outcome = {
+        "listings": listings,
+        "search_ran": True,
+        "result_count": 1,
+        "filters_relaxed": True,
+        "relaxed_filters_dropped": ["length", "hitch type"],
+    }
+
+    system, _ = build_respond_prompt(state, sample_analysis(), outcome)
+
+    assert "ALTERNATIVES, NOT EXACT MATCHES" in system
+    assert "length, hitch type" in system
+
+
+def test_missing_listing_fields_are_absent_from_the_block_not_rendered_as_none():
+    # Seen live: a trailer with no make, price or length on file was handed to the model as
+    # "None - None x None", and the card came back advertising "Make: None / Length: None".
+    # It cannot omit what it is never shown.
+    listing = {
+        "title": "2026 Gooseneck Livestock - 91632",
+        "url": "https://x.test/91632",
+        "hitch_type": "Gooseneck",
+        "make": None,
+        "price_display": None,
+        "length": None,
+        "width": None,
+    }
+    state = {"category": "Livestock", "messages": [{"role": "user", "content": "show me"}]}
+
+    system, _ = build_respond_prompt(state, sample_analysis(), {"listings": [listing], "search_ran": True, "result_count": 1})
+
+    block_line = next(line for line in system.splitlines() if line.startswith("1. TITLE:"))
+    assert "None" not in block_line
+    assert "Length" not in block_line and "Make" not in block_line
+    assert "Hitch type: Gooseneck" in block_line
+    # The stock number is part of the title and is how the customer and the team name the trailer.
+    assert "TITLE: 2026 Gooseneck Livestock - 91632" in block_line
+    assert "COPY THE TITLE EXACTLY" in system

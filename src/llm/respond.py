@@ -21,25 +21,76 @@ def _listing_get(listing: Any, key: str, default: Any = "") -> Any:
     return listing.get(key, default) if isinstance(listing, dict) else getattr(listing, key, default)
 
 
-def _listing_line(idx: int, listing: Any) -> str:
-    def get(key: str, default: str = "") -> Any:
-        return _listing_get(listing, key, default)
+# The fields a listing card can carry, in the order they are shown. Every one of them is missing
+# on some trailer in the catalogue, so none of them is guaranteed.
+_LISTING_FIELDS: tuple[tuple[str, str], ...] = (
+    ("Make", "make"),
+    ("Price", "price_display"),
+    ("Length", "length"),
+    ("Width", "width"),
+    ("Payload", "payload_capacity"),
+    ("Hitch type", "hitch_type"),
+)
 
-    return f"{idx}. {get('title')} - {get('price_display') or get('price')} - {get('length')} x {get('width')} - {get('hitch_type')} - {get('make')} - {get('url')}"
+
+def _listing_line(idx: int, listing: Any) -> str:
+    """One listing, with the fields it does NOT have left out entirely.
+
+    A missing field used to be rendered as the literal "None" ("Length: None", "Make: None"), and
+    the model dutifully copied that onto the card - a trailer whose length we simply do not have on
+    file was advertised to the customer as having a length of None. It cannot omit what it is never
+    shown, so the omission happens here.
+    """
+    title = str(_listing_get(listing, "title") or "").strip()
+    price = _listing_get(listing, "price_display") or _listing_get(listing, "price")
+    parts = [f"{idx}. TITLE: {title}"]
+    for label, key in _LISTING_FIELDS:
+        value = price if key == "price_display" else _listing_get(listing, key)
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(item) for item in value if str(item or "").strip())
+        text = str(value or "").strip()
+        if text and text.lower() not in {"none", "null", "n/a"}:
+            parts.append(f"{label}: {text}")
+    parts.append(f"URL: {str(_listing_get(listing, 'url') or '').strip()}")
+    return " | ".join(parts)
 
 
 def _url_key(url: Any) -> str:
     return str(url or "").strip().rstrip("/").lower()
 
 
-def _missing_listings(listings: list[Any], cited_urls: list[str] | None) -> list[Any]:
-    """Listings the reply failed to cite — i.e. ones it silently dropped."""
-    cited = {_url_key(url) for url in (cited_urls or [])}
-    return [
-        listing
-        for listing in listings
-        if _url_key(_listing_get(listing, "url")) and _url_key(_listing_get(listing, "url")) not in cited
-    ]
+def _is_first_reply(state: Any) -> bool:
+    """True on the very first reply of the conversation - nothing has been said back to them yet.
+
+    Decided here rather than left to the model: the opening line is a fixed phrase the business
+    wants word for word, and "have I spoken to them yet?" is a fact we already hold.
+    """
+    messages = _state_get(state, "messages", []) or []
+    return not any(
+        (message.get("role") if isinstance(message, dict) else getattr(message, "role", None)) == "assistant"
+        for message in messages
+    )
+
+
+def _missing_listings(listings: list[Any], reply: Any) -> list[Any]:
+    """Listings the customer will not actually see in this reply.
+
+    A listing counts as shown only when its URL appears in the REPLY TEXT. cited_listing_urls is
+    the model's own report of what it presented, and it lies: seen live, a reply opened with "Here
+    are some trailers that match your requirements:", stopped dead, and still handed back all six
+    URLs in cited_listing_urls. Checking the self-report against itself found nothing missing, so
+    no retry fired, and the six trailers the customer never saw were recorded as shown - locking
+    them out of "show me more" for the rest of the conversation.
+    """
+    # _url_key drops the trailing slash, so it stays a substring of the linked URL in the text.
+    text = str(_outcome_get(reply, "assistant_text", "") or "").lower()
+    cited = {_url_key(url) for url in (_outcome_get(reply, "cited_listing_urls", None) or [])}
+    missing: list[Any] = []
+    for listing in listings:
+        url = _url_key(_listing_get(listing, "url"))
+        if url and not (url in cited and url in text):
+            missing.append(listing)
+    return missing
 
 
 def _contact_gate_lines(state: Any, turn_outcome: Any) -> list[str]:
@@ -68,6 +119,68 @@ def _contact_gate_lines(state: Any, turn_outcome: Any) -> list[str]:
     return lines
 
 
+def _referenced_listing(state: Any, analysis: TurnAnalysis) -> Any | None:
+    """The exact listing the customer just pointed at, resolved here rather than by the model.
+
+    Respond was never given listing_reference at all: it saw only the reference block and had to
+    guess which trailer "the 5th one" meant. It guessed wrong, quoting a trailer the customer had
+    not picked. The index counts into the batch on screen — the same list Analyze numbered.
+    """
+    ref = analysis.listing_reference
+    shown = _state_get(state, "last_shown_listings", None) or _state_get(state, "shown_listings", []) or []
+    if not ref or not 1 <= ref <= len(shown):
+        return None
+    return shown[ref - 1]
+
+
+# The three ways a customer asks us to pick a type FOR them: an outright request ("what do you
+# recommend?", "I can't decide"), a description of the trailer with no type named, or a question
+# about which type suits a job.
+_RECOMMENDATION_INTENTS = frozenset({
+    "recommendation_request",
+    "feature_request_no_category",
+    "category_exploration",
+})
+
+
+def _has_recommendation_basis(state: Any, analysis: TurnAnalysis) -> bool:
+    """Is there any reason to put a list of trailer TYPES in front of them?
+
+    Only two: they asked for one, or they have told us something about the job - cargo, a size, a
+    feature - that a recommendation can be built from. A customer who has just handed over their
+    name and email has told us nothing about trailers, and answering that with four category
+    suggestions is recommending into thin air. Ask them which type they want instead.
+    """
+    if analysis.intent in _RECOMMENDATION_INTENTS:
+        return True
+    if _state_get(state, "non_metadata_features", None):
+        return True
+    slots = _state_get(state, "slots", None) or _state_get(state, "collected_slots", {}) or {}
+    return any(value not in (None, "") for value in slots.values())
+
+
+def _category_question_line(state: Any, analysis: TurnAnalysis) -> str:
+    """The ONE question when no category is chosen - listed as types, or asked plainly."""
+    closing = (
+        "Do NOT mention listings, stock, or availability, and do NOT say we do or don't have something "
+        "- no search has run yet."
+    )
+    if _has_recommendation_basis(state, analysis):
+        return (
+            "- No trailer category chosen yet, so the ONE question above is which TYPE of trailer they want - and "
+            "they have given us something to go on, so RECOMMEND. Ask it using the RECOMMENDING TRAILER TYPES "
+            "format below: 3-4 types from our lineup that suit what they told us, one short line each, then ask "
+            "which they want to go with and note that we carry more. That list IS the question - do not also ask "
+            f"it in a sentence of its own. {closing}"
+        )
+    return (
+        "- No trailer category chosen yet, so the ONE question above is which TYPE of trailer they want. Ask it as "
+        "ONE plain sentence and nothing else. They have NOT told us what they haul or what they need, and have NOT "
+        "asked us to recommend, so we have nothing to base a recommendation on: do NOT list, suggest, or bullet any "
+        f"trailer types this turn. {closing}"
+    )
+
+
 def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> list[str]:
     if _outcome_get(turn_outcome, "contact_gate_missing"):
         return _contact_gate_lines(state, turn_outcome)
@@ -91,13 +204,7 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "availability, no second question, no offer to show options - just the switch and the question."
         )
     if _outcome_get(turn_outcome, "next_question") and not _state_get(state, "category"):
-        lines.append(
-            "- No trailer category chosen yet: briefly acknowledge anything they told us (name, size, cargo), then ask "
-            "the ONE question above - which TYPE of trailer they want - naming a handful of example categories from our "
-            f"lineup ({advertised_categories_line()}) inside that same question, and add that we carry many more. "
-            "The category ask happens once, in one sentence; do not set it up first and then ask it again. "
-            "Do NOT mention listings, stock, or availability, and do NOT say we do or don't have something - no search has run yet."
-        )
+        lines.append(_category_question_line(state, analysis))
     if int(_state_get(state, "pending_question_repeats", 0) or 0) == 1:
         lines.append("- The user did not answer it last time - acknowledge their message first, then re-ask casually, once.")
     suggestion = _state_get(state, "pending_category_suggestion")
@@ -122,6 +229,15 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             f"Confirm which to carry over (they can keep all, drop some, or change a value): {offered}. "
             "Do NOT show listings this turn; just ask."
         )
+    referenced = _referenced_listing(state, analysis)
+    if referenced is not None:
+        lines.append(
+            f"- The listing they are pointing at is ALREADY RESOLVED for you - it is #{analysis.listing_reference} "
+            f'of the batch on screen: "{_listing_get(referenced, "title")}" ({_listing_get(referenced, "url")}). '
+            "Talk about THIS trailer and no other. Do not count down the list yourself, do not pick a different "
+            "one, and do not quote a trailer from an earlier batch. Quote only its real fields, and put ONLY its "
+            "URL in cited_listing_urls."
+        )
     if _outcome_get(turn_outcome, "search_ran"):
         count = _outcome_get(turn_outcome, "result_count", 0)
         lines.append(
@@ -133,6 +249,16 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "(a hay trailer among cattle trailers, a shorter one, a pricier one) STILL gets shown. "
             "A listing missing an optional field (width, payload, hitch) is normal: show the fields it has and skip the "
             "missing lines - never omit the listing itself. Count them before you finish."
+        )
+    if _outcome_get(turn_outcome, "filters_relaxed"):
+        dropped = ", ".join(_outcome_get(turn_outcome, "relaxed_filters_dropped", []) or [])
+        on = f" on {dropped}" if dropped else ""
+        lines.append(
+            f"- THESE ARE ALTERNATIVES, NOT EXACT MATCHES. Nothing in stock met every requirement they gave us, so "
+            f"we searched their trailer category again without the constraint(s){on}, and these are the closest we "
+            "have. Open with ONE short, matter-of-fact line saying we do not have an exact match on that right now "
+            "and these are the nearest options - then show EVERY listing in full, exactly as normal. Never call them "
+            "exact matches, never imply they meet the requirement they miss, and never apologise more than once."
         )
     if _outcome_get(turn_outcome, "inventory_match_status"):
         lines.append(f"- Inventory lookup result: {_outcome_get(turn_outcome, 'inventory_match_status')}.")
@@ -215,17 +341,47 @@ def build_respond_prompt(
     customer_name = _state_get(state, "customer_name")
     decision_lines = "\n".join(_decision_lines(state, analysis, turn_outcome)) or "- No special turn outcome lines."
     repair_block = f"\n=== CORRECTION - YOUR PREVIOUS DRAFT WAS REJECTED ===\n{repair_note}\n" if repair_note else ""
+    opening_block = (
+        "\n=== OPENING LINE - THIS IS THE FIRST REPLY OF THE CONVERSATION ===\n"
+        "Your reply MUST begin with this exact sentence, word for word, as its very first line:\n"
+        "Thank you for contacting TrailerPlace.\n"
+        "Then leave a blank line and write the rest of your reply under it.\n"
+        if _is_first_reply(state)
+        else ""
+    )
 
-    system = f"""You are the TrailerPlace sales assistant - a friendly trailer lead specialist for a dealership
-in Wharton, TX (979-532-1486, https://trailerplace.com; financing and delivery available).
-Write the next assistant reply. Warm, concise, conversational; never pushy or repetitive.
-{repair_block}
+    system = f"""You are the TrailerPlace sales assistant - an experienced trailer sales and lead specialist for a
+dealership in Wharton, TX (979-532-1486, https://trailerplace.com).
+Write the next assistant reply.
+{repair_block}{opening_block}
+=== WHO YOU ARE ===
+A seasoned salesperson who knows trailers and wants to earn this sale. Professional, confident, and
+helpful. You keep the customer engaged and moving forward: every reply gives them something and then
+takes the next step. Clear and to the point - never pushy, never repetitive, never chatty.
+BANNED: praise and filler of any kind - "Great choice", "Perfect", "Awesome", "Excellent", "That's
+helpful", "Thanks for sharing", exclamation marks, emojis. You do not cheer the customer on; you find
+out what they need and put the right trailer in front of them.
+
 === WHAT THE SYSTEM ALREADY DECIDED THIS TURN (do not contradict) ===
 {decision_lines}
 
 === RULES ===
 - Answer the user's question FIRST, then ask the pending qualification question once, in the same reply. Answering without asking it loses the question.
 - ONE question per reply. When a question is given above, the reply ends with it, asked a single time and in your own natural words - never the same ask twice (once paraphrased, once verbatim), never a second question tacked on. Any question we listed is the information we need, not a script to recite.
+- DO NOT REACT TO A QUALIFICATION ANSWER. When the customer answers one of our questions, say NOTHING
+  about their answer: no praise, no agreement, no repeating it back, no explaining what it means for the
+  trailer, no recap of what we have collected so far. It is recorded. Your whole reply is the next
+  question - go straight to it.
+  THE ONE EXCEPTION: the customer has no preference, is not sure, cannot answer, or wants to skip
+  ("no idea", "whatever you recommend", "doesn't matter", "skip that"). THEN give ONE short, engaging
+  line that puts them at ease and keeps the momentum ("No problem - we can keep that flexible and let
+  the trailer decide."), and move straight on to the next question. Two sentences, no more.
+  NONE OF THIS SHORTENS A REPLY THAT HAS LISTINGS. If the LISTINGS block below has trailers in it, that
+  easing line is followed by every listing, written out in full. "Brief" never means dropping them.
+- THE CUSTOMER SEES ONLY assistant_text. Everything you want them to read - every listing card, every
+  bullet, every link - must be written out IN FULL in assistant_text. cited_listing_urls is a machine
+  field they never see; putting a URL there does NOT show them the trailer. Announcing listings and then
+  stopping ("Here are some trailers that match your requirements:") shows them NOTHING.
 - Never re-ask anything already collected, skipped, or marked no-preference.
 - When presenting listings: show EVERY listing in the block below, in the exact order given - never omit, add, or reorder any, and never filter by how well a size or feature matches. For EVERY listing shown, put its exact URL in cited_listing_urls.
 - Optional fields (width, payload, hitch, height) are missing on many trailers - that is expected. Show the fields that are present and skip the missing lines; a missing field is NEVER a reason to drop a listing.
@@ -235,7 +391,7 @@ Write the next assistant reply. Warm, concise, conversational; never pushy or re
 - Gooseneck and Bumper Pull are HITCH TYPES, not categories and (unless the customer says "the Gooseneck brand") not makes. Quote a listing's hitch from its own data; never assume one.
 - Sizes are in feet and weights in pounds. Quote back the number we recorded, never a vaguer phrase than they gave.
 - We carry: {advertised_categories_line()}.
-- 2-6 sentences unless presenting listings.
+- 2-6 sentences, unless you are presenting listings or a bulleted list - those have their own shape below.
 
 === OUR CATEGORIES AND WHAT EACH IS BEST FOR ===
 Use this to answer "which trailer suits X?" and to explain why a suggested switch makes sense.
@@ -244,6 +400,43 @@ Never name a category outside this list. Gooseneck and Bumper Pull are HITCH TYP
 If the customer only ASKED which trailer suits a job, answer the question - do not assume they
 have chosen that category and do not start qualifying them for it.
 
+=== RECOMMENDING TRAILER TYPES (STRUCTURED, NEVER A PARAGRAPH) ===
+DO THIS ONLY when BOTH of these are true:
+  (a) no category is settled - "Category" in CONTEXT below is empty, or they are moving away from the
+      one they had; AND
+  (b) they have given us something to recommend FROM: they described what they will haul or a feature
+      they want but never named a trailer type, they asked what we recommend or which type suits a job,
+      or they said they cannot decide.
+NEVER DO THIS OTHERWISE. In particular, do NOT list trailer types when they merely gave us their name,
+email or phone, said hello, asked an FAQ, or said anything else that tells us nothing about the trailer
+they need. They have given us no basis for a recommendation, so recommending would be guessing at them.
+Just ask which type of trailer they are after, in one plain sentence.
+
+When you DO recommend, do not answer in prose. Recommend 3 or 4 types from OUR CATEGORIES above, laid
+out like this:
+
+Based on what you need to haul, here are the types worth looking at:
+
+1. **Equipment Trailer** — designed for transporting heavy machinery and equipment.
+2. **Dump Trailer** — great for loose materials and can handle heavy loads.
+3. **Flatbed Trailer** — versatile for various cargo types, including oversized items.
+
+Which type would you like to go with? We carry more types as well if you would like to explore.
+
+- 3 or 4 types, never fewer, never more. Only categories from OUR CATEGORIES above.
+- Pick the ones that genuinely suit what they told us (their cargo, their job, their size). If they have
+  told us nothing yet, pick the most common ones.
+- Each line: the type name in bold, an em dash, then ONE short line on what it is best for.
+- Always close by asking which type they want to go with, plus the note that we carry more types.
+- IF THE CATEGORY IS ALREADY SETTLED and they are not asking about types, do NOT do this. They have
+  chosen - listing types back at them makes us look like we were not listening. Just ask the question.
+
+=== ANY OTHER ANSWER THAT IS REALLY A LIST GETS THE SAME SHAPE ===
+If the honest answer to their question is a SET of things - what a category is used for, the use cases
+for a trailer type, hitch options, deck styles, gate styles, loading options, what to consider at a
+given size - give it as a bulleted list: bolded name, em dash, one short line each. Never bury three or
+four options inside a paragraph. Two or more items means bullets.
+
 === {listing_header} ===
 {listing_block}
 
@@ -251,17 +444,37 @@ have chosen that category and do not start qualifying them for it.
 {reference_block}
 
 When showing listings, use this structure (repeat for EVERY listing in the block, numbered in order):
-1. [Trailer title hyperlinked to exact URL]
+1. [full TITLE, hyperlinked to its exact URL]
    - Category: [category]
-   - Make: [make](show if present)
-   - Price: [price] (show if present)
-   - Length: [length](show if present)
-   - Width: [width](show if present)
-   - Payload: [payload](show if present)
-   - Hitch type: [hitch_type](show if present)
-   
+   - Make: [Make, only if the block gave one]
+   - Price: [Price, only if the block gave one]
+   - Length: [Length, only if the block gave one]
+   - Width: [Width, only if the block gave one]
+   - Payload: [Payload, only if the block gave one]
+   - Hitch type: [Hitch type, only if the block gave one]
+   - One line description highlighting the strengths of the trailer we have shown.
 
-Then ask whether the customer is interested.
+COPY THE TITLE EXACTLY as it appears after "TITLE:" in the block - every word and the stock number on
+the end ("2026 Gooseneck Livestock - 91632", not "2026 Gooseneck Livestock"). The stock number is how
+the customer and our team refer to that exact trailer; a title with it trimmed off points at nothing.
+
+A LISTING ONLY HAS THE FIELDS ITS BLOCK LINE LISTS. Some trailers have no price, no make, no length on
+file - that is normal. If a field is not on that listing's line, DELETE THAT BULLET ENTIRELY. Never
+write "None", "N/A", "Not specified", "Call for price", or a blank - and never carry a value across
+from a different listing. A card with three bullets is correct if the block gave you three fields.
+
+The last bullet is a one-sentence sales pitch for THAT trailer: engaging, attractive, and about what its
+size, payload, hitch, or make lets the customer do. Build it ONLY from that listing's own fields above
+and what the customer told us they need - never invent a feature, spec, condition, or price. Write a
+different one for each listing.
+
+=== HOW TO END A REPLY THAT SHOWS LISTINGS ===
+After the last listing, ask ONE closing question and then STOP: whether any of these interest them, or
+whether they would like to see more results. For example: "Do any of these look like a fit, or would you
+like to see more options?"
+Nothing else goes after the listings. Do NOT bring up or offer financing, delivery, trade-ins,
+warranties, a call, a visit, the store, or their contact details. Do NOT add tips, next steps, or a
+second question. One closing question, then stop.
 
 === CONTEXT ===
 Category: {_state_get(state, "category") or _state_get(state, "selected_category")}; collected: {collected}; customer: {customer_name or "unknown"} (use their first name naturally when known).
@@ -290,7 +503,7 @@ def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnaly
     if not listings:
         return reply
 
-    missing = _missing_listings(listings, reply.cited_listing_urls)
+    missing = _missing_listings(listings, reply)
     if not missing:
         return reply
 
@@ -306,10 +519,14 @@ def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnaly
         "Every listing in the LISTINGS block is a valid recommendation - it is already ranked, and it is "
         "not your job to decide one is a poor fit. Rewrite the reply with ALL "
         f"{len(listings)} listings, numbered 1 to {len(listings)} in block order, and put all "
-        f"{len(listings)} URLs in cited_listing_urls."
+        f"{len(listings)} URLs in cited_listing_urls.\n"
+        "The listing cards go in assistant_text, WRITTEN OUT IN FULL, using the listing structure from the "
+        "prompt. Announcing them and stopping ('Here are some trailers that match:') is not presenting them - "
+        "the customer sees ONLY assistant_text, so a URL listed in cited_listing_urls but missing from "
+        "assistant_text is a trailer they never saw."
     )
     retry = respond_turn(client, state, analysis, turn_outcome, repair_note=note)
-    if len(_missing_listings(listings, retry.cited_listing_urls)) < len(missing):
+    if len(_missing_listings(listings, retry)) < len(missing):
         return retry
     logger.warning("respond retry did not recover the dropped listing(s); keeping the first draft")
     return reply

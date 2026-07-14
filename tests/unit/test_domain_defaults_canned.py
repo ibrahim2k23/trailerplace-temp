@@ -4,6 +4,7 @@ from src.domain.canned_responses import CANNED_RESPONSES, FAQ_CANNED_RESPONSES, 
 
 def test_defaults_for_missing_and_configured(monkeypatch):
     assert defaults.defaults_for("Nonexistent") == {}
+    assert defaults.defaults_for("Flatbed") == {"trailer_width_ft": 8.0}
 
     monkeypatch.setitem(defaults.CATEGORY_DEFAULTS, "Utility", {"hitch_type": "Bumper Pull"})
     assert defaults.defaults_for("Utility") == {"hitch_type": "Bumper Pull"}

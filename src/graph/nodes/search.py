@@ -5,9 +5,26 @@ from typing import Any
 
 from src.config import settings
 from src.domain.slot_map import normalize_slot_targets, sanitize_non_metadata_features
-from src.search.pinecone_search import search_pinecone_listings
+from src.search.pinecone_search import narrowing_filters_present, search_pinecone_listings
 
 logger = logging.getLogger(__name__)
+
+# The hard Pinecone gates, in the words a customer would recognise them by. Everything else they
+# told us (width, payload, features) is already a ranking signal rather than a gate.
+_HARD_FILTER_LABELS = {
+    "make": "brand",
+    "hitch_type": "hitch type",
+    "subcategory": "trailer type",
+    "length_ft": "length",
+}
+
+
+def _relaxed_filter_labels(state: dict, metadata_filters: dict[str, Any]) -> list[str]:
+    """What we stopped filtering on, for the reply to own up to."""
+    labels = [label for key, label in _HARD_FILTER_LABELS.items() if metadata_filters.get(key)]
+    if (state.get("slots", {}) or {}).get("hitch_type") and "hitch type" not in labels:
+        labels.append("hitch type")
+    return labels
 
 
 def _build_metadata_filters(state: dict) -> dict[str, Any]:
@@ -87,9 +104,38 @@ def search_node(state: dict) -> dict:
         )
         brand_relaxed = True
 
+    # Still nothing. Every hard filter is all-or-nothing — one 24 ft minimum, one hitch type, one
+    # brand — so a single unmet requirement empties the screen even when the category is full of
+    # trailers the customer would happily look at. Drop the gates, keep the CATEGORY, and search
+    # again: their requirements survive in the embedding query and the fit rerank, so what comes
+    # back is the closest thing we have, ordered by how close. The reply presents it as
+    # alternatives rather than as matches.
+    #
+    # The non-metadata features are NOT dropped here. They are the customer's standing preferences
+    # (sliding gates, a ramp), they only ever ranked rather than filtered, and they are cleared in
+    # one place only: a category change.
+    filters_relaxed = False
+    if not results and narrowing_filters_present(category, slots, metadata_filters):
+        logger.info(
+            "TOOL search: session=%s zero results, relaxing every filter except category=%r and retrying",
+            state.get("session_id"), category,
+        )
+        results = search_pinecone_listings(
+            category=category,
+            slots=slots,
+            metadata_filters=metadata_filters,
+            requested_features=requested_features,
+            already_shown_urls=shown_urls,
+            top_k=settings.search_top_k,
+            max_recommendations=settings.search_max_recommendations,
+            category_only_filters=True,
+        )
+        filters_relaxed = bool(results)
+
     logger.info(
-        "TOOL search: session=%s results=%d brand_relaxed=%s urls=%s",
-        state.get("session_id"), len(results), brand_relaxed, [r.get("url") for r in results],
+        "TOOL search: session=%s results=%d brand_relaxed=%s filters_relaxed=%s urls=%s",
+        state.get("session_id"), len(results), brand_relaxed, filters_relaxed,
+        [r.get("url") for r in results],
     )
 
     # NOT recorded as shown here: respond decides what actually reaches the customer, and it
@@ -104,6 +150,9 @@ def search_node(state: dict) -> dict:
     outcome["result_count"] = len(results)
     if brand_relaxed:
         outcome["brand_relaxed"] = True
+    if filters_relaxed:
+        outcome["filters_relaxed"] = True
+        outcome["relaxed_filters_dropped"] = _relaxed_filter_labels(state, metadata_filters)
 
     if results:
         filter_desc = ", ".join(f"{key}={value}" for key, value in metadata_filters.items())

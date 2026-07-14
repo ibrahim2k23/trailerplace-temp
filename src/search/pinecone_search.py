@@ -121,12 +121,20 @@ def _metadata_filter(
     category: str | None,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any] | None = None,
+    category_only: bool = False,
 ) -> dict[str, Any]:
     metadata_filters = metadata_filters or {}
     filters: list[dict[str, Any]] = []
     normalized_category = normalize_category(category) if category else None
     if category:
         filters.append({"category": {"$eq": normalized_category}})
+
+    if category_only:
+        # The last-resort pass: every hard filter but the category is dropped so we can show the
+        # customer the closest alternatives instead of an empty screen. Their requirements are not
+        # thrown away — they still shape the embedding query and the fit rerank, so what comes back
+        # is ordered by how near it gets. Only the all-or-nothing $eq/$gte gates are gone.
+        return filters[0] if filters else {}
 
     make_value = metadata_filters.get("make")
     if make_value:
@@ -165,6 +173,20 @@ def _metadata_filter(
     if len(filters) == 1:
         return filters[0]
     return {"$and": filters}
+
+
+def narrowing_filters_present(
+    category: str | None,
+    slots: dict[str, Any],
+    metadata_filters: dict[str, Any] | None = None,
+) -> bool:
+    """Does the hard filter constrain anything BEYOND the category?
+
+    If it does not, a category-only retry would run the identical query for a second time and come
+    back just as empty — the category really has nothing left to show.
+    """
+    full = _metadata_filter(category, slots, metadata_filters)
+    return full != _metadata_filter(category, slots, metadata_filters, category_only=True)
 
 
 # The query vector is compared against listing vectors built by normalizer.build_embedding_text
@@ -1111,6 +1133,7 @@ def search_pinecone_listing_result(
     already_shown_urls: list[str] | None = None,
     top_k: int | None = None,
     max_recommendations: int | None = None,
+    category_only_filters: bool = False,
 ) -> PineconeListingSearchResult:
     metadata_filters = metadata_filters or {}
     requested_features = [
@@ -1122,7 +1145,7 @@ def search_pinecone_listing_result(
     query = _query_text(category, slots, metadata_filters, requested_features) or "trailer"
     top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
     max_recommendations = max_recommendations or int(os.getenv("SEARCH_MAX_RECOMMENDATIONS", "5"))
-    metadata_filter = _metadata_filter(category, slots, metadata_filters) or None
+    metadata_filter = _metadata_filter(category, slots, metadata_filters, category_only_filters) or None
     query_preview = query[:2000] + ("...(truncated)" if len(query) > 2000 else "")
     shown_urls = {str(u).strip() for u in (already_shown_urls or []) if str(u or "").strip()}
 
@@ -1238,6 +1261,7 @@ def search_pinecone_listings(
     already_shown_urls: list[str] | None = None,
     top_k: int | None = None,
     max_recommendations: int | None = None,
+    category_only_filters: bool = False,
 ) -> list[dict[str, Any]]:
     result = search_pinecone_listing_result(
         category=category,
@@ -1247,6 +1271,7 @@ def search_pinecone_listings(
         already_shown_urls=already_shown_urls,
         top_k=top_k,
         max_recommendations=max_recommendations,
+        category_only_filters=category_only_filters,
     )
     return [
         {

@@ -299,6 +299,34 @@ def test_defaults_then_user_override(monkeypatch):
     assert state["slot_sources"]["hitch_type"] == "user"
 
 
+def test_flatbed_defaults_to_eight_foot_width_then_user_can_override():
+    state = new_session_state("flatbed-default-width")
+
+    apply_with(
+        state,
+        sample_analysis(
+            category_mentioned="Flatbed",
+            extracted=_empty_extracted(),
+            slot_answers=[],
+        ),
+    )
+
+    assert state["slots"]["trailer_width_ft"] == 8.0
+    assert state["slot_sources"]["trailer_width_ft"] == "default"
+
+    apply_with(
+        state,
+        sample_analysis(
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "trailer_width_ft": 8.5},
+            slot_answers=[],
+        ),
+    )
+
+    assert state["slots"]["trailer_width_ft"] == 8.5
+    assert state["slot_sources"]["trailer_width_ft"] == "user"
+
+
 def say(state, text):
     """Set the latest user message — the category rules read the raw text for term tiers."""
     state.setdefault("messages", []).append({"role": "user", "content": text})
@@ -642,3 +670,137 @@ def test_lightweight_flag_only_skips_weight_for_utility():
         ),
     )
     assert "haul_weight_lbs" not in state["skipped_slots"]
+
+
+def test_aluminum_named_with_another_type_keeps_aluminum_as_the_category():
+    # "a utility trailer in aluminum" names two types, and only Aluminum is a category we stock.
+    # The other one is the base_category it should be built as. Taking Utility (it came first in
+    # the sentence) dropped Aluminum entirely and qualified them for a steel utility trailer.
+    state = new_session_state("s1")
+    say(state, "I want a utility trailer in aluminum")
+    apply_with(
+        state,
+        sample_analysis(category_mentioned="Aluminum", slot_answers=[], extracted=_empty_extracted()),
+    )
+    assert state["category"] == "Aluminum"
+    assert state["slots"]["base_category"] == "Utility"
+
+
+def test_answering_the_base_category_question_does_not_change_the_category():
+    # Seen live: mid-Aluminum, we ask "what type do you want it in - utility, equipment,
+    # enclosed?", they say "utility", and we read their ANSWER as a request to leave Aluminum:
+    # category switched, Aluminum slots wiped, qualification restarted from the top.
+    state = new_session_state("s1")
+    state["category"] = "Aluminum"
+    state["slots"] = {"payload_need": 4000.0}
+    state["slot_sources"] = {"payload_need": "user"}
+    state["pending_question_slot"] = "base_category"
+    say(state, "utility")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            slot_answers=[{"slot_name": "base_category", "raw_answer": "utility"}],
+            extracted=_empty_extracted(),
+        ),
+    )
+    assert state["category"] == "Aluminum"
+    assert state["pending_category_change"] is None
+    assert state["slots"]["base_category"] == "Utility"
+    assert state["slots"]["payload_need"] == 4000.0  # nothing was wiped
+
+
+def test_base_category_survives_an_extractor_that_named_the_category_instead():
+    # The extractor keeps reading the type word as a category and emits no slot answer at all,
+    # which left base_category empty (or nulled by the answered-but-unparsed fallback) and the
+    # subcategory filter unset. The answer is recovered from what they actually said.
+    state = new_session_state("s1")
+    state["category"] = "Aluminum"
+    state["pending_question_slot"] = "base_category"
+    say(state, "enclosed would work")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Enclosed",
+            slot_answers=[],
+            extracted=_empty_extracted(),
+        ),
+    )
+    assert state["category"] == "Aluminum"
+    assert state["slots"]["base_category"] == "Enclosed"
+
+
+def test_a_type_word_outside_the_aluminum_base_question_is_still_a_category_change():
+    # The guard is scoped to the question we asked. Once base_category is settled, "show me dump
+    # trailers instead" must still move them off Aluminum like any other category change.
+    state = new_session_state("s1")
+    state["category"] = "Aluminum"
+    state["slots"] = {"base_category": "Utility"}
+    state["slot_sources"] = {"base_category": "user"}
+    say(state, "actually show me dump trailers instead")
+    apply_with(
+        state,
+        sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()),
+    )
+    assert state["category"] == "Dump"
+    assert "base_category" not in state["slots"]
+
+
+def test_contact_details_and_a_category_in_one_message_still_set_the_category():
+    # Seen live: "My name is Ibrahim, my email is ibrahim@x.ai. I need an Aluminum trailer, base
+    # category equipment, payload 7-9k." The extractor called the whole thing contact_info_provided,
+    # which was not a category-action intent — so Aluminum was dropped, the slots were stored under
+    # no category at all, and we replied by asking him to pick a trailer type he had just named.
+    state = new_session_state("s1")
+    say(state, "My name is Ibrahim and my email is ibrahim@esided.ai. I need an Aluminum trailer, an equipment one.")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="contact_info_provided",
+            category_mentioned="Aluminum",
+            contact={"name": "Ibrahim", "email": "ibrahim@esided.ai", "phone": None},
+            slot_answers=[{"slot_name": "base_category", "raw_answer": "equipment"}],
+            extracted={**_empty_extracted(), "payload_lbs": 7000.0},
+        ),
+    )
+    assert state["category"] == "Aluminum"
+    assert state["slots"]["base_category"] == "Equipment"
+    assert state["slots"]["payload_need"] == 7000.0
+
+
+def test_contact_details_alone_never_start_a_category():
+    state = new_session_state("s1")
+    say(state, "It's Ibrahim, ibrahim@esided.ai")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="contact_info_provided",
+            category_mentioned=None,
+            contact={"name": "Ibrahim", "email": "ibrahim@esided.ai", "phone": None},
+            slot_answers=[],
+            extracted=_empty_extracted(),
+        ),
+    )
+    assert not state.get("category")
+
+
+def test_contact_details_never_change_a_category_already_chosen():
+    # They gave us their email while on Dump and mentioned a tilt trailer in passing. Handing over
+    # contact details says nothing about changing their mind, so it can start a category but never
+    # move one.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    say(state, "sure, ibrahim@esided.ai — a friend of mine has a tilt trailer")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="contact_info_provided",
+            category_mentioned="Tilt",
+            contact={"name": None, "email": "ibrahim@esided.ai", "phone": None},
+            slot_answers=[],
+            extracted=_empty_extracted(),
+        ),
+    )
+    assert state["category"] == "Dump"

@@ -57,8 +57,14 @@ def _listing_index_from_text(shown: list, text: str) -> int | None:
 
 
 def _resolve_listing_interest(state: dict, trigger: Any) -> dict[str, Any]:
-    """Pick the selected/unselected/fallback canned variant (spec §Tools, M7 step 3)."""
-    shown = state.get("shown_listings") or []
+    """Pick the selected/unselected/fallback canned variant (spec §Tools, M7 step 3).
+
+    Resolved against the batch ON SCREEN, which is what the customer is counting. Against the
+    cumulative shown_listings, "the 5th one" after a "show me more" pointed at the 5th trailer of
+    the FIRST batch — a trailer they had already scrolled past — and we logged the team a lead for
+    the wrong one.
+    """
+    shown = state.get("last_shown_listings") or state.get("shown_listings") or []
     ref = getattr(trigger, "listing_reference", None)
     if not (ref and 1 <= ref <= len(shown)):
         # They referred to it by make or stock number rather than by position.

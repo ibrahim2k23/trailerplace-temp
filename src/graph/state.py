@@ -36,6 +36,10 @@ class SessionState(TypedDict, total=False):
     pending_category_change: dict | None
     pending_category_suggestion: dict | None
     shown_listings: list[dict]
+    # The last batch of listings actually put on screen. "The 5th one" means the 5th of THESE —
+    # numbering it against the cumulative shown_listings makes every reference point at the wrong
+    # trailer the moment a second batch is shown.
+    last_shown_listings: list[dict]
     shown_urls: list[str]
     last_search_filters: dict | None
     injected_required_slots: list[str]
@@ -86,6 +90,7 @@ def new_session_state(session_id: str) -> SessionState:
         "pending_category_change": None,
         "pending_category_suggestion": None,
         "shown_listings": [],
+        "last_shown_listings": [],
         "shown_urls": [],
         "last_search_filters": None,
         "injected_required_slots": [],

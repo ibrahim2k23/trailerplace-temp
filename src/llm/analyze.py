@@ -3,8 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from src.domain.brands import make_prompt_block
-from src.domain.categories import category_clarification_question, category_prompt_block
-from src.domain.trailer_fields import get_trailer_fields, get_trailer_fields_as_dict
+from src.domain.categories import (
+    category_clarification_question,
+    category_prompt_block,
+    width_eligible_categories_line,
+    width_excluded_categories_line,
+)
+from src.domain.trailer_fields import (
+    feature_like_optional_slots,
+    get_trailer_fields,
+    get_trailer_fields_as_dict,
+)
 from src.domain.units import parse_length_ft, parse_weight_lbs
 from src.llm.client import LLMClient
 from src.llm.schemas import TurnAnalysis
@@ -22,7 +31,20 @@ def _recent_messages(state: Any, limit_turns: int = MAX_CONTEXT_TURNS) -> list[d
 
 
 def _shown_listing_titles(state: Any) -> str:
-    listings = _state_get(state, "shown_listings", None) or _state_get(state, "listings", []) or []
+    """The batch of listings currently on the customer's screen, numbered from 1.
+
+    ONLY the latest batch. "I like the 5th one" means the 5th trailer they can see right now —
+    numbering the cumulative history instead resolved it against the trailers we showed two turns
+    ago, and picked the wrong one.
+    """
+    # shown_listings is the fallback only for sessions saved before last_shown_listings existed:
+    # a stale numbering beats no numbering, but a live session always has the latest batch.
+    listings = (
+        _state_get(state, "last_shown_listings", None)
+        or _state_get(state, "shown_listings", None)
+        or _state_get(state, "listings", None)
+        or []
+    )
     lines: list[str] = []
     for idx, listing in enumerate(listings, 1):
         title = listing.get("title") if isinstance(listing, dict) else getattr(listing, "title", None)
@@ -47,7 +69,7 @@ def _pending_question(state: Any, category: str) -> tuple[str | None, str | None
     if not slot:
         return None, None
     if slot == _WIDTH_SLOT:
-        return slot, "About how wide is that item or trailer you need to haul?"
+        return slot, "About how wide should the trailer be?"
     questions = get_trailer_fields_as_dict(category)["questions"] if category and category != "none" else {}
     return slot, questions.get(slot)
 
@@ -58,6 +80,13 @@ def build_analyze_prompt(state: Any) -> tuple[str, list[dict]]:
     fields = get_trailer_fields_as_dict(category if category != "none" else "")
     pending_slot, pending_text = _pending_question(state, category)
     clarification_question = category_clarification_question(_state_get(state, "clarification_key"))
+    # Optional answers (ramps, butterfly gates, scissor lift, lined walls) have no metadata field of
+    # their own, so the feature matcher is the ONLY thing that can act on them — they must be emitted
+    # as features as well as slot answers.
+    optional_feature_slots = feature_like_optional_slots(category if category != "none" else "")
+    optional_feature_questions = {
+        slot: fields.get("questions", {}).get(slot, "") for slot in optional_feature_slots
+    }
     name = _state_get(state, "customer_name")
     email = _state_get(state, "customer_email")
     phone = _state_get(state, "customer_phone")
@@ -86,7 +115,9 @@ Pending category switch suggestion awaiting yes/no: {_state_get(state, "pending_
 Results already shown to this customer: {"yes" if (_state_get(state, "shown_urls", []) or []) else "no"}
 Contact: name={name} email={email} phone={phone} declined={bool(_state_get(state, "contact_declined", False))}
 We asked for contact details last turn: {"yes — this message is most likely their answer to it" if _state_get(state, "contact_asks", 0) and not _state_get(state, "contact_gate_closed", False) else "no"}
-Listings shown so far (1-based): {_shown_listing_titles(state)}
+LISTINGS ON SCREEN RIGHT NOW - the latest batch, numbered 1-based. A listing reference can ONLY point
+into this list; older batches are gone from the customer's view and are never what they mean:
+{_shown_listing_titles(state)}
 
 === INTENT RULES ===
 Interpret the message by intent; do NOT assume it answers the pending question.
@@ -136,9 +167,12 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
 - faq: the message asks one of contact_human / financing / trade_in / service_parts / store_info.
 - team_request_escalation: call/meeting scheduling, quote requests, "email me", anything needing a human.
 - listing_interest: references a shown listing -> set listing_reference to its 1-based index in the
-  "Listings shown so far" list above. They may point at it ANY way: by position ("the second one", "the last
+  "LISTINGS ON SCREEN RIGHT NOW" list above. Count from 1 within THAT list only: "the 5th one" is entry
+  number 5 of that list, never the 5th trailer of some earlier batch. If the number they say is bigger
+  than that list, leave listing_reference null - do not wrap around or guess.
+  They may point at it ANY way: by position ("the second one", "the last
   one"), by MAKE ("the Iron Bull one", "that Diamond C"), by stock number ("the 81382"), or by a detail
-  ("the gooseneck one", "the $9,995 one"). Match it against the shown list and give the index.
+  ("the gooseneck one", "the $9,995 one"). Match it against the on-screen list and give the index.
   A make used this way is NOT a brand preference — leave brand_preference null. They are pointing at one
   trailer, not asking us to only ever show them that manufacturer.
   If the make is ambiguous (two Iron Bulls on screen) and nothing else narrows it, still set
@@ -211,10 +245,59 @@ category. Only length, width, and payload can carry over (everything else was dr
 - A NEW value for a measurement ("make it 8 ft wide instead") is keep-with-update: extract it into
   `extracted` normally AND include that measurement in kept_fields.
 
+=== CARGO AND SIZE: ONE SENTENCE OFTEN GIVES YOU BOTH - TAKE BOTH ===
+The THING they haul and the SIZE of it are two separate facts. A number stuck to the cargo is still a
+size. Never throw one away because you were only looking for the other.
+
+STEP 1 - What is the cargo? It is whatever they say they will haul, load, carry, move, or put on the
+trailer. Store their words. It does NOT have to be a specific machine.
+  "I want to haul a 10ft item"       -> cargo = "10ft item"
+  "random things"                    -> cargo = "random things"
+  "wood, pipes, furniture, whatever" -> cargo = "wood, pipes, furniture"
+  "just odds and ends for the yard"  -> cargo = "odds and ends for the yard"
+  "my Bobcat"                        -> cargo = "Bobcat"
+A vague answer is still an answer. NEVER return null cargo just because the wording was broad, and
+never turn it into something more specific than they said.
+
+STEP 2 - Is a size or weight attached to that cargo? If yes, it is ALSO a measurement. Extract it too.
+  "haul a 10ft item"        -> cargo = "10ft item"      AND trailer_length_ft = 10
+  "20 foot pipes"           -> cargo = "pipes"          AND trailer_length_ft = 20
+  "a 7000 lb skid steer"    -> cargo = "skid steer"     AND payload_lbs = 7000
+  "a 16ft boat, about 2 tons" -> cargo = "16ft boat"    AND trailer_length_ft = 16 AND payload_lbs = 4000
+The length of the ITEM is the length we need on the trailer. Treat them as the same number.
+
+STEP 3 - Put both under the right names for the CURRENT category (see "Qualification questions for this
+category" above). The cargo goes in the cargo slot that category asks by - haul_item, haul_material,
+vehicle_type, use_case, fiber_use_case, or equipment_list - and in extracted.haul_item. The length goes in
+extracted.trailer_length_ft and in that category's length slot. Emit a slot_answers pair for EACH of them.
+  Dump + "I haul random things"  -> slot_answers = [{{slot_name: "haul_material", raw_answer: "random things"}}]
+  Equipment + "a 10ft item"      -> slot_answers = [{{slot_name: "haul_item", raw_answer: "10ft item"}},
+                                                    {{slot_name: "haul_length_ft", raw_answer: "10 ft"}}]
+
+=== ALUMINUM IS A CATEGORY; THE TYPE THEY WANT IT IN IS A SLOT ===
+Aluminum is one of our inventory categories. The trailer TYPE they want in aluminum (utility,
+equipment, enclosed, ...) is NOT a second category - it is the `base_category` slot underneath
+Aluminum. Two rules, and they apply no matter which word came first in the sentence:
+1. "aluminum" NAMED ALONGSIDE ANOTHER TYPE -> the category is Aluminum, and the other type is the
+   base_category answer. Never the other way round.
+   "an aluminum utility trailer"        -> category_mentioned="Aluminum", slot_answers: base_category="utility"
+   "a utility trailer but in aluminum"  -> category_mentioned="Aluminum", slot_answers: base_category="utility"
+   "aluminum, enclosed if you have it"  -> category_mentioned="Aluminum", slot_answers: base_category="enclosed"
+2. ANSWERING our base_category question ("What type of trailer are you looking for in aluminum -
+   utility, equipment, enclosed, or something else?") - when THAT is the Pending question above, a
+   type word in their reply is the ANSWER. It is NOT a request to change category.
+   intent="qualification_answer", answered_current_question=true, slot_answers: base_category=<their word>,
+   and category_mentioned=null. NEVER intent="category_change" and NEVER category_mentioned="Utility".
+   Selected category stays Aluminum.
+
 === EXTRACTION RULES (apply to EVERY message, even unasked fields) ===
 - AxB = width x length. AxBxC = width x length x height. "16 by 8" = 16 ft length, 8 ft width.
 - Convert ALL lengths/widths/heights to feet and ALL weights to lbs YOURSELF: "83 inches" -> 6.92, 7'6" -> 7.5, "2 tons" -> 4000, "5k lbs" -> 5000.
   Every measurement we store is a number of FEET and every weight a number of POUNDS - never a sentence, never another unit.
+- Side or wall measurements are HEIGHT details: "3 ft sides" -> trailer_height_ft=3; "3 inch walls" ->
+  trailer_height_ft=0.25. Do not misread these as trailer width or leave them only as non-metadata features.
+- A number followed by "footer" is shorthand for trailer LENGTH: "20 footer" or "20-footer" ->
+  trailer_length_ft=20. Treat "footer" as feet-long wording when it follows a size number.
 - Numeric range(applicable for both measurement and weight dimensions) -> the smallest value ("15-18 ft" -> 15).
 - Loose numeric no-preference ("no preference", "flexible", "not sure") -> null value + add the slot name to numeric_no_preference.
 - haul_item: store as the user said it; never over-normalize or discard vague descriptions.
@@ -270,10 +353,29 @@ Do not combine an actual feature with the current/mentioned category: output "in
 features newly stated in the LATEST USER MESSAGE; already-collected features remain in state automatically.
 If removing metadata leaves no real functional feature, return an empty list.
 
+--- ALSO PUT OPTIONAL-QUESTION ANSWERS IN THE FEATURE LIST ---
+These optional questions for the current category describe EQUIPMENT, not numbers, and we have no
+search field for any of them - the feature list is the ONLY place they can do any work:
+{optional_feature_questions or "(none for this category)"}
+Whenever the message says something that answers one of those - whether we asked it or they just
+volunteered it - do BOTH of these, in the same turn:
+  1. emit the slot_answers pair for that slot, AND
+  2. put the equipment they named into non_metadata_features as a short feature phrase.
+  "I'd want butterfly gates"     -> slot_answers: gate_preferences="butterfly gates"  +  features: ["butterfly gates"]
+  "scissor lift would be better" -> slot_answers: dump_mechanism="scissor lift"        +  features: ["scissor lift"]
+  "load it with ramps"           -> slot_answers: loading_style="ramps"                +  features: ["ramps"]
+  "needs AC and cabinets"        -> slot_answers: ac_windows_cabinets="AC and cabinets" + features: ["AC", "cabinets"]
+Only what they WANT. A refusal ("no preference", "doesn't matter", "no ramps") adds NOTHING to the
+feature list. Strip every category, make, hitch, size and price from the phrase exactly as above.
+
 === HAUL CLASSIFICATION (judge the cargo's WEIGHT and SIZE independently) ===
 These two flags govern two different qualification questions. When the user mentions what they plan to haul:
 - is_lightweight_utility_load is a WEIGHT judgment (governs the WEIGHT question). Set true ONLY for Utility category + cargo <= 1500 lbs: golf carts, ATVs, UTVs, dirt bikes, motorcycles, lawn mowers, zero-turn mowers, gardening/landscaping tools, small generators, canoes, kayaks, bicycles, e-bikes, small furniture, camping gear, hobby equipment. When true, the code skips asking the load-weight question (we already know it's light).
-- needs_width_question is a SIZE judgment (governs the WIDTH question). Set true for large/wide/heavy-duty/vehicle cargo in categories NOT {{Roll Off, Enclosed, Fiber, Race Trailer, Diesel Tank}}: excavators, mini excavators, bulldozers, backhoes, skid steers, telehandlers, forklifts, loaders, tractors, combines, harvesters, rollers, compactors, scissor lifts, boom lifts, oversize/wide loads, vehicles being hauled. When true, the code asks for the item/trailer width.
+- needs_width_question is a SIZE judgment (governs the WIDTH question). Set true for large/wide/heavy-duty/vehicle cargo: excavators, mini excavators, bulldozers, backhoes, skid steers, telehandlers, forklifts, loaders, tractors, combines, harvesters, rollers, compactors, scissor lifts, boom lifts, oversize/wide loads, vehicles being hauled. When true, the code asks for the item/trailer width.
+  WIDTH-EXEMPT CATEGORIES - always set needs_width_question=false when the selected category is one of
+  these, no matter how big or wide the cargo is: {width_excluded_categories_line()}.
+  We never ask width for those, so a true here is simply wrong. The only categories that can take a
+  width question are: {width_eligible_categories_line()}.
 - The two are independent: a light load sets only is_lightweight_utility_load; a big/heavy load sets only needs_width_question. Do not set both.
 - haul_item_matched = the SPECIFIC CARGO the user said, grounded in their exact words.
 - Do NOT return a trailer category, hitch type, or feature as matched_item. Return null if no explicit cargo is mentioned.

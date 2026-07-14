@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from src import conversation_store
 from src.domain.brands import brand_mentioned_in_text
 from src.domain.categories import (
+    WIDTH_EXCLUDED_CATEGORIES,
     category_clarification_question,
     resolve_category_clarification_answer,
     resolve_category_from_text,
@@ -26,14 +28,19 @@ from src.domain.slot_map import (
     slot_value_kind,
     slots_of_kind,
 )
-from src.domain.trailer_fields import get_trailer_fields
+from src.domain.trailer_fields import feature_like_optional_slots, get_trailer_fields
 from src.domain.units import parse_dimensions
 from src.graph.contact_gate import contact_ask_outstanding, update_contact_gate
 from src.llm.schemas import HaulClassification, TurnAnalysis
 
-WIDTH_EXCLUDED_CATEGORIES = {"Roll Off", "Enclosed", "Fiber", "Race Trailer", "Diesel Tank"}
 INJECTED_WIDTH_SLOT = "item_or_trailer_width_ft"
 INJECTED_WIDTH_QUESTION = "About how wide is that item or trailer you need to haul?"
+
+# Aluminum is the odd one out: it is the inventory category we stock, and the trailer TYPE the
+# customer wants it in ("utility", "enclosed") is a slot underneath it, not a category of its own.
+# So a type word spoken inside the Aluminum flow is an ANSWER, never a category change.
+ALUMINUM_CATEGORY = "Aluminum"
+BASE_CATEGORY_SLOT = "base_category"
 
 
 def enforce_haul_classification_invariant(haul: HaulClassification) -> HaulClassification:
@@ -265,7 +272,16 @@ _CATEGORY_ACTION_INTENTS = {
 }
 
 
-def _wants_category_action(analysis: TurnAnalysis) -> bool:
+# People answer the contact ask and say what they came for in one breath: "My name is Ibrahim, my
+# email is ibrahim@x.ai, I need an aluminum trailer." The extractor labels the whole message
+# contact_info_provided - the biggest thing in it, as far as it is concerned - so the category they
+# just named was thrown on the floor and we turned around and asked them to pick a trailer type.
+# Handing over contact details can never CHANGE a category (nothing about it says they changed their
+# mind), but when none is chosen yet it can certainly start one.
+_CATEGORY_START_INTENTS = _CATEGORY_ACTION_INTENTS | {"contact_info_provided"}
+
+
+def _wants_category_action(analysis: TurnAnalysis, current: str | None) -> bool:
     """True only when the message expresses what the user WANTS, not what they're asking about.
 
     "Which trailer is best for hauling a tractor?" is information - the category never
@@ -273,7 +289,8 @@ def _wants_category_action(analysis: TurnAnalysis) -> bool:
     """
     if analysis.is_category_info_only:
         return False
-    return analysis.intent in _CATEGORY_ACTION_INTENTS
+    allowed = _CATEGORY_ACTION_INTENTS if current else _CATEGORY_START_INTENTS
+    return analysis.intent in allowed
 
 
 def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis) -> tuple[str | None, str | None]:
@@ -284,13 +301,20 @@ def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis)
     A message can carry both ("a tilt trailer to haul a tractor"), which is exactly the
     case where we must ask rather than assume.
     """
-    named: str | None = None
+    named_all: list[str] = []
     implied: str | None = None
     for category, tier in resolve_category_matches(_current_user_text(state)):
-        if tier == "naming" and named is None:
-            named = category
+        if tier == "naming":
+            named_all.append(category)
         elif tier == "cargo" and implied is None:
             implied = category
+    named = named_all[0] if named_all else None
+    if ALUMINUM_CATEGORY in named_all:
+        # "an aluminum utility trailer", "a utility trailer but in aluminum": two type words, and
+        # only one of them is a category we stock. Aluminum IS the category; the other type is the
+        # base_category they want it built as. Whichever they happened to say first, aluminum wins
+        # — taking the other one made us drop Aluminum and qualify them for a steel utility trailer.
+        named = ALUMINUM_CATEGORY
     # Fall back to the LLM's category only when it is not just restating the cargo
     # implication (it catches typos/paraphrases the term lists miss).
     if named is None and analysis.category_mentioned and analysis.category_mentioned != implied:
@@ -374,12 +398,20 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         # No keep/drop answer: this message was about something else, so let the normal
         # category rules below read it.
 
+    # (c) They are ANSWERING our own base-category question — "what type are you looking for in
+    # aluminum: utility, equipment, enclosed?". The type they name is the answer to that question.
+    # Read as a category choice it looked like they wanted to leave Aluminum, so we switched them
+    # to Utility, wiped the Aluminum slots and restarted qualification — off the back of them
+    # answering us. While that question is pending, the category cannot move.
+    if state.get("pending_question_slot") == BASE_CATEGORY_SLOT:
+        return
+
     # An informational question never moves the category, no matter what it mentions.
-    if not _wants_category_action(analysis):
+    current = state.get("category")
+    if not _wants_category_action(analysis, current):
         return
 
     named, implied = _named_and_implied_categories(state, analysis)
-    current = state.get("category")
 
     # Rule 1: nothing chosen yet -> adopt whatever they named, or what their cargo implies.
     if not current:
@@ -409,6 +441,32 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     if implied and implied != current:
         # Only a cargo/task term points elsewhere — confirm before moving them.
         _suggest_category_switch(state, implied, analysis)
+
+
+def _apply_aluminum_base_category(state: dict[str, Any]) -> None:
+    """Fill Aluminum's ``base_category`` from the trailer type the customer named.
+
+    base_category is the type they want the aluminum trailer built as, and it is the subcategory
+    filter the search runs on. Two different messages state it — "a utility trailer in aluminum"
+    up front, and "utility" in answer to our base-category question — and they are the same fact.
+    The extractor cannot be relied on for either: it reads the type word as a category and emits
+    no slot answer at all, which left base_category empty (or nulled by the answered-but-unparsed
+    fallback) and the search unfiltered.
+    """
+    if normalize_category(state.get("category") or "") != ALUMINUM_CATEGORY:
+        return
+    named = [
+        category
+        for category, tier in resolve_category_matches(_current_user_text(state))
+        if tier == "naming"
+    ]
+    base = next((category for category in named if category != ALUMINUM_CATEGORY), None)
+    if not base:
+        return
+    # Either they said it alongside "aluminum", or they said it while we had the question on the
+    # table. A type word in any other message is not an answer to a question we did not ask.
+    if ALUMINUM_CATEGORY in named or state.get("pending_question_slot") == BASE_CATEGORY_SLOT:
+        _set_slot(state, BASE_CATEGORY_SLOT, base)
 
 
 def _is_number(value: Any) -> bool:
@@ -468,6 +526,46 @@ def _store_slot_answer(state: dict[str, Any], category: str, slot_name: str, raw
         # We carry no real bin-size metadata — the yard number IS the trailer length the
         # customer needs, so mirror it into the canonical slot everything else reads.
         _set_slot(state, "trailer_length_ft", value)
+
+
+# A bare yes/no/shrug answers the optional question but names no equipment, so there is nothing for
+# the feature matcher to match on. Same for anything phrased as a refusal — "no ramps" is not a
+# request for ramps, and mirroring it would search for the very thing they turned down.
+_NON_FEATURE_ANSWERS = frozenset({
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "fine", "no", "nope", "none", "n/a", "na",
+    "maybe", "idk", "not sure", "no preference", "any", "either", "whatever", "doesn't matter",
+    "does not matter", "dont matter", "don't matter",
+})
+_NEGATED_ANSWER_RE = re.compile(r"^(?:no|not|none|nothing|never|without|don'?t|do\s+not)\b", re.IGNORECASE)
+# One optional answer often names several pieces of equipment ("AC, windows and cabinets"). They are
+# separate features and are matched separately — kept as one phrase, the whole string has to match.
+_FEATURE_SPLIT_RE = re.compile(r"\s*(?:,|;|/|\band\b|\bplus\b|&)\s*", re.IGNORECASE)
+
+
+def _mirror_optional_answer_as_feature(
+    state: dict[str, Any], category: str, slot_name: str, raw_answer: Any
+) -> None:
+    """Mirror a descriptive optional answer into the non-metadata feature list.
+
+    "Butterfly gates", "scissor lift", "drive-over fenders", "lined walls" — we hold no metadata
+    field for any of them, so stored only under their own slot they never reach the search: nothing
+    filters on them and nothing ranks on them. The feature matcher is the one thing that acts on
+    them, so the answer has to land there too. Analyze is told to emit these as features itself;
+    this is the net for the turns it forgets.
+    """
+    if slot_name not in feature_like_optional_slots(category or ""):
+        return
+    text = str(raw_answer or "").strip()
+    if text.casefold().strip(" .!") in _NON_FEATURE_ANSWERS or _NEGATED_ANSWER_RE.match(text):
+        return
+    parts = [part for part in _FEATURE_SPLIT_RE.split(text) if part.strip()]
+    features, _ = sanitize_non_metadata_features(parts or [text])
+    known = state.setdefault("non_metadata_features", [])
+    existing = {feature.casefold() for feature in known}
+    for feature in features:
+        if feature.casefold() not in existing:
+            known.append(feature)
+            existing.add(feature.casefold())
 
 
 def _brand_only_points_at_a_listing(state: dict[str, Any], analysis: TurnAnalysis, brand: str) -> bool:
@@ -552,6 +650,7 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         if not known:
             continue
         _store_slot_answer(state, category, answer.slot_name, answer.raw_answer)
+        _mirror_optional_answer_as_feature(state, category, answer.slot_name, answer.raw_answer)
     # A question the LLM marked answered must advance even if it was vague/partial and
     # produced no parseable value (spec: loose answer -> null, never re-ask).
     pending = state.get("pending_question_slot")
@@ -703,6 +802,7 @@ def apply_analysis_to_state(state: dict[str, Any]) -> dict[str, Any]:
     if not _apply_clarification(state, state["turn"]):
         _apply_category(state, state["turn"])
     _apply_extraction(state, state["turn"])
+    _apply_aluminum_base_category(state)
     _fill_category_slot_aliases(state)
     _refresh_pending_change_dimensions(state)
     _inject_width_question(state, haul)

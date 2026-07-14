@@ -6,6 +6,10 @@ from typing import Any
 
 
 CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
+    # Flatbeds default to an 8 ft deck width unless the customer supplies a
+    # different width. Defaults are stored with source="default", so a width
+    # extracted from the same or any later turn replaces this value normally.
+    "Flatbed": {"trailer_width_ft": 8.0},
     # Example:
     # "Utility": {"item_or_trailer_width_ft": 6.92, "hitch_type": "Bumper Pull"},
 }

@@ -124,9 +124,11 @@ def test_feature_search_keeps_requested_make_strict(monkeypatch):
 
     search_module.search_node(state)
 
-    assert len(calls) == 1
+    # The make stays a hard filter in the feature-aware search itself — it is only ever dropped by
+    # the last-resort category-only pass, which announces itself as showing alternatives.
     assert calls[0]["metadata_filters"]["make"] == "Diamond C"
     assert calls[0]["requested_features"] == ["electric winch"]
+    assert calls[0].get("category_only_filters") in (None, False)
     assert "brand_relaxed" not in state["turn_outcome"]
 
 
@@ -220,3 +222,68 @@ def test_no_results_no_system_trigger(monkeypatch):
     state["qualification_complete"] = True
     search_module.search_node(state)
     assert state["turn_outcome"].get("system_email_triggers", []) == []
+
+
+def test_zero_results_relaxes_every_filter_but_the_category(monkeypatch):
+    # Each hard filter is all-or-nothing: one unmet 24 ft minimum empties the screen even when the
+    # category is full of trailers the customer would look at. Keep the category, drop the gates,
+    # and show the closest alternatives instead of nothing.
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        search_module,
+        "search_pinecone_listings",
+        _fake_search(calls, [[], [_listing("u1"), _listing("u2")]]),
+    )
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["qualification_complete"] = True
+    state["slots"] = {"trailer_length_ft": 24.0, "hitch_type": ["Gooseneck"]}
+
+    search_module.search_node(state)
+
+    assert len(calls) == 2
+    assert calls[1]["category_only_filters"] is True
+    assert calls[1]["category"] == "Dump"
+    # The requirements are not thrown away — they still shape the query and the fit rerank.
+    assert calls[1]["slots"] == state["slots"]
+    assert state["turn_outcome"]["filters_relaxed"] is True
+    assert set(state["turn_outcome"]["relaxed_filters_dropped"]) == {"length", "hitch type"}
+    assert state["turn_outcome"]["result_count"] == 2
+
+
+def test_the_relaxed_pass_keeps_the_non_metadata_features(monkeypatch):
+    # Features never filtered anything — they rank. They are the customer's standing preferences
+    # and survive the relaxed pass; only a category change clears them.
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        search_module,
+        "search_pinecone_listings",
+        _fake_search(calls, [[], [_listing("u1")]]),
+    )
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["qualification_complete"] = True
+    state["brand_preference"] = "Obscure Brand"
+    state["non_metadata_features"] = ["electric winch"]
+
+    search_module.search_node(state)
+
+    assert calls[1]["category_only_filters"] is True
+    assert calls[1]["requested_features"] == ["electric winch"]
+    assert state["non_metadata_features"] == ["electric winch"]
+    assert state["turn_outcome"]["relaxed_filters_dropped"] == ["brand"]
+
+
+def test_nothing_to_relax_means_no_second_search(monkeypatch):
+    # Category is the only filter, so a category-only retry would run the identical query and come
+    # back just as empty. We are genuinely out of stock for that category.
+    calls: list[dict] = []
+    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[]]))
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["qualification_complete"] = True
+
+    search_module.search_node(state)
+
+    assert len(calls) == 1
+    assert "filters_relaxed" not in state["turn_outcome"]

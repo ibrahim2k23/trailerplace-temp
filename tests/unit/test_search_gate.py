@@ -209,25 +209,74 @@ def test_blank_answer_leaves_its_own_question_unasked():
 
 
 def test_a_width_they_already_gave_is_not_asked_for_again():
-    # Seen live: "livestock, around 20ft long, 6ft wide" still injected "how wide is that item
-    # or trailer you need to haul?" — so qualification stayed open and the search never ran.
+    # Seen live: "around 20ft long, 6ft wide" still injected "how wide is that item or trailer you
+    # need to haul?" — so qualification stayed open and the search never ran. Uses Tilt, a
+    # width-ELIGIBLE category, so the guard under test is the one that fires.
     state = new_session_state("s1")
-    state["category"] = "Livestock"
-    say(state, "a trailer to haul my livestock, around 20ft in length, 6ft in width")
+    state["category"] = "Tilt"
+    # NB: cargo with no category of its own — "skid steer" would imply Equipment and raise a
+    # category-switch suggestion, which blocks the search for an unrelated reason.
+    say(state, "a trailer to haul my forklift, around 20ft long, 6ft wide, about 7000 lbs")
     assert turn(
         state,
         sample_analysis(
             intent="qualification_answer",
-            category_mentioned="Livestock",
-            extracted={**_empty_extracted(), "trailer_length_ft": 20.0, "trailer_width_ft": 6.0, "haul_item": "livestock"},
-            slot_answers=[{"slot_name": "trailer_length_ft", "raw_answer": "20ft"}],
-            haul_classification={"is_lightweight_utility_load": False, "needs_width_question": True, "haul_item_matched": "livestock"},
+            category_mentioned="Tilt",
+            extracted={
+                **_empty_extracted(),
+                "trailer_length_ft": 20.0,
+                "trailer_width_ft": 6.0,
+                "payload_lbs": 7000.0,
+                "haul_item": "forklift",
+            },
+            slot_answers=[{"slot_name": "haul_weight_lbs", "raw_answer": "7000 lbs"}],
+            haul_classification={"is_lightweight_utility_load": False, "needs_width_question": True, "haul_item_matched": "forklift"},
         ),
     ) is False  # qualification_node hasn't run yet in this helper
     assert "item_or_trailer_width_ft" not in state["injected_required_slots"]
     qualification_node(state)
     assert state["qualification_complete"] is True
     assert should_search(state)
+
+
+def test_width_exempt_categories_never_get_the_injected_width_question():
+    # Livestock/Dump/Utility/Flatbed/Enclosed/Aluminum bodies come as they come — their width is
+    # not a choice the customer makes, so we never ask it however wide the cargo is.
+    for category in ("Livestock", "Dump", "Utility", "Flatbed", "Enclosed", "Aluminum"):
+        state = new_session_state("s1")
+        state["category"] = category
+        say(state, "I need to haul a full-size tractor")
+        turn(
+            state,
+            sample_analysis(
+                intent="qualification_answer",
+                category_mentioned=category,
+                extracted={**_empty_extracted(), "haul_item": "tractor"},
+                slot_answers=[],
+                haul_classification={"is_lightweight_utility_load": False, "needs_width_question": True, "haul_item_matched": "tractor"},
+            ),
+        )
+        assert "item_or_trailer_width_ft" not in state["injected_required_slots"], category
+
+
+def test_width_eligible_categories_still_get_the_injected_width_question():
+    # The exemption must not disarm the width question everywhere — Car Hauler, Equipment and
+    # Tilt are exactly where a wide load decides whether the trailer works.
+    for category in ("Car Hauler", "Equipment", "Tilt"):
+        state = new_session_state("s1")
+        state["category"] = category
+        say(state, "I need to haul a full-size tractor")
+        turn(
+            state,
+            sample_analysis(
+                intent="qualification_answer",
+                category_mentioned=category,
+                extracted={**_empty_extracted(), "haul_item": "tractor"},
+                slot_answers=[],
+                haul_classification={"is_lightweight_utility_load": False, "needs_width_question": True, "haul_item_matched": "tractor"},
+            ),
+        )
+        assert "item_or_trailer_width_ft" in state["injected_required_slots"], category
 
 
 def test_looking_for_a_trailer_to_haul_a_tractor_moves_the_category():

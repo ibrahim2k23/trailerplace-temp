@@ -30,6 +30,11 @@ def _record_shown_listings(state: dict, outcome: dict, reply) -> None:
     fresh = [item for item in shown if item.get("url") and item["url"] not in already]
     state.setdefault("shown_listings", []).extend(fresh)
     state["shown_urls"] = sorted(already | {item["url"] for item in fresh})
+    if shown:
+        # What "the 5th one" refers to: the batch currently on their screen, not everything we
+        # have ever sent. Numbered against the cumulative list, a reference to the second batch
+        # silently resolved to a trailer from the first.
+        state["last_shown_listings"] = shown
     if not shown:
         # Nothing reached the customer, so there is nothing to tell the team about.
         outcome["outbox_events"] = [
