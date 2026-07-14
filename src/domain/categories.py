@@ -36,7 +36,7 @@ _NAMING_TERMS: dict[str, list[str]] = {
     "Utility": ["utility"],
     "Fiber": ["fiber", "splicing trailer", "fiber optic "],
     "Race Trailer": ["race trailer", "enclosed car hauler"],
-    "Roll Off": ["roll off", "roll-off", "dumpster"],
+    "Roll Off": ["roll off", "roll-off", "dumpster","trailer with bins","bin trailer", "3 bins"],
     "Diesel Tank": ["diesel tank", "fuel tank", "tank trailer"],
     "Flatbed": ["flatbed", "hotshot", "step deck", "dovetail", "platform", "flat bed", "dove tail"],
     "Dump": ["dump", "dump trailer"],
@@ -52,6 +52,7 @@ _CARGO_TERMS: dict[str, list[str]] = {
     "Utility": ["landscape", "lawnmower", "atv", "bike", "motorcycle", "landscaping", "lawn mower", "land scaping"],
     "Dump": ["scissor lift", "hoist", "telescopic", "front lift"],
     "Livestock": ["galyean", "star trailer", "calico trailer", "goats", "hogs", "cattle"],
+    "Roll Off": ["roll off", "roll-off", "dumpster","trailer with bins","bin trailer","3 bins"],
 }
 
 # Backward-compatible merged view (naming terms first) for callers that only need
