@@ -144,14 +144,41 @@ _RECOMMENDATION_INTENTS = frozenset({
 })
 
 
+def _contact_only_turn(analysis: TurnAnalysis) -> bool:
+    """The message handed over contact details and said nothing about trailers.
+
+    Judged from what the extractor actually pulled out, not from the intent label: the analyzer
+    sometimes labels a bare "I'm John, john@x.com" as a recommendation-ish intent, and that label
+    alone was enough to trigger a category list at someone who never mentioned a trailer.
+    """
+    extracted = analysis.extracted
+    gave_contact = bool(analysis.contact.name or analysis.contact.email or analysis.contact.phone)
+    said_anything_else = bool(
+        extracted.haul_item
+        or extracted.non_metadata_features
+        or extracted.brand_preference
+        or extracted.hitch_type
+        or extracted.trailer_length_ft is not None
+        or extracted.trailer_width_ft is not None
+        or extracted.trailer_height_ft is not None
+        or extracted.payload_lbs is not None
+        or analysis.slot_answers
+        or analysis.user_question_to_answer
+    )
+    return gave_contact and not said_anything_else
+
+
 def _has_recommendation_basis(state: Any, analysis: TurnAnalysis) -> bool:
     """Is there any reason to put a list of trailer TYPES in front of them?
 
-    Only two: they asked for one, or they have told us something about the job - cargo, a size, a
-    feature - that a recommendation can be built from. A customer who has just handed over their
-    name and email has told us nothing about trailers, and answering that with four category
-    suggestions is recommending into thin air. Ask them which type they want instead.
+    Only two: they asked for one (or said they want a trailer without naming a type), or they have
+    told us something about the job - cargo, a size, a feature - that a recommendation can be built
+    from. A customer who has just handed over their name and email has told us nothing about
+    trailers, and answering that with four category suggestions is recommending into thin air. Ask
+    them which type they want instead.
     """
+    if _contact_only_turn(analysis):
+        return False
     if analysis.intent in _RECOMMENDATION_INTENTS:
         return True
     if _state_get(state, "non_metadata_features", None):
@@ -208,6 +235,33 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         lines.append(_category_question_line(state, analysis))
     if int(_state_get(state, "pending_question_repeats", 0) or 0) == 1:
         lines.append("- The user did not answer it last time - acknowledge their message first, then re-ask casually, once.")
+    pending_brand = _state_get(state, "pending_brand_categories")
+    if pending_brand and isinstance(pending_brand, dict):
+        brand = pending_brand.get("brand") or "that brand"
+        categories = list(pending_brand.get("categories") or [])
+        if len(categories) == 1:
+            lines.append(
+                f"- BRAND QUESTION (this owns the reply): they asked about {brand} without naming a trailer type, "
+                f"and our {brand} stock is all in ONE category: {categories[0]}. Say exactly that in one short "
+                f"line, then ask a clear yes/no: would they like to go with {categories[0]}? Do NOT show or "
+                "mention listings, do NOT list other categories, and ask no other question."
+            )
+        elif categories:
+            listed = ", ".join(categories)
+            lines.append(
+                f"- BRAND QUESTION (this owns the reply): they asked about {brand} without naming a trailer type. "
+                f"We carry {brand} in exactly these categories: {listed}. Present ONLY these as a bulleted list "
+                "(bold category name, em dash, one short line on what it is best for), then ask which one they "
+                "want to go with. Do NOT add other categories, do NOT show or mention listings, and ask no other "
+                "question."
+            )
+    if _outcome_get(turn_outcome, "brand_offer_declined"):
+        declined_brand = _outcome_get(turn_outcome, "brand_offer_declined")
+        lines.append(
+            f"- They declined the {declined_brand} category we offered, so we dropped the {declined_brand} "
+            "preference. Acknowledge in one short line (no apology), then ask plainly which type of trailer "
+            "they are looking for. Do not mention the brand again unless they do."
+        )
     suggestion = _state_get(state, "pending_category_suggestion")
     if suggestion and isinstance(suggestion, dict):
         suggested = suggestion.get("suggested_category")
@@ -438,9 +492,10 @@ DO THIS ONLY when BOTH are true:
   (a) no category is settled ("Category" in CONTEXT below is empty, or they are moving off the one they
       had); AND
   (b) they gave us something to recommend FROM: their cargo, a feature, a job - or they asked us to
-      recommend or said they cannot decide.
-NEVER OTHERWISE. A name, an email, a hello, or an FAQ tells us nothing about the trailer they need -
-recommending off it is guessing. Just ask which type of trailer they are after, in one plain sentence.
+      recommend, said they cannot decide, or said they want a trailer without naming any type.
+NEVER OTHERWISE. A name, an email, a phone number, a hello, or an FAQ tells us nothing about the trailer
+they need - recommending off it is guessing. Just ask which type of trailer they are after, in one plain
+sentence.
 
 When you DO recommend, use 3 or 4 types from OUR CATEGORIES above, laid out like this:
 

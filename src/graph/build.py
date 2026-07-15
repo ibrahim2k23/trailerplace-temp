@@ -54,7 +54,7 @@ def should_search(state: dict) -> bool:
     """
     if not state.get("qualification_complete"):
         return False
-    if state.get("pending_category_change") or state.get("pending_category_suggestion"):
+    if state.get("pending_category_change") or state.get("pending_category_suggestion") or state.get("pending_brand_categories"):
         return False
     turn = state.get("turn")
     if turn:
@@ -83,6 +83,10 @@ def _route(state: dict) -> str:
     # A category move (or a suggested one) always pauses to ask before anything else:
     # the new category's questions are unanswered, so there is nothing to search on yet.
     if state.get("pending_category_change") or state.get("pending_category_suggestion"):
+        return "respond"
+    # A brand named before any category: ask which of that make's categories they want
+    # before qualification would ask its generic "what type of trailer?".
+    if state.get("pending_brand_categories"):
         return "respond"
     # Qualification is the gate for everything else. It re-checks the current category's
     # required slots every turn, so a category change re-opens the questions instead of

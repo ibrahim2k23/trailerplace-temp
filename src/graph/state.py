@@ -35,6 +35,9 @@ class SessionState(TypedDict, total=False):
     search_pending: bool
     pending_category_change: dict | None
     pending_category_suggestion: dict | None
+    # A brand named before any category: {"brand": ..., "categories": [...]} — we ask which of
+    # that make's categories they want (or yes/no when it only comes in one).
+    pending_brand_categories: dict | None
     shown_listings: list[dict]
     # The last batch of listings actually put on screen. "The 5th one" means the 5th of THESE —
     # numbering it against the cumulative shown_listings makes every reference point at the wrong
@@ -93,6 +96,7 @@ def new_session_state(session_id: str) -> SessionState:
         "search_pending": False,
         "pending_category_change": None,
         "pending_category_suggestion": None,
+        "pending_brand_categories": None,
         "shown_listings": [],
         "last_shown_listings": [],
         "shown_urls": [],

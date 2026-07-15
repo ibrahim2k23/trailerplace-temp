@@ -329,3 +329,38 @@ def test_single_history_url_answering_a_question_is_left_alone():
     reply = respond_with_all_listings(llm, state, analysis, {"listings": []})
     assert len(llm.calls) == 1
     assert "https://example.test/dump-1" in reply.assistant_text
+
+
+def test_contact_only_turn_gets_a_plain_type_question_not_recommendations():
+    # Seen live: a chat opened with just a name and email was answered with a 3-category
+    # recommendation list because the analyzer mislabeled the turn. Contact-only turns have
+    # no recommendation basis, whatever the intent label says.
+    analysis = sample_analysis(
+        intent="recommendation_request",  # the mislabel
+        category_mentioned=None,
+        slot_answers=[],
+        user_question_to_answer=None,
+        contact={"name": "Ibrahim", "email": "ibrahim@x.ai", "phone": None},
+        extracted={
+            "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
+            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
+        },
+    )
+    state = {"category": None, "slots": {}, "messages": [{"role": "user", "content": "I'm Ibrahim, ibrahim@x.ai"}]}
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you looking for?"})
+    assert "Ask it as ONE plain sentence" in system
+    assert "so RECOMMEND" not in system
+
+
+def test_brand_question_lines_render_single_and_multi():
+    analysis = sample_analysis(intent="general_question", category_mentioned=None)
+    base_state = {"category": None, "slots": {}, "messages": [{"role": "user", "content": "do you carry Iron Bull?"}]}
+    multi = dict(base_state, pending_brand_categories={"brand": "Iron Bull Trailers", "categories": ["Dump", "Equipment"]})
+    system, _ = build_respond_prompt(multi, analysis, {})
+    assert "BRAND QUESTION" in system
+    assert "Dump, Equipment" in system
+    single = dict(base_state, pending_brand_categories={"brand": "Delco", "categories": ["Livestock"]})
+    system, _ = build_respond_prompt(single, analysis, {})
+    assert "ONE category: Livestock" in system
+    assert "yes/no" in system

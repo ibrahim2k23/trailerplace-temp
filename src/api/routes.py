@@ -280,12 +280,13 @@ def get_session_debug_state(session_id: str) -> DebugStateResponse:
 
 @router.post("/session/reset")
 def reset_session(request: ResetRequest) -> dict[str, str]:
-    """Always 200. An unknown or malformed session id is a no-op (M8 §4)."""
+    """Always 200. An unknown or malformed session id is a no-op (M8 §4).
+
+    Only drops the in-memory copy so "New Conversation" starts clean. The durable row is
+    never closed: a session id is a bookmark someone can put back in the URL bar at any
+    time, and it must still load its full history whenever that happens.
+    """
     clear_session(request.session_id)
-    try:
-        conversation_store.close_session(request.session_id)
-    except Exception:  # noqa: BLE001 - "New Conversation" must never fail for the user
-        logger.exception("close_session failed for %s", request.session_id)
     return {"status": "ok"}
 
 

@@ -876,3 +876,142 @@ def test_category_change_swaps_shown_urls_and_return_restores_them():
     apply_with(state, sample_analysis(intent="category_change", category_mentioned="Livestock", slot_answers=[], extracted=_empty_extracted()))
     assert state["category"] == "Livestock"
     assert state["shown_urls"] == ["https://x/livestock-1"]  # its own history is back
+
+
+# --- Cargo-only signal: a mislabeled intent still raises the suggestion / change -----
+
+
+def test_cargo_on_a_mislabeled_intent_still_raises_the_suggestion():
+    # The analyzer called "I'll be hauling a tractor on it" a general_question; the cargo
+    # is still a want, so the switch suggestion must fire (results not yet shown).
+    state = new_session_state("s1")
+    state["category"] = "Tilt"
+    say(state, "I'll be hauling a tractor on it")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="general_question",
+            category_mentioned=None,
+            slot_answers=[],
+            extracted={**_empty_extracted(), "haul_item": "tractor"},
+        ),
+    )
+    assert state["category"] == "Tilt"  # never a silent move
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+
+
+def test_cargo_on_a_mislabeled_intent_after_results_starts_keep_drop_change():
+    state = new_session_state("s1")
+    state["category"] = "Tilt"
+    state["slots"] = {"trailer_length_ft": 20.0}
+    state["slot_sources"] = {"trailer_length_ft": "user"}
+    state["shown_urls"] = ["https://x/tilt-1"]
+    say(state, "I'll be hauling a tractor on it")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="general_question",
+            category_mentioned=None,
+            slot_answers=[],
+            extracted={**_empty_extracted(), "haul_item": "tractor"},
+        ),
+    )
+    assert state["category"] == "Equipment"
+    assert state["pending_category_change"]["dimensions"]["length"] == 20.0
+
+
+def test_info_only_question_with_cargo_stays_inert():
+    state = new_session_state("s1")
+    state["category"] = "Tilt"
+    say(state, "could a tilt handle a tractor?")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="general_question",
+            is_category_info_only=True,
+            category_mentioned=None,
+            slot_answers=[],
+            extracted={**_empty_extracted(), "haul_item": "tractor"},
+        ),
+    )
+    assert state["category"] == "Tilt"
+    assert state["pending_category_suggestion"] is None
+    assert state["pending_category_change"] is None
+
+
+def test_implied_category_resolves_from_extracted_haul_item_text():
+    # The raw message has no cargo term the resolver knows; the extractor's haul_item does.
+    state = new_session_state("s1")
+    state["category"] = "Tilt"
+    say(state, "I've got a John Deere 5075E to move")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            slot_answers=[],
+            extracted={**_empty_extracted(), "haul_item": "John Deere 5075E tractor"},
+        ),
+    )
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+
+
+# --- Brand named before any category: ask which of its categories they want ---------
+
+
+def _brand_turn(state, brand="Iron Bull Trailers", text="I'm interested in an Iron Bull"):
+    say(state, text)
+    return sample_analysis(
+        intent="feature_request_no_category",
+        category_mentioned=None,
+        slot_answers=[],
+        extracted={**_empty_extracted(), "brand_preference": brand},
+    )
+
+
+def test_brand_only_message_asks_which_of_its_categories(monkeypatch):
+    import src.graph.apply_analysis as aa
+    monkeypatch.setattr(aa, "categories_for_make", lambda make: ("Dump", "Equipment"))
+    state = new_session_state("s1")
+    apply_with(state, _brand_turn(state))
+    assert state["category"] is None
+    assert state["pending_brand_categories"] == {"brand": "Iron Bull Trailers", "categories": ["Dump", "Equipment"]}
+    assert state["brand_preference"] == "Iron Bull Trailers"
+
+
+def test_brand_single_category_yes_adopts_it_and_keeps_the_brand(monkeypatch):
+    import src.graph.apply_analysis as aa
+    monkeypatch.setattr(aa, "categories_for_make", lambda make: ("Dump",))
+    state = new_session_state("s1")
+    apply_with(state, _brand_turn(state))
+    assert state["pending_brand_categories"]["categories"] == ["Dump"]
+    say(state, "sure, let's do that")
+    apply_with(state, sample_analysis(category_confirm_answer="yes", intent="category_selection", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["brand_preference"] == "Iron Bull Trailers"
+    assert state["pending_brand_categories"] is None
+
+
+def test_brand_single_category_no_drops_the_brand_preference(monkeypatch):
+    import src.graph.apply_analysis as aa
+    monkeypatch.setattr(aa, "categories_for_make", lambda make: ("Dump",))
+    state = new_session_state("s1")
+    apply_with(state, _brand_turn(state))
+    say(state, "no, not that")
+    apply_with(state, sample_analysis(category_confirm_answer="no", intent="category_selection", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] is None
+    assert state["brand_preference"] is None
+    assert state["pending_brand_categories"] is None
+    assert state["turn_outcome"]["brand_offer_declined"] == "Iron Bull Trailers"
+
+
+def test_brand_multi_category_answer_names_one_and_keeps_the_brand(monkeypatch):
+    import src.graph.apply_analysis as aa
+    monkeypatch.setattr(aa, "categories_for_make", lambda make: ("Dump", "Equipment"))
+    state = new_session_state("s1")
+    apply_with(state, _brand_turn(state))
+    say(state, "the dump trailer")
+    apply_with(state, sample_analysis(intent="category_selection", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["brand_preference"] == "Iron Bull Trailers"
+    assert state["pending_brand_categories"] is None

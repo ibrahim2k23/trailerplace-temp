@@ -112,6 +112,7 @@ Skipped slots: {_state_get(state, "skipped_slots", []) or []}    No-preference s
 Pending question: "{pending_text or 'none'}" (slot={pending_slot or 'none'}, already re-asked {_state_get(state, "pending_question_repeats", 0)} time(s))
 Pending category change awaiting keep/drop answer: {_state_get(state, "pending_category_change", None) or "none"}
 Pending category switch suggestion awaiting yes/no: {_state_get(state, "pending_category_suggestion", None) or "none"}
+Pending brand-category question (we asked which of that make's categories they want): {_state_get(state, "pending_brand_categories", None) or "none"}
 Results already shown to this customer: {"yes" if (_state_get(state, "shown_urls", []) or []) else "no"}
 Contact: name={name} email={email} phone={phone} declined={bool(_state_get(state, "contact_declined", False))}
 We asked for contact details last turn: {"yes — this message is most likely their answer to it" if _state_get(state, "contact_asks", 0) and not _state_get(state, "contact_gate_closed", False) else "no"}
@@ -127,8 +128,9 @@ Interpret the message by intent; do NOT assume it answers the pending question.
   the cargo names the category for them. Use category_selection (or category_change if one is already
   selected), is_category_info_only=false, and category_mentioned = the category that cargo belongs on.
 - category_selection: the user clearly selects a trailer category.
-- feature_request_no_category: the user gives features but no category.
-- recommendation_request: the user asks for recommendations with unclear category.
+- feature_request_no_category: the user gives features (a size, weight, hitch, or equipment) but no category.
+- recommendation_request: the user asks for recommendations with unclear category - OR says they want
+  a trailer without naming a type, cargo, or feature ("I'm looking for a trailer", "I need a trailer").
 - qualification_answer: the user answers the pending qualification question.
 - requirement_change/drop_requirements: update or forget requirements WITHIN the current category (no new trailer type).
 - category_change: a category is ALREADY selected AND the user WANTS a DIFFERENT trailer category - whether replacing ("show me dump trailers instead", "switch to tilt", "I don't want tilt anymore") OR adding another ("I'm also looking for a dump trailer", "I also need a utility trailer"). Set intent="category_change", category_mentioned=the new category, is_category_info_only=false. We carry a single active category, so wanting another one is a change.
@@ -188,7 +190,8 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
 We ask ONCE for name and an email or phone (once more only if they gave half). Read their reply to it:
 - They give any piece ("it's Ibrahim", "03304388550", "ibrahim@x.ai") -> fill `contact`.
   intent=contact_info_provided, unless the message ALSO does something bigger - then use that intent and
-  still fill `contact`.
+  still fill `contact`. A message that is ONLY contact details says NOTHING about trailers: haul_item
+  null, slot_answers empty, no features, no brand - and it is NEVER a recommendation_request.
 - They refuse ("no thanks", "I'd rather not", "just show me trailers first") -> intent=contact_declined.
   Only when they really are refusing; we drop the subject permanently.
 - They ignore it and say something else -> classify the message on its own merits, every `contact` field
@@ -222,13 +225,15 @@ with them. Do not treat a value from the old category
 as an answer to a new category's question, and do not mark answered_current_question=true for a question the
 new category has not asked yet.
 
-=== CATEGORY-SWITCH CONFIRMATION ANSWER ===
-Applies ONLY when "Pending category switch suggestion" above is not "none". We asked the user
-something like: "A tractor is usually best on an Equipment trailer - want me to switch you over,
-or stay with Tilt?" Read their reply and set category_confirm_answer:
-- "yes" -> they accept the switch ("yes", "sure", "sounds good", "switch me", "equipment then", "ok let's do that").
-- "no"  -> they decline and want to stay ("no", "stay", "keep tilt", "no thanks, tilt is fine").
+=== CATEGORY-SWITCH / BRAND-CATEGORY CONFIRMATION ANSWER ===
+Applies ONLY when "Pending category switch suggestion" OR "Pending brand-category question" above is
+not "none". We asked either "want me to switch you to Equipment?" or "we carry {{brand}} in X - want
+to go with X?". Read their reply and set category_confirm_answer:
+- "yes" -> they accept ("yes", "sure", "sounds good", "switch me", "equipment then", "ok let's do that").
+- "no"  -> they decline ("no", "stay", "keep tilt", "no thanks", "not that one").
 - null  -> their message does not answer the question at all (they asked something else / changed the subject).
+If instead they NAME a category (one we listed for the brand, or any other), that is category_selection
+with category_mentioned set - not a yes/no.
 Set category_confirm_answer to null on every other turn.
 
 === CATEGORY-CHANGE KEEP/DROP ANSWER ===

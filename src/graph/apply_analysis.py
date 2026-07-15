@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from src import conversation_store
-from src.domain.brands import brand_mentioned_in_text
+from src.domain.brands import brand_mentioned_in_text, categories_for_make
 from src.domain.categories import (
     WIDTH_EXCLUDED_CATEGORIES,
     category_clarification_question,
@@ -14,7 +14,7 @@ from src.domain.categories import (
     resolve_category_matches,
 )
 from src.domain.defaults import defaults_for
-from src.domain.normalizer import normalize_category
+from src.domain.normalizer import normalize_category, normalize_make
 from src.domain.slot_map import (
     _SLOT_METADATA_FILTER_MAP,
     brand_is_actually_a_hitch,
@@ -315,6 +315,22 @@ def _wants_category_action(analysis: TurnAnalysis, current: str | None) -> bool:
     return analysis.intent in allowed
 
 
+def _implied_category_from_cargo(cargo_text: str | None) -> str | None:
+    """The category a cargo phrase points at, resolved from the term lists.
+
+    Run on the EXTRACTED haul item as well as the raw message: "I've got a John Deere 5075E to
+    move" contains no cargo term the resolver knows, but the extractor's haul_item ("John Deere
+    5075E tractor") often does. Missing that meant no suggestion ever fired for the turn.
+    """
+    for category, _tier in resolve_category_matches(cargo_text or ""):
+        return category
+    return None
+
+
+def _cargo_mentioned(analysis: TurnAnalysis) -> str | None:
+    return analysis.haul_classification.haul_item_matched or analysis.extracted.haul_item
+
+
 def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis) -> tuple[str | None, str | None]:
     """Split this message's category signals into an explicit choice and an implied one.
 
@@ -331,6 +347,8 @@ def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis)
         elif tier == "cargo" and implied is None:
             implied = category
     named = named_all[0] if named_all else None
+    if implied is None:
+        implied = _implied_category_from_cargo(_cargo_mentioned(analysis))
     if ALUMINUM_CATEGORY in named_all:
         # "an aluminum utility trailer", "a utility trailer but in aluminum": two type words, and
         # only one of them is a category we stock. Aluminum IS the category; the other type is the
@@ -373,6 +391,69 @@ def _accept_category_suggestion(state: dict[str, Any], suggestion: dict[str, Any
         state["pending_category_change"] = {"new_category": new_category, "dimensions": carried}
 
 
+# Hitch values masquerade as categories in the workbook for some makes; they are never an
+# answerable "which category?" option.
+_NON_CATEGORY_CATEGORIES = {"Gooseneck", "Bumper Pull", "Unknown"}
+
+
+def _brand_available_categories(brand: str) -> list[str]:
+    categories = categories_for_make(normalize_make(brand)) or categories_for_make(brand)
+    return [category for category in categories if category not in _NON_CATEGORY_CATEGORIES]
+
+
+def _maybe_ask_brand_categories(state: dict[str, Any], analysis: TurnAnalysis) -> None:
+    """A brand named before any category: look up which categories that make comes in and ask.
+
+    One category -> a yes/no ("want to go with Livestock?"); several -> "which of these?".
+    The brand_preference itself is recorded by extraction as usual; it is UNRECORDED later
+    only if they decline the single category we offered.
+    """
+    brand = analysis.extracted.brand_preference
+    text = _current_user_text(state)
+    if not brand or brand_is_actually_a_hitch(brand, text) or not brand_mentioned_in_text(brand, text):
+        return
+    categories = _brand_available_categories(brand)
+    if not categories:
+        return
+    state["pending_brand_categories"] = {"brand": brand, "categories": categories}
+
+
+def _resolve_pending_brand_categories(state: dict[str, Any], analysis: TurnAnalysis) -> bool:
+    """Read the answer to "which category for that brand?". True when the turn is consumed.
+
+    A named/implied category (whether or not it was on the list) adopts it and keeps the brand.
+    "yes" on a single-category offer adopts that category. "no" declines it — and the brand
+    preference goes with it, since it was only ever recorded to serve that offer. A contact-gate
+    answer keeps the question alive for the turn the gate borrowed; anything else lets it drop
+    so an ignored question can never wedge the conversation.
+    """
+    pending = state.get("pending_brand_categories")
+    if not pending:
+        return False
+    if state.get("category"):  # a category arrived some other way — the question is moot
+        state["pending_brand_categories"] = None
+        return False
+    named, implied = _named_and_implied_categories(state, analysis)
+    target = named or implied
+    single = pending["categories"][0] if len(pending["categories"]) == 1 else None
+    if not target and single and analysis.category_confirm_answer == "yes":
+        target = single
+    if target:
+        state["pending_brand_categories"] = None
+        _start_category(state, target)
+        return True
+    if analysis.category_confirm_answer == "no":
+        state["pending_brand_categories"] = None
+        state["brand_preference"] = None
+        # Extraction must not re-record the brand off this "no" message.
+        state["turn_outcome"]["brand_offer_declined"] = pending["brand"]
+        return True
+    if analysis.intent in {"contact_info_provided", "contact_declined"}:
+        return False  # the contact gate borrowed this turn; ask the brand question next
+    state["pending_brand_categories"] = None  # they moved on — never wedge the flow on it
+    return False
+
+
 def _apply_clarification(state: dict[str, Any], analysis: TurnAnalysis) -> bool:
     """Deterministic category-clarification (spec: ask clarification before mapping).
 
@@ -405,6 +486,10 @@ def _apply_clarification(state: dict[str, Any], analysis: TurnAnalysis) -> bool:
 
 
 def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
+    # (0) Answer to a pending "which category for that brand?" question.
+    if _resolve_pending_brand_categories(state, analysis):
+        return
+
     # (a) Answer to a pending "should we switch you to X?" suggestion.
     suggestion = state.get("pending_category_suggestion")
     if suggestion:
@@ -451,6 +536,17 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     # An informational question never moves the category, no matter what it mentions.
     current = state.get("category")
     if not _wants_category_action(analysis, current):
+        # The analyzer sometimes labels "I'll be hauling a tractor on it" as plain chat
+        # (general_question, smalltalk) instead of a shopping intent, and the gate above then
+        # swallowed the cargo signal entirely — the suggestion the spec requires never fired.
+        # A freshly mentioned cargo is a real signal regardless of the label, as long as the
+        # message is a statement and not an informational question.
+        if current:
+            _apply_cargo_only_signal(state, analysis, current)
+        else:
+            # No category yet and the gate failed (e.g. "do you carry Iron Bull?" is a
+            # question): a brand mention still deserves the which-category-for-that-brand ask.
+            _maybe_ask_brand_categories(state, analysis)
         return
 
     named, implied = _named_and_implied_categories(state, analysis)
@@ -459,6 +555,9 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     if not current:
         target = named or implied
         if not target:
+            # A brand with no category is a question for the workbook: which categories does
+            # that make come in? Ask, instead of the generic "what type of trailer?".
+            _maybe_ask_brand_categories(state, analysis)
             return
         _start_category(state, target)
         # "a tilt trailer to haul a tractor": take them at their word (Tilt), but a tractor
@@ -482,6 +581,26 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         return
     if implied and implied != current:
         # Only a cargo/task term points elsewhere — confirm before moving them.
+        _suggest_category_switch(state, implied, analysis)
+
+
+def _apply_cargo_only_signal(state: dict[str, Any], analysis: TurnAnalysis, current: str | None) -> None:
+    """Honour a cargo mention on a turn whose INTENT failed the category-action gate.
+
+    Never a silent move: pre-results it raises the switch SUGGESTION (a question), post-results
+    it starts the keep/drop change the spec calls for. Informational questions stay inert, and a
+    cargo that maps to the current category is simply an answer, not a signal.
+    """
+    if not current or analysis.is_category_info_only:
+        return
+    if state.get("pending_category_change") or state.get("pending_category_suggestion"):
+        return
+    implied = _implied_category_from_cargo(_cargo_mentioned(analysis))
+    if not implied or implied == current:
+        return
+    if state.get("shown_urls"):
+        _begin_category_change(state, implied)
+    else:
         _suggest_category_switch(state, implied, analysis)
 
 

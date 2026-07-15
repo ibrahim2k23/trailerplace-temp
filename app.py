@@ -10,6 +10,7 @@ If you see imports using another project's .venv, deactivate it first
 (PowerShell: Remove-Item Env:\\VIRTUAL_ENV) or use run_streamlit.ps1.
 """
 import html
+import logging
 import os
 import secrets
 import time
@@ -149,13 +150,19 @@ components.html(
   const savedTheme = parentWindow.localStorage.getItem(storageKey);
   const chatKey = "trailerplace-chat-session";
   const urlSession = url.searchParams.get("chat_session");
-  const savedSession = parentWindow.sessionStorage.getItem(chatKey);
+  // localStorage, not sessionStorage: the session id must survive the tab closing and the
+  // hosted app going to sleep, or every fresh visit silently starts a brand-new conversation.
+  // (sessionStorage is still read once so sessions saved by older builds keep working.)
+  const savedSession =
+    parentWindow.localStorage.getItem(chatKey) ||
+    parentWindow.sessionStorage.getItem(chatKey);
 
   if (!urlSession && savedSession) {
     url.searchParams.set("chat_session", savedSession);
     parentWindow.location.replace(url.toString());
     return;
   } else if (urlSession) {
+    parentWindow.localStorage.setItem(chatKey, urlSession);
     parentWindow.sessionStorage.setItem(chatKey, urlSession);
   }
 
@@ -1144,12 +1151,22 @@ if (
         st.session_state.backend_ready_status = "error"
         st.session_state.backend_ready_error = "Conversation could not be restored."
         st.rerun()
-    if restored.get("exists") and not restored.get("closed"):
+    # A closed conversation still restores: "New Conversation" and "Log out" always move the
+    # URL to a fresh session id, so a URL pointing at a closed session is the user coming back
+    # to that conversation on purpose — show them their chat, don't blank the screen.
+    if restored.get("exists"):
         st.session_state.messages = restored.get("messages") or []
         st.session_state.sales_phase = restored.get("sales_phase") or "main"
         for key in ("customer_full_name", "customer_email", "customer_phone"):
             if restored.get(key) is not None:
                 st.session_state[key] = restored[key]
+    logging.getLogger("trailerplace.app").info(
+        "session restore: sid=%s exists=%s closed=%s messages=%d",
+        st.session_state.chat_session_id,
+        bool(restored.get("exists")),
+        bool(restored.get("closed")),
+        len(restored.get("messages") or []),
+    )
     st.session_state.durable_session_restored = True
 if "last_thinking_result" not in st.session_state:
     st.session_state.last_thinking_result = None

@@ -71,7 +71,7 @@ def test_durable_turn_receipts_and_mismatch(engine):
             pass
 
 
-def test_leads_conversation_restore_close_and_feedback(engine):
+def test_leads_conversation_restore_and_feedback(engine):
     Base.metadata.create_all(engine)
     sid = str(uuid.uuid4())
     lead_id = store.create_or_get_soft_lead(session_id=sid)
@@ -88,8 +88,6 @@ def test_leads_conversation_restore_close_and_feedback(engine):
     assert restored["exists"] is True
     assert restored["messages"][0]["content"] == "hi"
     assert store.get_conversation(sid)[0]["feedback"] == "good"
-    store.close_session(sid)
-    assert store.restore_session(sid)["closed"] is True
 
 
 def test_outbox_delivery_retry_and_unique_event(engine):
@@ -190,11 +188,13 @@ def test_feedback_lands_on_turn_0_and_turn_3_and_survives_later_turns(engine):
     assert restored["messages"][7]["user_feedback"] == "wrong trailer"
 
 
-def test_closed_session_reports_closed(engine):
+def test_a_session_is_never_closed_and_always_restores(engine):
+    # A session id is a bookmark: nothing in the product ever closes the durable row
+    # anymore, so a customer pasting an old session id back into the URL always gets
+    # their full history rather than a blank chat.
     Base.metadata.create_all(engine)
     sid = str(uuid.uuid4())
     lead_id = store.create_or_get_soft_lead(session_id=sid)
     store.upsert_conversation(session_id=sid, lead_id=lead_id, conversation=[])
-    store.close_session(sid)
     restored = store.restore_session(sid)
-    assert restored["exists"] is True and restored["closed"] is True
+    assert restored["exists"] is True and restored["closed"] is False

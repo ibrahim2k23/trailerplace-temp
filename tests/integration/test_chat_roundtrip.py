@@ -44,9 +44,10 @@ def test_chat_two_turn_roundtrip_persistence_off(monkeypatch):
 
 
 def test_session_restore_text_only_and_reset(monkeypatch):
+    # A session id is a bookmark a customer can put back in the URL bar at any time, so
+    # reset must never close the durable row - only drop the in-memory copy so "New
+    # Conversation" starts clean without losing the old conversation's history forever.
     monkeypatch.setattr("src.conversation_store.restore_session", lambda sid: {"exists": True, "messages": [{"role": "assistant", "content": "hi", "listings": [{"url": "x"}]}], "sales_phase": "main"})
-    closed = []
-    monkeypatch.setattr("src.conversation_store.close_session", lambda sid: closed.append(sid))
     _sessions["s1"] = {"session_id": "s1"}
     client = TestClient(create_app())
     restored = client.get("/session/s1").json()
@@ -54,7 +55,6 @@ def test_session_restore_text_only_and_reset(monkeypatch):
     reset = client.post("/session/reset", json={"session_id": "s1"})
     assert reset.status_code == 200
     assert "s1" not in _sessions
-    assert closed == ["s1"]
 
 
 def test_width_question_roundtrip(monkeypatch):

@@ -329,21 +329,6 @@ def restore_session(session_id: str) -> dict[str, Any]:
         }
 
 
-def close_session(session_id: str) -> None:
-    if not persistence_enabled():
-        return
-    ensure_persistence_schema()
-    try:
-        sid = _as_uuid(session_id)
-    except Exception:
-        return
-    with _session() as session:
-        row = session.get(ChatbotConversation, sid)
-        if row and row.closed_at is None:
-            row.closed_at = datetime.now(timezone.utc)
-            session.commit()
-
-
 def deliver_pending_outbox_async(limit: int = 10) -> None:
     """Fire-and-forget outbox drain, submitted to the background persistence pool.
 
