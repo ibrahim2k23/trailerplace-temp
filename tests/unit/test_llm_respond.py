@@ -273,3 +273,59 @@ def test_missing_listing_fields_are_absent_from_the_block_not_rendered_as_none()
     # The stock number is part of the title and is how the customer and the team name the trailer.
     assert "TITLE: 2026 Gooseneck Livestock - 91632" in block_line
     assert "COPY THE TITLE EXACTLY" in system
+
+
+def test_search_ran_zero_results_is_a_no_more_matches_reply_not_no_search():
+    # A "show me more" that excludes every remaining listing used to render as NO SEARCH RAN,
+    # which forbade mentioning inventory — so the model replayed old listings from history.
+    analysis = sample_analysis()
+    state = {
+        "category": "Dump",
+        "messages": [{"role": "user", "content": "show me more"}],
+        "shown_urls": ["https://example.test/dump-1"],
+        "shown_listings": _listings("https://example.test/dump-1"),
+    }
+    system, _ = build_respond_prompt(state, analysis, {"search_ran": True, "result_count": 0, "listings": []})
+    assert "SEARCH RAN AND FOUND NO NEW MATCHES" in system
+    assert "already seen every match" in system
+    assert "979-532-1486" in system
+    assert "(NONE - NO SEARCH RAN)" not in system
+
+
+def test_foreign_history_urls_are_retried_and_stripped():
+    # No search ran, but the draft replays two old listings from history — the exact
+    # stale-replay pattern from the live audit. The guard retries once; when the retry
+    # still replays them, their cards are stripped from the reply.
+    analysis = sample_analysis()
+    state = {
+        "category": "Equipment",
+        "messages": [{"role": "user", "content": "switch me to equipment"}],
+        "shown_listings": _listings("https://example.test/dump-1", "https://example.test/dump-2"),
+        "shown_urls": ["https://example.test/dump-1", "https://example.test/dump-2"],
+    }
+    bad = _reply("https://example.test/dump-1", "https://example.test/dump-2", lead="Here are our Equipment trailers:")
+    llm = FakeLLM(outputs=[bad, bad.model_copy()])
+    reply = respond_with_all_listings(llm, state, analysis, {"listings": []})
+    assert len(llm.calls) == 2
+    assert "YOUR PREVIOUS DRAFT WAS REJECTED" in llm.calls[1]["system"]
+    assert "https://example.test/dump-1" not in reply.assistant_text
+    assert "https://example.test/dump-2" not in reply.assistant_text
+    assert reply.cited_listing_urls == []
+
+
+def test_single_history_url_answering_a_question_is_left_alone():
+    # Quoting ONE old listing back (answering "how much was that one?") is legitimate.
+    analysis = sample_analysis()
+    state = {
+        "category": "Dump",
+        "messages": [{"role": "user", "content": "how much was the first one?"}],
+        "shown_listings": _listings("https://example.test/dump-1", "https://example.test/dump-2"),
+    }
+    ok = ReplyOutput(
+        assistant_text="The [Trailer 1](https://example.test/dump-1) is $9,995. Would you like to see more?",
+        cited_listing_urls=["https://example.test/dump-1"],
+    )
+    llm = FakeLLM(outputs=[ok])
+    reply = respond_with_all_listings(llm, state, analysis, {"listings": []})
+    assert len(llm.calls) == 1
+    assert "https://example.test/dump-1" in reply.assistant_text

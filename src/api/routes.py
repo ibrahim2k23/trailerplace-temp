@@ -323,8 +323,12 @@ def _handle_chat_in_memory(request: ChatRequest) -> dict[str, Any]:
         state["customer_phone"] = request.customer_phone
     # Union frontend-supplied shown URLs into backend state (dedupe source of
     # truth). Applies in BOTH persistence modes since this runs on every turn.
+    # They land in the CURRENT category's bucket too — shown_urls is per category now.
     if request.already_shown_listing_urls:
         state["shown_urls"] = sorted(set(state.get("shown_urls", [])) | set(request.already_shown_listing_urls))
+        buckets = state.setdefault("shown_urls_by_category", {})
+        category = state.get("category") or ""
+        buckets[category] = sorted(set(buckets.get(category, [])) | set(request.already_shown_listing_urls))
     state.setdefault("messages", []).append(
         {
             "role": "user",

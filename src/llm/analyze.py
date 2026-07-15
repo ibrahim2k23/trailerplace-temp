@@ -185,25 +185,23 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
 - If mid-qualification and the message is an interruption: answered_current_question=false and put the interruption verbatim in user_question_to_answer.
 
 === THE CONTACT ASK (we ask for their details before we start qualifying) ===
-At the very start we ask ONCE for the customer's name and an email or phone, and once more only if they
-gave us half of it. Read their reply to that ask carefully - the whole gate turns on this:
-- They give a name / email / phone (in any wording, "it's Ibrahim", "03304388550", "ibrahim@x.ai") ->
-  put each piece in `contact`. intent=contact_info_provided (unless the message ALSO does something bigger,
-  in which case use that intent and still fill `contact`).
-- They refuse ("no thanks", "I'd rather not", "not giving that out", "just show me trailers first") ->
-  intent=contact_declined. We drop the subject permanently, so only use this when they really are refusing.
-- They ignore it and say something else (a question, a requirement, a category) -> classify the message
-  on its own merits and leave every `contact` field null. Do NOT invent a name from the conversation.
-- A contact ask is never a qualification answer: when a qualification question is pending and the message
+We ask ONCE for name and an email or phone (once more only if they gave half). Read their reply to it:
+- They give any piece ("it's Ibrahim", "03304388550", "ibrahim@x.ai") -> fill `contact`.
+  intent=contact_info_provided, unless the message ALSO does something bigger - then use that intent and
+  still fill `contact`.
+- They refuse ("no thanks", "I'd rather not", "just show me trailers first") -> intent=contact_declined.
+  Only when they really are refusing; we drop the subject permanently.
+- They ignore it and say something else -> classify the message on its own merits, every `contact` field
+  null. Do NOT invent a name from the conversation.
+- A contact ask is never a qualification answer: if a qualification question is pending and the message
   only hands over contact details, answered_current_question=false.
 - NEVER re-extract a name/email/phone we already have (see Contact in CURRENT STATE) unless they change it.
 
 === COUNTER-QUESTIONS (they answer our question with a question) ===
-If a qualification question is pending and the message asks something instead of answering it, that is an
-interruption, not an answer: answered_current_question=false, and put their question VERBATIM in
-user_question_to_answer so the reply can answer it and then re-ask ours. This is true even when their
-question is about trailers, our stock, or the question itself ("why do you need to know?", "what sizes do
-you have?"). Only set answered_current_question=true when the message actually contains the answer.
+A pending qualification question answered with a question is an interruption, not an answer:
+answered_current_question=false, their question VERBATIM in user_question_to_answer - even when it is
+about trailers, our stock, or the question itself ("why do you need to know?", "what sizes do you
+have?"). answered_current_question=true ONLY when the message actually contains the answer.
 
 === WHEN THE INVENTORY SEARCH RUNS (your intent decides this - be precise) ===
 The code searches inventory ONLY when all three of these are true: every qualification question for the
@@ -218,8 +216,9 @@ It must NOT run on chat that changes nothing: listing_interest ("I like the 8138
 intent that describes the message and do NOT re-extract requirements you already have — re-stating an
 unchanged value is fine, but never invent a slot_answer for a slot the message did not talk about.
 A category change re-opens that category's questions: everything we knew about the old category is dropped
-except the length/width/payload measurements, so the new category's questions ALL get asked again, one at a
-time, before any search - whatever the customer does with them. Do not treat a value from the old category
+except the length/width/payload/hitch values (offered back in a keep-or-drop question), so the new
+category's questions ALL get asked again, one at a time, before any search - whatever the customer does
+with them. Do not treat a value from the old category
 as an answer to a new category's question, and do not mark answered_current_question=true for a question the
 new category has not asked yet.
 
@@ -234,42 +233,36 @@ Set category_confirm_answer to null on every other turn.
 
 === CATEGORY-CHANGE KEEP/DROP ANSWER ===
 Applies ONLY when "Pending category change awaiting keep/drop answer" above is not "none".
-The user is telling us which of the previously collected measurements to carry into the new
-category. Only length, width, and payload can carry over (everything else was dropped).
-- keep_fields_answer: "all" (keep every measurement offered), "none" (drop them all / start fresh),
+The user is telling us which of the previously collected requirements to carry into the new
+category. Only length, width, payload, and hitch type can carry over (everything else was dropped).
+- keep_fields_answer: "all" (keep everything offered), "none" (drop them all / start fresh),
   or "some" (keep only certain ones).
-- kept_fields: the measurements to keep, named as any of: trailer_length_ft, trailer_width_ft, payload_lbs.
-- dropped_fields: measurements they explicitly drop (optional; "some" already implies the rest are dropped).
+- kept_fields: the ones to keep, named as any of: trailer_length_ft, trailer_width_ft, payload_lbs, hitch_type.
+- dropped_fields: the ones they explicitly drop (optional; "some" already implies the rest are dropped).
 - Mixed replies are allowed: "keep the length, drop the width, and make the payload 7000" ->
   keep_fields_answer="some", kept_fields=["trailer_length_ft"], and ALSO extract payload_lbs=7000 in `extracted`.
-- A NEW value for a measurement ("make it 8 ft wide instead") is keep-with-update: extract it into
-  `extracted` normally AND include that measurement in kept_fields.
+- A NEW value ("make it 8 ft wide instead", "gooseneck this time") is keep-with-update: extract it
+  into `extracted` normally AND include that field in kept_fields.
 
 === CARGO AND SIZE: ONE SENTENCE OFTEN GIVES YOU BOTH - TAKE BOTH ===
-The THING they haul and the SIZE of it are two separate facts. A number stuck to the cargo is still a
-size. Never throw one away because you were only looking for the other.
+The THING they haul and its SIZE/WEIGHT are separate facts; never throw one away because you were only
+looking for the other.
 
-STEP 1 - What is the cargo? It is whatever they say they will haul, load, carry, move, or put on the
-trailer. Store their words. It does NOT have to be a specific machine.
-  "I want to haul a 10ft item"       -> cargo = "10ft item"
-  "random things"                    -> cargo = "random things"
-  "wood, pipes, furniture, whatever" -> cargo = "wood, pipes, furniture"
-  "just odds and ends for the yard"  -> cargo = "odds and ends for the yard"
-  "my Bobcat"                        -> cargo = "Bobcat"
-A vague answer is still an answer. NEVER return null cargo just because the wording was broad, and
-never turn it into something more specific than they said.
+STEP 1 - The cargo is whatever they say they will haul/load/carry, stored in THEIR words. A vague answer
+is still an answer - NEVER return null cargo because the wording was broad, and never make it more
+specific than they said.
+  "I want to haul a 10ft item" -> "10ft item"; "random things" -> "random things";
+  "wood, pipes, furniture, whatever" -> "wood, pipes, furniture"; "my Bobcat" -> "Bobcat"
 
-STEP 2 - Is a size or weight attached to that cargo? If yes, it is ALSO a measurement. Extract it too.
-  "haul a 10ft item"        -> cargo = "10ft item"      AND trailer_length_ft = 10
-  "20 foot pipes"           -> cargo = "pipes"          AND trailer_length_ft = 20
-  "a 7000 lb skid steer"    -> cargo = "skid steer"     AND payload_lbs = 7000
-  "a 16ft boat, about 2 tons" -> cargo = "16ft boat"    AND trailer_length_ft = 16 AND payload_lbs = 4000
-The length of the ITEM is the length we need on the trailer. Treat them as the same number.
+STEP 2 - A size or weight attached to the cargo is ALSO a measurement; the ITEM's length IS the trailer
+length we need.
+  "haul a 10ft item" -> cargo "10ft item" AND trailer_length_ft=10; "20 foot pipes" -> trailer_length_ft=20
+  "a 7000 lb skid steer" -> payload_lbs=7000; "a 16ft boat, about 2 tons" -> trailer_length_ft=16 AND payload_lbs=4000
 
-STEP 3 - Put both under the right names for the CURRENT category (see "Qualification questions for this
-category" above). The cargo goes in the cargo slot that category asks by - haul_item, haul_material,
-vehicle_type, use_case, fiber_use_case, or equipment_list - and in extracted.haul_item. The length goes in
-extracted.trailer_length_ft and in that category's length slot. Emit a slot_answers pair for EACH of them.
+STEP 3 - Put both under the CURRENT category's names (see "Qualification questions" above): cargo in that
+category's cargo slot (haul_item / haul_material / vehicle_type / use_case / fiber_use_case /
+equipment_list) and in extracted.haul_item; length in extracted.trailer_length_ft and the category's
+length slot. Emit a slot_answers pair for EACH.
   Dump + "I haul random things"  -> slot_answers = [{{slot_name: "haul_material", raw_answer: "random things"}}]
   Equipment + "a 10ft item"      -> slot_answers = [{{slot_name: "haul_item", raw_answer: "10ft item"}},
                                                     {{slot_name: "haul_length_ft", raw_answer: "10 ft"}}]
@@ -324,34 +317,25 @@ Gooseneck is BOTH a hitch type and one of the makes we carry. Read it wrong and 
   preference -> null value + add "hitch_type" to numeric_no_preference (never both in the list).
 
 === NON-METADATA FEATURES - STRICT FEATURE-ONLY EXTRACTION ===
-`non_metadata_features` contains ONLY the actual equipment, construction, convenience, or functional
-feature the customer requested and which has no dedicated metadata field. Examples: "insulated", "rear
-ramp door", "electric winch", "LED interior lights", "side rails", "butterfly gates", "toolbox",
-"spare tire", "escape door".
+`non_metadata_features` = ONLY actual equipment/construction/functional features with no dedicated
+metadata field: "insulated", "rear ramp door", "electric winch", "LED interior lights", "side rails",
+"butterfly gates", "toolbox", "spare tire", "escape door".
 
-Return each feature as a short, self-contained value. Remove every word that merely describes the trailer's
-identity or its searchable metadata. Never copy the surrounding noun phrase verbatim.
-- "an insulated enclosed trailer"                              -> ["insulated"]
-- "a black 16 ft Cargo Craft enclosed trailer with a winch"   -> ["winch"]
-- "a Diamond C equipment trailer with a rear ramp door"        -> ["rear ramp door"]
-- "an aluminum utility trailer with LED lights"                -> ["LED lights"]
-- "gooseneck livestock trailer with butterfly gates"           -> ["butterfly gates"]
+Each feature is a short, self-contained value with every identity/metadata word stripped - never the
+surrounding noun phrase:
+- "an insulated enclosed trailer"                            -> ["insulated"]
+- "a black 16 ft Cargo Craft enclosed trailer with a winch"  -> ["winch"]
+- "a Diamond C equipment trailer with a rear ramp door"      -> ["rear ramp door"]
+- "gooseneck livestock trailer with butterfly gates"         -> ["butterfly gates"]
 
-NEVER include any of the following in `non_metadata_features`, alone or attached to a real feature:
-- trailer identity nouns: "trailer", "trailers", model year, stock number, title, or model name
-- any known make/brand from KNOWN MAKES/BRANDS
-- any category, category synonym, or sub-category from TRAILER CATEGORIES (for example "enclosed",
-  "equipment", "utility", "livestock", "tilt", "aluminum")
-- a hitch type ("gooseneck", "bumper pull", "tag-along") -> extracted.hitch_type
-- a length, width, or height -> extracted.trailer_length_ft / _width_ft / _height_ft
-- a weight, payload, capacity, or GVWR -> extracted.payload_lbs when applicable
-- a colour ("black", "white", "silver", etc.)
-- a price or budget ("under $25k", "cheapest one")
-
-Do not combine an actual feature with the current/mentioned category: output "insulated", never
-"insulated enclosed". Do not repeat or expand a feature from earlier conversation context. Extract only
-features newly stated in the LATEST USER MESSAGE; already-collected features remain in state automatically.
-If removing metadata leaves no real functional feature, return an empty list.
+NEVER include, alone or attached to a real feature:
+- trailer identity nouns ("trailer", model year, stock number, model name), any known make/brand,
+  any category or synonym from TRAILER CATEGORIES ("enclosed", "utility", "tilt", "aluminum", ...)
+- a hitch type -> extracted.hitch_type; a length/width/height -> extracted.trailer_*_ft;
+  a weight/payload/GVWR -> extracted.payload_lbs
+- a colour, price, or budget
+Output "insulated", never "insulated enclosed". Extract only features newly stated in the LATEST USER
+MESSAGE (already-collected ones stay in state). If nothing real remains, return an empty list.
 
 --- ALSO PUT OPTIONAL-QUESTION ANSWERS IN THE FEATURE LIST ---
 These optional questions for the current category describe EQUIPMENT, not numbers, and we have no

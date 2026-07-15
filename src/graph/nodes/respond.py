@@ -26,10 +26,16 @@ def _record_shown_listings(state: dict, outcome: dict, reply) -> None:
         return
     cited = {_url_key(url) for url in (reply.cited_listing_urls or [])}
     shown = [item for item in listings if _url_key(item.get("url")) in cited]
-    already = set(state.get("shown_urls") or [])
-    fresh = [item for item in shown if item.get("url") and item["url"] not in already]
+    # The exclude-list is per category: shown_urls holds the CURRENT category's list, and the
+    # bucket keeps every category's so a switch away (and back) swaps the right one in.
+    buckets = state.setdefault("shown_urls_by_category", {})
+    category = state.get("category") or ""
+    already = set(buckets.get(category) or state.get("shown_urls") or [])
+    all_recorded = {item.get("url") for item in state.get("shown_listings") or []}
+    fresh = [item for item in shown if item.get("url") and item["url"] not in all_recorded]
     state.setdefault("shown_listings", []).extend(fresh)
-    state["shown_urls"] = sorted(already | {item["url"] for item in fresh})
+    buckets[category] = sorted(already | {item["url"] for item in shown if item.get("url")})
+    state["shown_urls"] = buckets[category]
     if shown:
         # What "the 5th one" refers to: the batch currently on their screen, not everything we
         # have ever sent. Numbered against the cumulative list, a reference to the second batch

@@ -113,9 +113,21 @@ def _current_user_text(state: dict[str, Any]) -> str:
     return ""
 
 
+def _swap_shown_urls_for_category(state: dict[str, Any], category: str) -> None:
+    """Point the exclude-list at THIS category's shown history.
+
+    shown_urls is what search skips as "already shown". Kept flat across categories it kept
+    hiding the old category's inventory forever; per category, a switch stops excluding the
+    old category's trailers and a return to it restores its own exclusions.
+    """
+    buckets = state.setdefault("shown_urls_by_category", {})
+    state["shown_urls"] = list(buckets.get(category) or [])
+
+
 def _start_category(state: dict[str, Any], category: str) -> None:
     state["category"] = category
     state["qualification_complete"] = False
+    _swap_shown_urls_for_category(state, category)
     conversation_store.update_lead_item_of_interest(state["session_id"], category)
     for key, value in defaults_for(category).items():
         _set_slot(state, key, value, "default")
@@ -134,6 +146,9 @@ _DIMENSION_KINDS: dict[str, str] = {
 _DIMENSION_SLOT_KEYS: dict[str, tuple[str, ...]] = {
     dim: slots_of_kind(kind) for dim, kind in _DIMENSION_KINDS.items()
 }
+# Hitch rides along in the keep/drop question: it is as much a standing requirement as a
+# length, and silently carrying (or silently dropping) it was wrong both ways.
+_DIMENSION_SLOT_KEYS["hitch"] = ("hitch_type",)
 # When re-seeding a kept dimension into the new category, write it under the canonical slot;
 # _fill_category_slot_aliases then copies it into whatever name the new category asks by.
 _DIMENSION_TARGET_SLOTS: dict[str, tuple[str, ...]] = {
@@ -141,16 +156,22 @@ _DIMENSION_TARGET_SLOTS: dict[str, tuple[str, ...]] = {
     "width": ("trailer_width_ft",),
     "height": ("trailer_height_ft",),
     "payload": ("payload_lbs",),
+    "hitch": ("hitch_type",),
 }
 
 
-def _carried_dimensions(slots: dict[str, Any]) -> dict[str, float]:
-    """The length/width/payload values currently held, keyed by canonical dimension."""
-    carried: dict[str, float] = {}
+def _carried_dimensions(slots: dict[str, Any]) -> dict[str, Any]:
+    """The length/width/payload/hitch values currently held, keyed by canonical dimension."""
+    carried: dict[str, Any] = {}
     for dim, keys in _DIMENSION_SLOT_KEYS.items():
         for key in keys:
-            if _is_number(slots.get(key)):
-                carried[dim] = float(slots[key])
+            value = slots.get(key)
+            if dim == "hitch":
+                if value:  # a hitch is text (or a one-item list), never a number
+                    carried[dim] = value
+                    break
+            elif _is_number(value):
+                carried[dim] = float(value)
                 break
     return carried
 
@@ -159,7 +180,7 @@ def _kept_dimension_names(kept_fields: list[str]) -> set[str]:
     """Map the LLM's kept_fields (canonical names or raw slot keys) to dimension names."""
     names: set[str] = set()
     for field in kept_fields:
-        token = (field or "").strip().lower()
+        token = (field or "").strip().lower().replace(" ", "_")
         for dim, keys in _DIMENSION_SLOT_KEYS.items():
             if token == dim or token in keys:
                 names.add(dim)
@@ -187,6 +208,7 @@ def _switch_category(
     state["pending_question_slot"] = None
     state["pending_question_repeats"] = 0
     state["qualification_complete"] = False
+    _swap_shown_urls_for_category(state, new_category)
     for key, value in defaults_for(new_category).items():
         _set_slot(state, key, value, "default")
     for dim, value in kept_dims.items():
@@ -330,6 +352,27 @@ def _suggest_category_switch(state: dict[str, Any], suggested: str, analysis: Tu
     }
 
 
+def _accept_category_suggestion(state: dict[str, Any], suggestion: dict[str, Any]) -> None:
+    """They said yes to "switch to X?" — move them, but do not throw away why we suggested it.
+
+    The cargo they named and the features they voiced are the REASON for the switch, so both
+    travel with them (the haul item answers the new category's cargo question through the slot
+    aliases). Measurements and hitch get the same one-turn keep/drop question a requested
+    category change gets, instead of the silent carry-over this path used to do.
+    """
+    slots = state.get("slots", {}) or {}
+    carried = _carried_dimensions(slots)
+    haul_item = slots.get("haul_item") or suggestion.get("cargo")
+    features = list(state.get("non_metadata_features", []) or [])
+    new_category = suggestion["suggested_category"]
+    _switch_category(state, new_category, carried, source=CARRIED_SLOT_SOURCE)
+    if haul_item:
+        _set_slot(state, "haul_item", haul_item)
+    state["non_metadata_features"] = features
+    if carried:
+        state["pending_category_change"] = {"new_category": new_category, "dimensions": carried}
+
+
 def _apply_clarification(state: dict[str, Any], analysis: TurnAnalysis) -> bool:
     """Deterministic category-clarification (spec: ask clarification before mapping).
 
@@ -366,8 +409,7 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     suggestion = state.get("pending_category_suggestion")
     if suggestion:
         if analysis.category_confirm_answer == "yes":
-            # Already spent a turn asking; carry the measurements over without a second question.
-            _switch_category(state, suggestion["suggested_category"], _carried_dimensions(state.get("slots", {})))
+            _accept_category_suggestion(state, suggestion)
             return
         # "no", or they moved on without answering -> stay put and never re-ask.
         state["pending_category_suggestion"] = None

@@ -40,7 +40,11 @@ class SessionState(TypedDict, total=False):
     # numbering it against the cumulative shown_listings makes every reference point at the wrong
     # trailer the moment a second batch is shown.
     last_shown_listings: list[dict]
+    # shown_urls is the CURRENT CATEGORY's exclude-list (what "show me more" must skip).
+    # shown_urls_by_category keeps every category's list so a category change stops hiding
+    # the old category's inventory, and returning to it restores its own exclusions.
     shown_urls: list[str]
+    shown_urls_by_category: dict[str, list[str]]
     last_search_filters: dict | None
     injected_required_slots: list[str]
     turn: TurnAnalysis | None
@@ -92,6 +96,7 @@ def new_session_state(session_id: str) -> SessionState:
         "shown_listings": [],
         "last_shown_listings": [],
         "shown_urls": [],
+        "shown_urls_by_category": {},
         "last_search_filters": None,
         "injected_required_slots": [],
         "turn": None,

@@ -46,7 +46,7 @@ _NAMING_TERMS: dict[str, list[str]] = {
 
 _CARGO_TERMS: dict[str, list[str]] = {
     "Aluminum": ["lightweight", "won't rust", "wont rust", "will not rust"],
-    "Car Hauler": ["trailer without sides"],
+    "Car Hauler": ["trailer without sides","car"],
     "Equipment": ["skid steer", "mini ex", "mini excavator", "mini excuvator", "tractor"],
     "Enclosed": ["cargo"],
     "Utility": ["landscape", "lawnmower", "atv", "bike", "motorcycle", "landscaping", "lawn mower", "land scaping"],

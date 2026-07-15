@@ -804,3 +804,75 @@ def test_contact_details_never_change_a_category_already_chosen():
         ),
     )
     assert state["category"] == "Dump"
+
+
+# --- Suggestion accepted: cargo/features travel, dims+hitch get the keep/drop ask ----
+
+
+def test_suggestion_yes_keeps_haul_and_features_and_asks_keep_drop():
+    state = new_session_state("s1")
+    state["category"] = "Tilt"
+    state["slots"] = {"trailer_length_ft": 20.0, "hitch_type": ["Gooseneck"], "haul_item": "tractor"}
+    state["slot_sources"] = {key: "user" for key in state["slots"]}
+    state["non_metadata_features"] = ["ramps"]
+    say(state, "it's for hauling a tractor")
+    apply_with(state, sample_analysis(intent="qualification_answer", category_mentioned=None, slot_answers=[], extracted={**_empty_extracted(), "haul_item": "tractor"}))
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+    say(state, "yes, switch me")
+    apply_with(state, sample_analysis(category_confirm_answer="yes", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Equipment"
+    # The reason for the switch travels with them.
+    assert state["slots"]["haul_item"] == "tractor"
+    assert state["non_metadata_features"] == ["ramps"]
+    # The measurements and hitch are offered back, not silently carried.
+    change = state["pending_category_change"]
+    assert change["new_category"] == "Equipment"
+    assert change["dimensions"]["length"] == 20.0
+    assert change["dimensions"]["hitch"] == ["Gooseneck"]
+
+
+def test_keep_drop_none_after_suggestion_drops_carried_hitch_too():
+    state = new_session_state("s1")
+    state["category"] = "Tilt"
+    state["slots"] = {"trailer_length_ft": 20.0, "hitch_type": ["Gooseneck"]}
+    state["slot_sources"] = {key: "user" for key in state["slots"]}
+    say(state, "it's for hauling a tractor")
+    apply_with(state, sample_analysis(intent="qualification_answer", category_mentioned=None, slot_answers=[], extracted={**_empty_extracted(), "haul_item": "tractor"}))
+    say(state, "yes")
+    apply_with(state, sample_analysis(category_confirm_answer="yes", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["pending_category_change"]["dimensions"].get("hitch") == ["Gooseneck"]
+    say(state, "start fresh")
+    apply_with(state, sample_analysis(keep_fields_answer="none", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert "hitch_type" not in state["slots"]
+    assert "trailer_length_ft" not in state["slots"]
+
+
+def test_explicit_change_offers_hitch_in_keep_drop():
+    state = new_session_state("s1")
+    state["category"] = "Livestock"
+    state["slots"] = {"trailer_length_ft": 26.0, "hitch_type": ["Bumper Pull"]}
+    state["slot_sources"] = {key: "user" for key in state["slots"]}
+    say(state, "let's look at dump trailers instead")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    dims = state["pending_category_change"]["dimensions"]
+    assert dims["length"] == 26.0
+    assert dims["hitch"] == ["Bumper Pull"]
+
+
+# --- Per-category shown listings: a switch swaps the exclude-list ------------------
+
+
+def test_category_change_swaps_shown_urls_and_return_restores_them():
+    state = new_session_state("s1")
+    state["category"] = "Livestock"
+    state["shown_urls"] = ["https://x/livestock-1"]
+    state["shown_urls_by_category"] = {"Livestock": ["https://x/livestock-1"]}
+    say(state, "let's look at dump trailers instead")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["shown_urls"] == []  # Dump has shown nothing yet
+    say(state, "actually go back to livestock")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Livestock", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Livestock"
+    assert state["shown_urls"] == ["https://x/livestock-1"]  # its own history is back
