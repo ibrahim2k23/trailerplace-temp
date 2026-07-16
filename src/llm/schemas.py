@@ -62,6 +62,17 @@ class InventoryLookup(StrictBaseModel):
 
 
 class TurnAnalysis(StrictBaseModel):
+    # First on purpose: the model writes this digest before classifying, so the structured
+    # fields are filled with the message freshly restated — and the respond prompt re-uses
+    # it as a high-priority plain-text brief of what the customer wants this turn.
+    turn_summary: str = Field(
+        description=(
+            "2-3 short plain-text sentences: what the customer just said and what they want "
+            "this turn, with the specifics they gave (model names, sizes, weights, stock "
+            "numbers, contact details, the question they asked). Facts from THIS message in "
+            "context only - no advice, no recommendations, no routing decisions."
+        )
+    )
     intent: Literal[
         "general_question", "category_exploration", "category_selection",
         "feature_request_no_category", "recommendation_request",

@@ -186,6 +186,56 @@ def test_legacy_fit_path_still_discards_failing_candidate():
     assert debug["retained_candidate_count"] == 1
 
 
+def test_retain_all_keeps_undersize_candidates_and_orders_by_closeness():
+    # The category-only relaxed retry (category_only_filters -> retain_all=True). A 50 ft request
+    # against a pool where only one row meets 50 ft must NOT collapse to that one row: keep every
+    # under-length candidate and rank them closest-first. Reproduces the live "1 of 17" livestock
+    # bug where the relaxed pass returned a single trailer.
+    meets = _listing("meets", length="50 ft")
+    near = _listing("near", length="40 ft")
+    far = _listing("far", length="24 ft")
+
+    ranked, debug = search._rerank_listings_by_fit(
+        [near, far, meets],
+        required_length_ft=50.0,
+        required_payload_lbs=None,
+        required_width_ft=None,
+        required_height_ft=None,
+        warn_ratio=search.RERANK_WARN_RATIO,
+        extreme_ratio=search.RERANK_EXTREME_RATIO,
+        length_weight=search.RERANK_LENGTH_WEIGHT,
+        missing_dim_penalty=search.RERANK_MISSING_DIM_PENALTY,
+        retain_all=True,
+    )
+
+    # Every candidate is retained (not culled to the single 50 ft row) ...
+    assert debug["retained_candidate_count"] == 3
+    # ... and ordered by fit: the one that meets the length first, then closest under-length.
+    assert [item["url"] for item in ranked] == ["meets", "near", "far"]
+
+
+def test_retain_all_false_still_culls_undersize_candidates():
+    # The normal (non-relaxed) path is unchanged: an under-length row is dropped when a fitting
+    # row exists.
+    meets = _listing("meets", length="50 ft")
+    under = _listing("under", length="24 ft")
+
+    ranked, debug = search._rerank_listings_by_fit(
+        [under, meets],
+        required_length_ft=50.0,
+        required_payload_lbs=None,
+        required_width_ft=None,
+        required_height_ft=None,
+        warn_ratio=search.RERANK_WARN_RATIO,
+        extreme_ratio=search.RERANK_EXTREME_RATIO,
+        length_weight=search.RERANK_LENGTH_WEIGHT,
+        missing_dim_penalty=search.RERANK_MISSING_DIM_PENALTY,
+    )
+
+    assert [item["url"] for item in ranked] == ["meets"]
+    assert debug["retained_candidate_count"] == 1
+
+
 def test_combined_debug_logs_contain_cosine_features_fit_and_rank(caplog):
     caplog.set_level(logging.INFO, logger=search.__name__)
     _combined(

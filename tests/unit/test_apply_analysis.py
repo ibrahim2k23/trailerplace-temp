@@ -1015,3 +1015,196 @@ def test_brand_multi_category_answer_names_one_and_keeps_the_brand(monkeypatch):
     assert state["category"] == "Dump"
     assert state["brand_preference"] == "Iron Bull Trailers"
     assert state["pending_brand_categories"] is None
+
+
+def test_keep_drop_none_is_not_undone_by_analyzer_echo_of_the_dropped_value():
+    # Live failure (2026-07-15, session d1f0ba7f): Dump with a 9062 lbs payload, then
+    # "I am also looking for a 50ft trailer for my livestock". The switch carried the payload
+    # and asked keep/drop; the customer answered "nope, no specific needs" — and the analyzer
+    # ALSO echoed payload_lbs=9062 in `extracted` (copied from history, not the message),
+    # which re-stored the very value the answer had just dropped.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["slots"] = {"payload_lbs": 9062.0, "haul_weight_lbs": 9062.0}
+    state["slot_sources"] = {"payload_lbs": "user", "haul_weight_lbs": "user"}
+    say(state, "I am also looking for a 50ft trailer for my livestock")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Livestock",
+            extracted={**_empty_extracted(), "trailer_length_ft": 50.0, "haul_item": "livestock"},
+            slot_answers=[],
+        ),
+    )
+    assert state["category"] == "Livestock"
+    assert state["slots"]["trailer_length_ft"] == 50.0  # the new 50 ft, never the old length
+    assert state["pending_category_change"]["dimensions"] == {"payload": 9062.0}
+
+    say(state, "nope, no specific needs for any other feature")
+    apply_with(
+        state,
+        sample_analysis(
+            keep_fields_answer="none",
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "payload_lbs": 9062.0},  # analyzer echo of history
+            slot_answers=[{"slot_name": "haul_weight_lbs", "raw_answer": "9062 lbs"}],  # ditto
+        ),
+    )
+    assert state["pending_category_change"] is None
+    assert "payload_lbs" not in state["slots"]
+    assert "haul_weight_lbs" not in state["slots"]
+    assert state["slots"]["trailer_length_ft"] == 50.0
+
+    # A genuinely NEW value stated on a later turn still lands — the guard is one-turn only.
+    say(state, "actually it should handle 12000 lbs")
+    apply_with(
+        state,
+        sample_analysis(
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "payload_lbs": 12000.0},
+            slot_answers=[{"slot_name": "haul_weight_lbs", "raw_answer": "12000 lbs"}],
+        ),
+    )
+    assert state["slots"]["haul_weight_lbs"] == 12000.0
+
+
+def test_keep_drop_none_drops_a_carried_hitch_despite_an_echo():
+    state = new_session_state("s1")
+    state["category"] = "Equipment"
+    state["slots"] = {"hitch_type": ["Gooseneck"], "trailer_length_ft": 20.0}
+    state["slot_sources"] = {"hitch_type": "user", "trailer_length_ft": "user"}
+    say(state, "switch me to a dump trailer")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["pending_category_change"]["dimensions"] == {"length": 20.0, "hitch": ["Gooseneck"]}
+    say(state, "no, start over")
+    apply_with(
+        state,
+        sample_analysis(
+            keep_fields_answer="none",
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "hitch_type": ["Gooseneck"]},  # analyzer echo
+            slot_answers=[],
+        ),
+    )
+    assert "hitch_type" not in state["slots"]
+    assert "trailer_length_ft" not in state["slots"]
+
+
+def test_show_more_with_echoed_cargo_never_moves_the_category():
+    # Live failure (2026-07-16, session 81dc022f): on Dump with haul_item="some cargo" and
+    # results on screen, "i'd like to see more" came back from the analyzer with the stored
+    # haul_item echoed — and "cargo" is an Enclosed cargo term, so the cargo-only fallback
+    # yanked the customer to Enclosed with a keep/drop question instead of showing more dumps.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["slots"] = {"haul_item": "some cargo", "haul_material": "some cargo"}
+    state["slot_sources"] = {"haul_item": "user", "haul_material": "user"}
+    state["shown_urls"] = ["https://x/1"]
+    say(state, "i'd like to see more")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="show_more_results",
+            category_mentioned="Dump",
+            extracted={**_empty_extracted(), "haul_item": "some cargo"},  # analyzer echo
+            slot_answers=[],
+        ),
+    )
+    assert state["category"] == "Dump"
+    assert state["pending_category_change"] is None
+    assert state["pending_category_suggestion"] is None
+
+
+def test_echoed_cargo_on_any_turn_is_not_a_fresh_signal():
+    # Same echo on a plain qualification turn: the stored haul_item re-emitted by the
+    # analyzer must not re-raise the switch either — only a NEW cargo mention may.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["slots"] = {"haul_item": "some cargo"}
+    state["slot_sources"] = {"haul_item": "user"}
+    say(state, "sounds good")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "haul_item": "some cargo"},
+            slot_answers=[],
+        ),
+    )
+    assert state["category"] == "Dump"
+    assert state["pending_category_suggestion"] is None
+    # A genuinely NEW cargo still raises the suggestion.
+    say(state, "actually it's for hauling a tractor")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "haul_item": "tractor"},
+            slot_answers=[],
+        ),
+    )
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+
+
+def test_declined_switch_is_never_reraised_for_the_same_cargo():
+    # "stay on Dump" settles the some-cargo→Enclosed question for good; restating the same
+    # cargo (even as a raw cargo term in the text, past the echo guard) must not re-raise it.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    say(state, "I am looking for a dump trailer to haul some cargo")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "haul_item": "some cargo"},
+            slot_answers=[],
+        ),
+    )
+    assert state["pending_category_suggestion"]["suggested_category"] == "Enclosed"
+    say(state, "stay on Dump")
+    apply_with(state, sample_analysis(category_confirm_answer="no", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["declined_category_suggestions"] == [{"category": "Enclosed", "cargo": "some cargo"}]
+    # Results shown, same cargo restated in the text: no suggestion, and no outright change.
+    state["shown_urls"] = ["https://x/1"]
+    state["slots"]["haul_item"] = "some cargo"
+    say(state, "like I said, it's for hauling cargo")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            extracted={**_empty_extracted(), "haul_item": "cargo"},
+            slot_answers=[],
+        ),
+    )
+    assert state["category"] == "Dump"
+    assert state["pending_category_change"] is None
+    assert state["pending_category_suggestion"] is None
+    # But NAMING the category is always honoured — a decline only pins the cargo inference.
+    say(state, "ok switch me to an enclosed trailer")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Enclosed", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Enclosed"
+
+
+def test_frontend_shown_urls_do_not_flood_the_new_category_bucket():
+    # Live failure (2026-07-16, session 719c3eb9): the frontend re-sends the WHOLE chat's
+    # shown URLs on every request. Right after a Dump→Livestock switch swapped in Livestock's
+    # empty exclude list, the union wrote all 22 Dump URLs into the Livestock bucket.
+    from src.api.routes import merge_frontend_shown_urls
+
+    state = new_session_state("s1")
+    state["category"] = "Livestock"
+    state["shown_urls"] = []
+    state["shown_urls_by_category"] = {"Dump": ["https://x/dump-1", "https://x/dump-2"], "Livestock": []}
+    merge_frontend_shown_urls(state, ["https://x/dump-1", "https://x/dump-2"])
+    assert state["shown_urls"] == []
+    assert state["shown_urls_by_category"]["Livestock"] == []
+    # A URL the backend has never recorded anywhere (e.g. a restored session) still lands.
+    merge_frontend_shown_urls(state, ["https://x/livestock-9"])
+    assert state["shown_urls"] == ["https://x/livestock-9"]
+    assert state["shown_urls_by_category"]["Livestock"] == ["https://x/livestock-9"]

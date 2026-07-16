@@ -137,6 +137,8 @@ def test_expected_scenario_set_is_complete():
         "adversarial-contradictory-sizes", "adversarial-category-change-twice",
         "adversarial-paragraph-requirements", "adversarial-faq-midqual-then-answer",
         "adversarial-gibberish-input",
+        # Regressions replayed from live logs
+        "category-change-keep-drop-asked",
     }
     actual = {path.stem for path in SCENARIOS_DIR.glob("*.yaml")}
     assert actual == expected
@@ -158,7 +160,7 @@ def test_regression_suite_covers_every_scenario():
     scenarios = load_scenarios(SCENARIOS_DIR)
     regression = filter_by_tag(scenarios, REGRESSION_SUITE)
     assert {s["name"] for s in regression} == {s["name"] for s in scenarios}
-    assert len(regression) == 48  # 21 (M5) + 13 (M6) + 9 (M7) + 5 (M9 adversarial)
+    assert len(regression) == 49  # 21 (M5) + 13 (M6) + 9 (M7) + 5 (M9 adversarial) + 1 (live-log regression)
 
 
 def test_adversarial_suite_is_the_five_new_scenarios():

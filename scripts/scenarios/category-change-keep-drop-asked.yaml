@@ -1,0 +1,32 @@
+name: category-change-keep-drop-asked
+tags: [regression, category-change]
+# Regression for the 2026-07-15 live failure (session d1f0ba7f): Dump qualified with a
+# 9062 lbs payload, then "I am also looking for a 50ft trailer for my livestock".
+# The switch fired in state, but the respond model ignored the keep/drop instruction and
+# asked a generic "any other features?" question — so the customer's "nope" was never read
+# as a keep/drop answer, and the stale 9062 lbs payload polluted the Livestock search.
+turns:
+  - user: "my name is Ibrahim and email is ibrahim@esided.ai"
+  - user: "I am looking for a dump trailer to haul some random things"
+    expect_state:
+      category: "Dump"
+  - user: "9062"
+    expect_state:
+      category: "Dump"
+  - user: "I am also looking for a 50ft trailer for my livestock"
+    # Switch applies immediately; the reply must BE the keep/drop question about the
+    # carried payload — not a generic features/hitch question, and no listings.
+    expect_state:
+      category: "Livestock"
+    expect_reply_contains_any: ["9062", "9,062"]
+    expect_reply_not_contains: ["hitch"]
+  - user: "nope, no specific needs for any other feature"
+    # "nope" is a keep/drop refusal: the carried payload is dropped (and the analyzer echo
+    # of 9062 must not resurrect it), and with the 50 ft length already on file
+    # qualification completes and the search fires on its own.
+    expect_state:
+      category: "Livestock"
+      pending_category_change: null
+      "slot:payload_lbs": null
+      "slot:trailer_length_ft": 50.0
+    expect_listings: true

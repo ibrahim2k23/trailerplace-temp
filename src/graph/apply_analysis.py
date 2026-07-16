@@ -43,6 +43,38 @@ ALUMINUM_CATEGORY = "Aluminum"
 BASE_CATEGORY_SLOT = "base_category"
 
 
+def lookup_requested(turn: Any) -> bool:
+    """A direct-identifier inventory lookup rides along with ANY intent, not just intent=inventory_lookup.
+
+    The analyze prompt deliberately keeps the dominant intent on the bigger action ("here's my
+    email, I'm looking for a Diamond C LPX" -> contact_info_provided), so gating on the intent
+    silently dropped those lookups. The extracted identifier block is the signal.
+    """
+    lookup = getattr(turn, "inventory_lookup", None) if turn else None
+    if not (lookup and lookup.is_lookup and lookup.confidence in {"medium", "high"}):
+        return False
+    # Make alone is a brand preference, never a lookup — require a real identifier.
+    return bool(lookup.stock_number or lookup.model_text or (lookup.year and lookup.make))
+
+
+def _brand_is_lookup_make(analysis: TurnAnalysis, brand: str) -> bool:
+    """True when the extracted brand is just the make half of this turn's lookup identifier.
+
+    "I am looking for Iron Bull Dtb" is a request to pull up specific stock, not a standing
+    instruction to filter every later search to Iron Bull — recording it as brand_preference
+    also fired the which-category-for-that-brand question over the lookup's own results.
+    """
+    if not lookup_requested(analysis):
+        return False
+    make = analysis.inventory_lookup.make or ""
+    if not make:
+        return False
+    # "Iron Bull" vs "Iron Bull Trailers": same make, different suffix — containment either way.
+    brand_norm = normalize_make(brand).lower()
+    make_norm = normalize_make(make).lower()
+    return brand_norm in make_norm or make_norm in brand_norm
+
+
 def enforce_haul_classification_invariant(haul: HaulClassification) -> HaulClassification:
     if (haul.is_lightweight_utility_load or haul.needs_width_question) and not haul.haul_item_matched:
         return haul.model_copy(update={"is_lightweight_utility_load": False, "needs_width_question": False})
@@ -248,14 +280,22 @@ def _drop_unkept_carried_dimensions(
 
     A measurement they have since restated themselves is theirs, not a leftover, so it is
     never dropped here — that is what the ``carried`` source tag distinguishes.
+
+    Each dropped value is recorded in turn_outcome so extraction (which runs AFTER this) can
+    refuse to re-store an analyzer echo of it. Seen live: "nope, no specific needs" dropped the
+    carried 9062 lbs payload, and the same turn's `extracted` block re-emitted payload_lbs=9062
+    copied from the history — silently undoing the drop.
     """
+    dropped_values = state.setdefault("turn_outcome", {}).setdefault("dropped_carried_values", {})
     for dim in offered:
         if dim in kept:
             continue
         for key in _DIMENSION_SLOT_KEYS[dim]:
             if state.get("slot_sources", {}).get(key) == CARRIED_SLOT_SOURCE:
-                state.get("slots", {}).pop(key, None)
+                value = state.get("slots", {}).pop(key, None)
                 state.get("slot_sources", {}).pop(key, None)
+                if value is not None:
+                    dropped_values[dim] = value
 
 
 def _refresh_pending_change_dimensions(state: dict[str, Any]) -> None:
@@ -331,6 +371,53 @@ def _cargo_mentioned(analysis: TurnAnalysis) -> str | None:
     return analysis.haul_classification.haul_item_matched or analysis.extracted.haul_item
 
 
+def _fresh_cargo_mention(state: dict[str, Any], analysis: TurnAnalysis) -> str | None:
+    """The cargo this MESSAGE names, or None when it merely echoes the haul_item on file.
+
+    The analyzer re-emits the stored haul_item on turns that never said it (seen live:
+    "i'd like to see more" came back with haul_item="some cargo" copied from history, which
+    re-fired — as an outright change this time — the Enclosed switch the customer had
+    declined two turns earlier). A cargo equal to the one already on file is not a new
+    signal; extraction runs after the category rules, so on a turn that genuinely restates
+    a NEW cargo the stored slot still holds the old one and the mention passes.
+    """
+    cargo = _cargo_mentioned(analysis)
+    if not cargo:
+        return None
+    stored = state.get("slots", {}).get("haul_item")
+    if stored and str(stored).strip().casefold() == cargo.strip().casefold():
+        return None
+    return cargo
+
+
+def _record_declined_suggestion(state: dict[str, Any], suggestion: dict[str, Any]) -> None:
+    entry = {
+        "category": suggestion.get("suggested_category"),
+        "cargo": str(suggestion.get("cargo") or "").strip().casefold(),
+    }
+    declined = state.setdefault("declined_category_suggestions", [])
+    if entry not in declined:
+        declined.append(entry)
+
+
+def _suggestion_declined(state: dict[str, Any], analysis: TurnAnalysis, category: str) -> bool:
+    """Did they already turn down a move to ``category`` for the cargo currently in play?
+
+    "Stay with Dump" settles the some-cargo→Enclosed question. The same cargo must not
+    raise it again — not as a suggestion, and certainly not as an outright change. A NEW
+    cargo that happens to point at the same category is a new question and may ask.
+    """
+    candidates = {
+        str(value).strip().casefold()
+        for value in (_cargo_mentioned(analysis), state.get("slots", {}).get("haul_item"))
+        if value
+    }
+    for entry in state.get("declined_category_suggestions", []) or []:
+        if entry.get("category") == category and entry.get("cargo") in candidates:
+            return True
+    return False
+
+
 def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis) -> tuple[str | None, str | None]:
     """Split this message's category signals into an explicit choice and an implied one.
 
@@ -348,7 +435,12 @@ def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis)
             implied = category
     named = named_all[0] if named_all else None
     if implied is None:
-        implied = _implied_category_from_cargo(_cargo_mentioned(analysis))
+        # With a category already chosen, only a FRESH cargo mention can imply a move —
+        # an analyzer echo of the stored haul_item must not. With none chosen yet the
+        # stored cargo is exactly what should pick the category (the contact gate defers
+        # the request a turn, and the echo is how it arrives).
+        cargo = _fresh_cargo_mention(state, analysis) if state.get("category") else _cargo_mentioned(analysis)
+        implied = _implied_category_from_cargo(cargo)
     if ALUMINUM_CATEGORY in named_all:
         # "an aluminum utility trailer", "a utility trailer but in aluminum": two type words, and
         # only one of them is a category we stock. Aluminum IS the category; the other type is the
@@ -363,6 +455,8 @@ def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis)
 
 
 def _suggest_category_switch(state: dict[str, Any], suggested: str, analysis: TurnAnalysis) -> None:
+    if _suggestion_declined(state, analysis, suggested):
+        return
     state["pending_category_suggestion"] = {
         "suggested_category": suggested,
         "from_category": state.get("category"),
@@ -412,6 +506,10 @@ def _maybe_ask_brand_categories(state: dict[str, Any], analysis: TurnAnalysis) -
     text = _current_user_text(state)
     if not brand or brand_is_actually_a_hitch(brand, text) or not brand_mentioned_in_text(brand, text):
         return
+    if lookup_requested(analysis):
+        # "I am looking for Iron Bull Dtb" names the make as half of a lookup identifier —
+        # the lookup's own results answer the turn; the brand-category ask would talk over them.
+        return
     categories = _brand_available_categories(brand)
     if not categories:
         return
@@ -431,6 +529,10 @@ def _resolve_pending_brand_categories(state: dict[str, Any], analysis: TurnAnaly
     if not pending:
         return False
     if state.get("category"):  # a category arrived some other way — the question is moot
+        state["pending_brand_categories"] = None
+        return False
+    if lookup_requested(analysis):
+        # They moved on to a specific trailer — the lookup owns this turn, drop the question.
         state["pending_brand_categories"] = None
         return False
     named, implied = _named_and_implied_categories(state, analysis)
@@ -499,6 +601,9 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         # "no", or they moved on without answering -> stay put and never re-ask.
         state["pending_category_suggestion"] = None
         if analysis.category_confirm_answer == "no":
+            # Remember the refusal: the same cargo must never raise this switch again,
+            # as a suggestion or as an outright change.
+            _record_declined_suggestion(state, suggestion)
             return
 
     # (b) A pending keep/drop question from a category change. The category already moved
@@ -567,10 +672,13 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         return
 
     # Rule 3: results already shown -> a category OR cargo term switches outright,
-    # pausing only to ask which measurements to carry over.
+    # pausing only to ask which measurements to carry over. A cargo-implied move they
+    # already declined stays declined; only NAMING the category overrides that.
     if state.get("shown_urls"):
         target = named or implied
         if target and target != current:
+            if named is None and _suggestion_declined(state, analysis, target):
+                return
             _begin_category_change(state, target)
         return
 
@@ -584,19 +692,32 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         _suggest_category_switch(state, implied, analysis)
 
 
+# Asking to see more of the current results — or pointing at one of them — is the opposite
+# of leaving the category. These turns are navigation, never a category signal, whatever
+# the extractor happened to put in the cargo fields.
+_RESULTS_NAV_INTENTS = {"show_more_results", "skip_all_show_results", "listing_interest"}
+
+
 def _apply_cargo_only_signal(state: dict[str, Any], analysis: TurnAnalysis, current: str | None) -> None:
     """Honour a cargo mention on a turn whose INTENT failed the category-action gate.
 
     Never a silent move: pre-results it raises the switch SUGGESTION (a question), post-results
-    it starts the keep/drop change the spec calls for. Informational questions stay inert, and a
-    cargo that maps to the current category is simply an answer, not a signal.
+    it starts the keep/drop change the spec calls for. Informational questions stay inert, a
+    cargo that maps to the current category is simply an answer, and only a cargo FRESHLY
+    stated this turn counts — an analyzer echo of the haul_item already on file is not the
+    customer changing their mind (seen live: "i'd like to see more" echoed "some cargo" and
+    yanked a Dump customer to Enclosed).
     """
     if not current or analysis.is_category_info_only:
         return
+    if analysis.intent in _RESULTS_NAV_INTENTS:
+        return
     if state.get("pending_category_change") or state.get("pending_category_suggestion"):
         return
-    implied = _implied_category_from_cargo(_cargo_mentioned(analysis))
+    implied = _implied_category_from_cargo(_fresh_cargo_mention(state, analysis))
     if not implied or implied == current:
+        return
+    if _suggestion_declined(state, analysis, implied):
         return
     if state.get("shown_urls"):
         _begin_category_change(state, implied)
@@ -745,6 +866,33 @@ def _brand_only_points_at_a_listing(state: dict[str, Any], analysis: TurnAnalysi
     return False
 
 
+def _normalized_hitch_values(value: Any) -> list[str]:
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return sorted(str(item).strip().casefold() for item in items if item)
+
+
+def _echoes_dropped_carried(state: dict[str, Any], key: str, value: Any) -> bool:
+    """Is this extracted value just an echo of a carried-over value dropped THIS turn?
+
+    The analyzer sometimes re-emits an already-collected value it saw in the history rather
+    than in the message (seen live: "nope, no specific needs" came back with
+    payload_lbs=9062 in `extracted`). On the turn the keep/drop answer dropped that value,
+    re-storing the echo would silently undo the drop — the value only counts again when THIS
+    message states a different one.
+    """
+    dropped = (state.get("turn_outcome") or {}).get("dropped_carried_values") or {}
+    if not dropped:
+        return False
+    if "hitch" in dropped and slot_value_kind(key) == slot_value_kind("hitch_type"):
+        if _normalized_hitch_values(value) == _normalized_hitch_values(dropped["hitch"]):
+            return True
+    kind = slot_value_kind(key)
+    for dim, kind_name in _DIMENSION_KINDS.items():
+        if kind == kind_name and dim in dropped and _is_number(value) and float(value) == float(dropped[dim]):
+            return True
+    return False
+
+
 def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     category = state.get("category") or ""
     user_text = _current_user_text(state)
@@ -763,7 +911,11 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
             # "I want a gooseneck" is a hitch, not the Gooseneck make — reading it as a make
             # would quietly restrict every result to one manufacturer.
             hitch_from_features = hitch_from_features or normalize_hitch_answer(brand)
-        elif brand_mentioned_in_text(brand, user_text) and not _brand_only_points_at_a_listing(state, analysis, brand):
+        elif (
+            brand_mentioned_in_text(brand, user_text)
+            and not _brand_only_points_at_a_listing(state, analysis, brand)
+            and not _brand_is_lookup_make(analysis, brand)
+        ):
             state["brand_preference"] = brand
         # Otherwise the extractor read the make off a listing already on screen rather than
         # off the customer. Seen live: a turn that only gave a name and email came back with
@@ -779,7 +931,9 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         # A single named type is a real preference; "both" (the model's way of saying
         # "either is fine") is not one — treat it the same as no preference (null).
         hitch = analysis.extracted.hitch_type
-        _set_slot(state, "hitch_type", list(hitch) if len(hitch) == 1 else None)
+        value = list(hitch) if len(hitch) == 1 else None
+        if not (value and _echoes_dropped_carried(state, "hitch_type", value)):
+            _set_slot(state, "hitch_type", value)
     if hitch_from_features and not state.get("slots", {}).get("hitch_type"):
         _set_slot(state, "hitch_type", hitch_from_features)
     numeric_map = {
@@ -792,7 +946,9 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     }
     valid_slots = set(required_slots_for_state(state)) | set(get_trailer_fields(category).optional)
     for key, value in numeric_map.items():
-        if value is not None and (key in valid_slots or key.startswith("trailer_")):
+        if value is None or _echoes_dropped_carried(state, key, value):
+            continue
+        if key in valid_slots or key.startswith("trailer_"):
             _set_slot(state, key, value)
     for answer in analysis.slot_answers:
         # A blank raw_answer is not an answer. Seen live: answering the length question for
@@ -809,6 +965,10 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
             or answer.slot_name in _SLOT_METADATA_FILTER_MAP
         )
         if not known:
+            continue
+        if _echoes_dropped_carried(
+            state, answer.slot_name, normalize_answer_for_slot(category, answer.slot_name, answer.raw_answer)
+        ):
             continue
         _store_slot_answer(state, category, answer.slot_name, answer.raw_answer)
         _mirror_optional_answer_as_feature(state, category, answer.slot_name, answer.raw_answer)

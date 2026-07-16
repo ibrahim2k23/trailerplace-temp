@@ -314,6 +314,26 @@ def _invoke_graph(state: dict[str, Any]) -> dict[str, Any]:
         raise GraphFailure(str(exc)) from exc
 
 
+def merge_frontend_shown_urls(state: dict[str, Any], urls: list[str] | None) -> None:
+    """Union frontend-supplied shown URLs into backend state (dedupe source of truth).
+
+    Runs on every turn in both persistence modes. shown_urls is per category: the frontend
+    reports the WHOLE chat's URLs each time, so a URL already recorded under another
+    category belongs to that bucket and must not be re-added here — after a category
+    switch it was flooding the new category's freshly-swapped exclude list with the old
+    category's history (seen live: a switch to Livestock inherited all 22 Dump URLs).
+    """
+    if not urls:
+        return
+    buckets = state.setdefault("shown_urls_by_category", {})
+    category = state.get("category") or ""
+    elsewhere = {url for cat, bucket in buckets.items() if cat != category for url in (bucket or [])}
+    fresh = [url for url in urls if url and url not in elsewhere]
+    if fresh:
+        state["shown_urls"] = sorted(set(state.get("shown_urls", [])) | set(fresh))
+        buckets[category] = sorted(set(buckets.get(category, [])) | set(fresh))
+
+
 def _handle_chat_in_memory(request: ChatRequest) -> dict[str, Any]:
     state = _get_session(request.session_id)
     if request.customer_full_name and not state.get("customer_name"):
@@ -322,14 +342,7 @@ def _handle_chat_in_memory(request: ChatRequest) -> dict[str, Any]:
         state["customer_email"] = request.customer_email
     if request.customer_phone and not state.get("customer_phone"):
         state["customer_phone"] = request.customer_phone
-    # Union frontend-supplied shown URLs into backend state (dedupe source of
-    # truth). Applies in BOTH persistence modes since this runs on every turn.
-    # They land in the CURRENT category's bucket too — shown_urls is per category now.
-    if request.already_shown_listing_urls:
-        state["shown_urls"] = sorted(set(state.get("shown_urls", [])) | set(request.already_shown_listing_urls))
-        buckets = state.setdefault("shown_urls_by_category", {})
-        category = state.get("category") or ""
-        buckets[category] = sorted(set(buckets.get(category, [])) | set(request.already_shown_listing_urls))
+    merge_frontend_shown_urls(state, request.already_shown_listing_urls)
     state.setdefault("messages", []).append(
         {
             "role": "user",

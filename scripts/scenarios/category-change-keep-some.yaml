@@ -4,6 +4,8 @@ tags: [regression, m6]
 # transferable slots; user picks a subset ("some") before qualification resumes
 # and search fires for the new category.
 turns:
+  # The opening contact gate defers the first request by one turn, so contact goes first.
+  - user: "my name is Sam and email is sam@example.com"
   - user: "I need a 7x14 dump trailer for hauling dirt, about 3 tons, bumper pull."
     expect_state:
       category: "Dump"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 
 from src.config import settings
+from src.graph.apply_analysis import lookup_requested
 from src.graph.contact_gate import contact_gate_pending
 from src.graph.nodes.analyze import make_analyze_node
 from src.graph.nodes.apply_analysis import apply_analysis_node
@@ -72,7 +73,7 @@ def should_search(state: dict) -> bool:
 
 def _route(state: dict) -> str:
     turn = state.get("turn")
-    if turn and turn.intent == "inventory_lookup" and turn.inventory_lookup.is_lookup and turn.inventory_lookup.confidence != "low":
+    if lookup_requested(turn):
         return "inventory_lookup"
     # The opening contact ask comes before anything else. What they asked for is already
     # recorded in state — it just waits a turn while we ask who we're talking to.

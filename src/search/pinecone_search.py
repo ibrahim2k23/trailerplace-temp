@@ -1227,6 +1227,14 @@ def search_pinecone_listing_result(
             extreme_ratio=RERANK_EXTREME_RATIO,
             length_weight=RERANK_LENGTH_WEIGHT,
             missing_dim_penalty=RERANK_MISSING_DIM_PENALTY,
+            # This is the category-only relaxed retry: the hard metadata gates were dropped at
+            # the Pinecone level precisely because nothing met them. If the fit rerank then
+            # hard-culls the same under-size candidates (retain_all=False drops fail_count>0
+            # whenever any non-failing row exists), the relaxation is undone one stage later and
+            # the screen collapses to the lone row that happened to meet the gate — seen live as
+            # a 50 ft livestock search returning 1 of 17 candidates. Keep every candidate and let
+            # the fit score ORDER them closest-first, which is what "closest alternatives" means.
+            retain_all=category_only_filters,
         )
         logger.info("rerank_debug=%s", json.dumps(rerank_debug, default=str))
         listings, make_debug = _apply_category_make_preference(

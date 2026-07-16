@@ -86,7 +86,10 @@ def _stock_text(value: Any) -> str:
         return ""
     if re.fullmatch(r"\d+\.0", text):
         text = text[:-2]
-    return re.sub(r"\D+", "", text)
+    digits = re.sub(r"\D+", "", text)
+    # Excel stores stock numbers as numbers (02570 -> 2570) while listing titles — and
+    # therefore customers — keep the leading zero. Compare without it on both sides.
+    return digits.lstrip("0") or digits
 
 
 def extract_model_code(model: Any) -> str:

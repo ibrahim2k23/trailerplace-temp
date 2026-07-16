@@ -46,6 +46,7 @@ def _analysis_lines(analysis: Any) -> list[str]:
     lookup = analysis.inventory_lookup
 
     lines = [
+        f"  summary: {_fmt(getattr(analysis, 'turn_summary', None))}",
         f"  intent: {analysis.intent}",
         f"  category_mentioned: {_fmt(analysis.category_mentioned)}  (info_only={analysis.is_category_info_only})",
         "  extracted: "
@@ -86,6 +87,21 @@ def _analysis_lines(analysis: Any) -> list[str]:
         )
     if analysis.category_confirm_answer:
         lines.append(f"  category_confirm_answer: {analysis.category_confirm_answer}")
+    return lines
+
+
+def _decision_lines_block(turn_outcome: dict) -> list[str]:
+    """The exact 'WHAT THE SYSTEM ALREADY DECIDED' lines the respond prompt was built with.
+
+    Stashed by build_respond_prompt — this is what the reply model was TOLD to do, so a reply
+    that ignored its instructions can be diagnosed from the log alone.
+    """
+    raw = (turn_outcome or {}).get("decision_lines_log")
+    if not raw:
+        return []
+    lines = ["DECISION LINES (Respond prompt):"]
+    lines.extend(f"  {line}" for line in str(raw).splitlines())
+    lines.append(_THIN)
     return lines
 
 
@@ -160,6 +176,7 @@ def log_conversation_turn(
             "REASONING (Analyze):",
             *_analysis_lines(analysis),
             _THIN,
+            *_decision_lines_block(turn_outcome or {}),
             *_tool_lines(turn_outcome or {}),
             _THIN,
         ]

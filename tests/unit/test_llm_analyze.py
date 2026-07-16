@@ -42,7 +42,9 @@ def test_analyze_prompt_contains_required_blocks():
 
 def test_analyze_prompt_contains_inventory_lookup_guards():
     system, _ = build_analyze_prompt({"messages": [{"role": "user", "content": "stock 12345"}]})
-    assert "NEVER treat weights" in system
+    assert "NEVER a stock number: weights" in system
+    assert "FILL THE BLOCK REGARDLESS OF INTENT" in system
+    assert "PHRASING NEVER MATTERS" in system
     assert "Coexistence rules" in system
     assert "A lookup NEVER changes the selected category" in system
 

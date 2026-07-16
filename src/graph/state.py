@@ -35,6 +35,9 @@ class SessionState(TypedDict, total=False):
     search_pending: bool
     pending_category_change: dict | None
     pending_category_suggestion: dict | None
+    # Switch suggestions the customer said "no" to, as {"category", "cargo"} pairs. The same
+    # cargo must never re-raise the same switch — as a suggestion or an outright change.
+    declined_category_suggestions: list[dict]
     # A brand named before any category: {"brand": ..., "categories": [...]} — we ask which of
     # that make's categories they want (or yes/no when it only comes in one).
     pending_brand_categories: dict | None
@@ -96,6 +99,7 @@ def new_session_state(session_id: str) -> SessionState:
         "search_pending": False,
         "pending_category_change": None,
         "pending_category_suggestion": None,
+        "declined_category_suggestions": [],
         "pending_brand_categories": None,
         "shown_listings": [],
         "last_shown_listings": [],

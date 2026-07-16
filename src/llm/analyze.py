@@ -120,6 +120,15 @@ LISTINGS ON SCREEN RIGHT NOW - the latest batch, numbered 1-based. A listing ref
 into this list; older batches are gone from the customer's view and are never what they mean:
 {_shown_listing_titles(state)}
 
+=== TURN SUMMARY (write this FIRST - it is handed to the reply writer) ===
+turn_summary = 2-3 short plain sentences saying what the customer just said and what they want THIS
+turn, read in conversation context. Include the specifics exactly as given: model names, stock numbers,
+sizes, weights, hitch, brand, contact details handed over, or the question they asked. If the message
+answers our pending question, say which question and what the answer was. Facts only - never advice,
+never a recommendation, never what we should do next, and never information from earlier turns unless
+this message refers back to it ("What about the Diamond C LPX?" -> "A follow-up to the trailers just
+shown: they now want to see Diamond C LPX models.").
+
 === INTENT RULES ===
 Interpret the message by intent; do NOT assume it answers the pending question.
 - general_question: towing, payload, dimensions, axles, features, use cases, or dealership questions.
@@ -130,7 +139,11 @@ Interpret the message by intent; do NOT assume it answers the pending question.
 - category_selection: the user clearly selects a trailer category.
 - feature_request_no_category: the user gives features (a size, weight, hitch, or equipment) but no category.
 - recommendation_request: the user asks for recommendations with unclear category - OR says they want
-  a trailer without naming a type, cargo, or feature ("I'm looking for a trailer", "I need a trailer").
+  a trailer without naming a type, cargo, or feature ("I'm looking for a trailer", "I need a trailer") -
+  OR, with NO category selected, asks what their options are / what types or kinds of trailers we have
+  ("what are my options?", "what types of trailers do you guys have?", "show me the options", "what do
+  you have?"). With no category there is NO inventory to search and NO results on screen, so these can
+  NEVER be skip_all_show_results or show_more_results - they are asking for our TRAILER TYPES.
 - qualification_answer: the user answers the pending qualification question.
 - requirement_change/drop_requirements: update or forget requirements WITHIN the current category (no new trailer type).
 - category_change: a category is ALREADY selected AND the user WANTS a DIFFERENT trailer category - whether replacing ("show me dump trailers instead", "switch to tilt", "I don't want tilt anymore") OR adding another ("I'm also looking for a dump trailer", "I also need a utility trailer"). Set intent="category_change", category_mentioned=the new category, is_category_info_only=false. We carry a single active category, so wanting another one is a change.
@@ -162,10 +175,14 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   do NOT silently overwrite their named type with the cargo's category.
 - Never report a cargo term as the category when the user also named a type.
 - skip_current: "skip", "next", "I don't know", "I'd rather not answer".
-- skip_all_show_results: mid-qualification, the user wants to stop answering and see inventory now:
-  "just show me what you have", "no more questions", "give me recommendations".
+- skip_all_show_results: a category IS selected and mid-qualification the user wants to stop answering
+  and see inventory now: "just show me what you have", "no more questions", "give me recommendations" or something similar.
 - show_more_results: results are ALREADY on screen and the user asks for more of the same
   ("show me more", "any others?", "what else do you have?", "more options"). Requirements unchanged.
+- READ THE MESSAGE AGAINST OUR LAST ASSISTANT MESSAGE. The same words point at different things
+  depending on what we just asked. If our last message asked WHICH TYPE of trailer they want (or what
+  they plan to haul) and they reply "show me the options" / "what are my options" / "what do you have",
+  they are asking for our trailer TYPES -> recommendation_request, never a results request.
 - faq: the message asks one of contact_human / financing / trade_in / service_parts / store_info.
 - team_request_escalation: call/meeting scheduling, quote requests, "email me", anything needing a human.
 - listing_interest: references a shown listing -> set listing_reference to its 1-based index in the
@@ -183,6 +200,9 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   Only what they ask for NOW. A request from an earlier turn is already recorded — re-emitting it (because they
   are still talking about that trailer, or have just given us their email so we can act on it) sends the team
   the same lead twice. Handing over contact details is not itself a new request: email_triggers stays empty.
+  An inventory lookup ("I am looking for Iron Bull DTB", "do you have the fmax?") is NOT a team_request or
+  escalation either - the system records shown results itself. Emit an email trigger for a lookup turn ONLY
+  when the message separately asks for a human, a call, a quote, or one of the faq topics.
 - If intent is faq/team_request_escalation/listing_interest, that request must also appear in email_triggers.
 - If mid-qualification and the message is an interruption: answered_current_question=false and put the interruption verbatim in user_question_to_answer.
 
@@ -238,16 +258,27 @@ Set category_confirm_answer to null on every other turn.
 
 === CATEGORY-CHANGE KEEP/DROP ANSWER ===
 Applies ONLY when "Pending category change awaiting keep/drop answer" above is not "none".
-The user is telling us which of the previously collected requirements to carry into the new
-category. Only length, width, payload, and hitch type can carry over (everything else was dropped).
-- keep_fields_answer: "all" (keep everything offered), "none" (drop them all / start fresh),
-  or "some" (keep only certain ones).
-- kept_fields: the ones to keep, named as any of: trailer_length_ft, trailer_width_ft, payload_lbs, hitch_type.
+That pending block means OUR LAST MESSAGE asked exactly one question: the category just changed, and
+we asked whether the carried-over value(s) listed in it (length/width/payload/hitch - everything else
+was already dropped) still apply. Read their reply as the answer to THAT question FIRST, whatever else
+it contains, and set keep_fields_answer on EVERY such turn:
+- "all": they accept ("yes", "sure", "keep them", "that's fine", "those still apply").
+- "none": they decline or wave the values off ("no", "nope", "no thanks", "start fresh", "drop them",
+  "no specific needs", "no other requirements", "nothing else"). A broad refusal counts as "none":
+  they are declining the values we offered, not making small talk.
+- "some": they keep only certain ones. kept_fields: the ones to keep, named as any of:
+  trailer_length_ft, trailer_width_ft, payload_lbs, hitch_type.
+- null ONLY when the message does not engage with the question at all (a brand-new topic, an
+  unrelated question of their own). A refusal that also mentions other requirements is still
+  "none"/"some", never null.
 - dropped_fields: the ones they explicitly drop (optional; "some" already implies the rest are dropped).
 - Mixed replies are allowed: "keep the length, drop the width, and make the payload 7000" ->
   keep_fields_answer="some", kept_fields=["trailer_length_ft"], and ALSO extract payload_lbs=7000 in `extracted`.
 - A NEW value ("make it 8 ft wide instead", "gooseneck this time") is keep-with-update: extract it
   into `extracted` normally AND include that field in kept_fields.
+- NEVER copy the offered carried-over values into `extracted` or `slot_answers` on these turns.
+  `extracted` holds only what THIS message states. Echoing the old payload/length from the pending
+  block or the history re-records the very value the customer may be dropping.
 
 === CARGO AND SIZE: ONE SENTENCE OFTEN GIVES YOU BOTH - TAKE BOTH ===
 The THING they haul and its SIZE/WEIGHT are separate facts; never throw one away because you were only
@@ -371,12 +402,31 @@ These two flags govern two different qualification questions. When the user ment
 - INVARIANT: if is_lightweight_utility_load OR needs_width_question is true, haul_item_matched MUST be non-null.
 
 === INVENTORY LOOKUP RULES (direct identifier lookups against our stock list) ===
-Set inventory_lookup.is_lookup=true AND intent="inventory_lookup" when the message references specific inventory by identifier on ANY turn, including the first message:
-- make + year; make + model code/phrase, partial or typo'd; or explicit stock number.
-- stock_number: a 4-6 digit number is a stock number ONLY when framed as stock/unit/#/id/listing wording or unmistakably inventory. NEVER treat weights ("7000 lbs"), lengths, prices, years, or phone digits as stock numbers.
+Fill inventory_lookup (is_lookup=true + the identifiers) whenever the message references specific
+inventory by identifier, on ANY turn including the first:
+- make + model code/phrase, partial or typo'd ("Diamond C LPX", "the fmax", "iron bull fhg24k");
+- make + year ("a 2025 Diamond C", "any 2024 Iron Bulls?");
+- an explicit stock number.
+PHRASING NEVER MATTERS HERE. Statements ("I want a Diamond C LPX"), questions ("What about the
+Diamond C LPX?", "Do you carry the fmax 212?", "How much is stock 02570?"), and follow-ups to earlier
+results all fill inventory_lookup the same way. The WANT vs ASK test does NOT apply to identifier
+references: naming a specific model or stock number means they want it looked up in our stock,
+so is_category_info_only stays false for the lookup itself.
+FILL THE BLOCK REGARDLESS OF INTENT. The lookup runs off this block, not off the intent field. When
+the lookup is the message's main point, ALSO set intent="inventory_lookup". When the message does
+something bigger too (hands over contact details, answers a pending question), keep THAT intent and
+STILL fill inventory_lookup completely - leaving it empty silently drops the customer's request.
+- stock_number: a 4-6 digit number is a stock number ONLY when framed as stock/unit/#/id/listing
+  wording ("stock 02570", "unit 81382", "#12914") or unmistakably inventory (a bare number that
+  matches nothing else in context). NEVER a stock number: weights ("7000 lbs", "a 5000 pound
+  skid steer"), lengths/widths, prices/budgets ("under $9,995"), model years (1990-2030 range in a
+  year position), or phone digits (7+ digits, or given as contact info). When a number could be a
+  weight or phone number from context, it is NOT a stock number - leave stock_number null and
+  extract it as what it actually is.
 - make: correct typos to a canonical known make. model_text: keep exactly as the user typed it.
 - confidence: high explicit, medium probable, low doubtful. Low never triggers the lookup.
-- NOT lookups: make alone, category shopping, feature requests, requirement/filter updates, or references to listings already shown.
+- NOT lookups: make alone (that is brand_preference), category shopping, feature requests,
+  requirement/filter updates, or references to listings already shown (that is listing_interest).
 Coexistence rules:
 - A lookup NEVER changes the selected category, brand_preference, or any collected slot. Do not set category_mentioned or extracted fields from lookup identifiers themselves.
 - Mid-qualification, a lookup is an interruption: set answered_current_question=false.

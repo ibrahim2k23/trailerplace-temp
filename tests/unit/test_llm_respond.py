@@ -68,6 +68,23 @@ def test_no_search_this_turn_is_not_presented_as_out_of_stock():
     assert "https://example.test/old-livestock" in system
 
 
+def test_respond_prompt_carries_analyst_digest_and_settled_category_guard():
+    analysis = sample_analysis(turn_summary="They want a dump trailer for random things.")
+    state = {"category": "Dump", "messages": [{"role": "user", "content": "a dump trailer for random things"}]}
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What's the rough haul weight per load?"})
+    # The digest is a high-priority decision line, but decided actions still outrank it.
+    assert 'WHAT THE CUSTOMER JUST SAID AND WANTS' in system
+    assert "They want a dump trailer for random things." in system
+    # Seen live: category settled + pending question, yet the model recommended trailer types.
+    assert "The trailer category is SETTLED: Dump" in system
+    assert "do NOT use the RECOMMENDING TRAILER TYPES format" in system
+
+    # No settled category -> no guard line (the category question flow owns that case).
+    no_cat_state = {"messages": [{"role": "user", "content": "hi"}]}
+    system, _ = build_respond_prompt(no_cat_state, analysis, {"next_question": "What type of trailer are you looking for?"})
+    assert "trailer category is SETTLED" not in system
+
+
 def test_respond_prompt_inventory_match_statuses_and_suppression():
     analysis = sample_analysis(intent="inventory_lookup")
     for status in ("exact", "no_exact", "ambiguous"):
@@ -197,17 +214,27 @@ def test_listing_reference_counts_within_the_batch_on_screen():
     assert "old5" not in resolved and "new6" not in resolved
 
 
-def test_no_category_and_nothing_to_go_on_asks_plainly_instead_of_recommending():
-    # Seen live: the customer handed over their name and email and got four trailer types
-    # recommended back. They had told us NOTHING about the trailer, so there was nothing to
-    # recommend from — the type question is a plain question until they give us something.
+def test_no_category_and_nothing_to_go_on_gets_the_we_carry_paragraph():
+    # They have told us NOTHING about the trailer, so there is nothing to recommend from —
+    # the type question names 5-6 of our types inline ("...and many more"), never a
+    # structured recommendation list.
     state = {"messages": [{"role": "user", "content": "It's Ibrahim, ibrahim@x.test"}], "slots": {}}
-    analysis = sample_analysis(intent="contact_info_provided", category_mentioned=None)
+    analysis = sample_analysis(
+        intent="contact_info_provided",
+        category_mentioned=None,
+        slot_answers=[],
+        extracted={
+            "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
+            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
+        },
+    )
 
     system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you after?"})
 
-    assert "Ask it as ONE plain sentence" in system
-    assert "do NOT list, suggest, or bullet any trailer types" in system
+    assert "and many more" in system
+    assert "NO bullets" in system
+    assert "so RECOMMEND" not in system
 
 
 def test_a_feature_with_no_category_gets_the_structured_recommendation():
@@ -349,7 +376,7 @@ def test_contact_only_turn_gets_a_plain_type_question_not_recommendations():
     )
     state = {"category": None, "slots": {}, "messages": [{"role": "user", "content": "I'm Ibrahim, ibrahim@x.ai"}]}
     system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you looking for?"})
-    assert "Ask it as ONE plain sentence" in system
+    assert "and many more" in system
     assert "so RECOMMEND" not in system
 
 
@@ -364,3 +391,103 @@ def test_brand_question_lines_render_single_and_multi():
     system, _ = build_respond_prompt(single, analysis, {})
     assert "ONE category: Livestock" in system
     assert "yes/no" in system
+
+
+def test_options_ask_with_nothing_known_gets_paragraph_not_bullets():
+    # "What are my options?" with nothing told to us is not a recommendation basis —
+    # the reply is the we-carry paragraph, not a tailored structured list.
+    analysis = sample_analysis(
+        intent="recommendation_request",
+        category_mentioned=None,
+        slot_answers=[],
+        extracted={
+            "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
+            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
+        },
+    )
+    state = {"category": None, "slots": {}, "messages": [{"role": "user", "content": "what are my options?"}]}
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you looking for?"})
+    assert "and many more" in system
+    assert "so RECOMMEND" not in system
+
+
+def test_brands_from_inventory_are_in_the_respond_prompt():
+    analysis = sample_analysis()
+    state = {"category": None, "slots": {}, "messages": [{"role": "user", "content": "which brands do you carry?"}]}
+    system, _ = build_respond_prompt(state, analysis, {})
+    assert "OUR BRANDS/MAKES" in system
+    assert "Gooseneck," not in system.split("OUR BRANDS/MAKES")[1].split("\n")[0]
+
+
+def test_keep_drop_question_owns_the_reply_and_quotes_units():
+    # Live failure (2026-07-15, session d1f0ba7f): the old wording ("Confirm which to carry
+    # over ... just ask") was soft enough that the model asked a generic "any other features?"
+    # question instead — the keep/drop question never reached the customer. The line must own
+    # the reply outright and quote each carried value with its unit.
+    analysis = sample_analysis()
+    state = {
+        "category": "Livestock",
+        "slots": {"payload_lbs": 9062.0},
+        "messages": [{"role": "user", "content": "I am also looking for a 50ft trailer for my livestock"}],
+        "pending_category_change": {"new_category": "Livestock", "dimensions": {"payload": 9062.0}},
+    }
+    system, _ = build_respond_prompt(state, analysis, {"category_just_changed": "Livestock"})
+    assert "CATEGORY-CHANGE KEEP/DROP QUESTION (this owns the reply)" in system
+    assert "payload capacity (9062 lbs)" in system
+    assert "exactly ONE question mark" in system
+    assert "do NOT ask about any other feature" in system
+
+
+def test_keep_drop_line_formats_hitch_and_lengths():
+    analysis = sample_analysis()
+    state = {
+        "category": "Equipment",
+        "slots": {},
+        "messages": [{"role": "user", "content": "switch me to an equipment trailer"}],
+        "pending_category_change": {
+            "new_category": "Equipment",
+            "dimensions": {"length": 20.0, "hitch": ["Gooseneck"]},
+        },
+    }
+    system, _ = build_respond_prompt(state, analysis, {})
+    assert "length (20 ft)" in system
+    assert "hitch type (Gooseneck)" in system
+
+
+def test_no_listings_turn_that_keeps_fabricating_falls_back_to_the_question():
+    # Live failure (2026-07-16, session 719c3eb9): after a keep/drop answer, the decided reply
+    # was the Livestock length question — but both drafts fabricated Diamond C FMAX listing
+    # cards replayed from history. Stripping them left the shell "Here are some Livestock
+    # trailers: / Do any of these align...?" with zero listings and the question never asked.
+    # On a no-listings turn the honest floor is the decided question itself.
+    fabricated = _reply(
+        "https://example.test/fmax-1",
+        "https://example.test/fmax-2",
+        lead="Here are some Livestock trailers that you might find suitable:",
+    )
+    client = FakeLLM([fabricated, fabricated])
+    state = {
+        "category": "Livestock",
+        "slots": {},
+        "shown_listings": [],
+        "messages": [{"role": "user", "content": "i'd like to drop it"}],
+    }
+    outcome = {"next_question": "What trailer length are you looking for?"}
+    reply = respond_with_all_listings(client, state, sample_analysis(), outcome)
+    assert reply.assistant_text == "What trailer length are you looking for?"
+    assert reply.cited_listing_urls == []
+    # The retry was told, in the repair note, that the turn has no listings and what to ask.
+    retry_system = client.calls[1]["system"]
+    assert "THIS TURN HAS NO LISTINGS AT ALL" in retry_system
+    assert "What trailer length are you looking for?" in retry_system
+
+
+def test_no_listings_fabrication_without_a_pending_question_still_strips():
+    # No decided question to fall back on (e.g. an FAQ turn): stripping remains the repair.
+    fabricated = _reply("https://example.test/fmax-1", "https://example.test/fmax-2", lead="Options:")
+    client = FakeLLM([fabricated, fabricated])
+    state = {"category": "Dump", "slots": {}, "shown_listings": [], "messages": []}
+    reply = respond_with_all_listings(client, state, sample_analysis(), {})
+    assert "example.test" not in reply.assistant_text
+    assert reply.cited_listing_urls == []

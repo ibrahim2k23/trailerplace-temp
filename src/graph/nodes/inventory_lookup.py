@@ -12,9 +12,9 @@ def inventory_lookup_node(state: dict) -> dict:
     outcome = state.setdefault("turn_outcome", {})
     turn = state.get("turn")
     lookup = turn.inventory_lookup if turn else None
+    # No intent check: a lookup rides along with any intent (see build.py::_lookup_requested).
     assert (
         turn is not None
-        and turn.intent == "inventory_lookup"
         and lookup is not None
         and lookup.is_lookup
         and lookup.confidence in {"medium", "high"}

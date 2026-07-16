@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from src.config import settings
+from src.domain.brands import known_makes
 from src.domain.canned_responses import CANNED_RESPONSES
 from src.domain.categories import advertised_categories_line, category_reference_block
 from src.llm.analyze import MAX_CONTEXT_TURNS, _recent_messages, _state_get
@@ -134,16 +135,6 @@ def _referenced_listing(state: Any, analysis: TurnAnalysis) -> Any | None:
     return shown[ref - 1]
 
 
-# The three ways a customer asks us to pick a type FOR them: an outright request ("what do you
-# recommend?", "I can't decide"), a description of the trailer with no type named, or a question
-# about which type suits a job.
-_RECOMMENDATION_INTENTS = frozenset({
-    "recommendation_request",
-    "feature_request_no_category",
-    "category_exploration",
-})
-
-
 def _contact_only_turn(analysis: TurnAnalysis) -> bool:
     """The message handed over contact details and said nothing about trailers.
 
@@ -169,26 +160,26 @@ def _contact_only_turn(analysis: TurnAnalysis) -> bool:
 
 
 def _has_recommendation_basis(state: Any, analysis: TurnAnalysis) -> bool:
-    """Is there any reason to put a list of trailer TYPES in front of them?
+    """Do we know enough about THEIR JOB to genuinely recommend trailer types?
 
-    Only two: they asked for one (or said they want a trailer without naming a type), or they have
-    told us something about the job - cargo, a size, a feature - that a recommendation can be built
-    from. A customer who has just handed over their name and email has told us nothing about
-    trailers, and answering that with four category suggestions is recommending into thin air. Ask
-    them which type they want instead.
+    A recommendation is built from content — cargo, a feature, a size — never from the shape of
+    the ask. "What do you recommend?" or "what are my options?" with nothing told to us yet gets
+    the we-carry paragraph (all our types, ask them to pick), not a recommendation list dressed
+    up as tailored advice. And a customer who has just handed over their name and email has told
+    us nothing about trailers at all.
     """
     if _contact_only_turn(analysis):
         return False
-    if analysis.intent in _RECOMMENDATION_INTENTS:
+    if _state_get(state, "non_metadata_features", None) or analysis.extracted.non_metadata_features:
         return True
-    if _state_get(state, "non_metadata_features", None):
+    if analysis.extracted.haul_item or analysis.haul_classification.haul_item_matched:
         return True
     slots = _state_get(state, "slots", None) or _state_get(state, "collected_slots", {}) or {}
     return any(value not in (None, "") for value in slots.values())
 
 
 def _category_question_line(state: Any, analysis: TurnAnalysis) -> str:
-    """The ONE question when no category is chosen - listed as types, or asked plainly."""
+    """The ONE question when no category is chosen - a tailored list, or the we-carry paragraph."""
     closing = (
         "Do NOT mention listings, stock, or availability, and do NOT say we do or don't have something "
         "- no search has run yet."
@@ -202,17 +193,44 @@ def _category_question_line(state: Any, analysis: TurnAnalysis) -> str:
             f"it in a sentence of its own. {closing}"
         )
     return (
-        "- No trailer category chosen yet, so the ONE question above is which TYPE of trailer they want. Ask it as "
-        "ONE plain sentence and nothing else. They have NOT told us what they haul or what they need, and have NOT "
-        "asked us to recommend, so we have nothing to base a recommendation on: do NOT list, suggest, or bullet any "
-        f"trailer types this turn. {closing}"
+        "- No trailer category chosen yet, so the ONE question above is which TYPE of trailer they want - and they "
+        "have told us nothing about their job yet, so we cannot recommend. Ask it as ONE short paragraph that names "
+        "5 or 6 of our trailer types INLINE in the sentence and ends by asking which they want, like: "
+        '"We carry Equipment, Dump, Enclosed, Utility, Flatbed, and Livestock trailers, and many more - which type '
+        'would you like to go with?" Pick the types from OUR CATEGORIES below, always add "and many more", and use '
+        "NO bullets, NO numbered list, and NOT the RECOMMENDING TRAILER TYPES format - one flowing paragraph, one "
+        f"question. {closing}"
     )
+
+
+# Units for the carried-over measurements offered in the keep/drop question. Quoting "9062.0"
+# without "lbs" is how the respond model ends up not recognising it as the payload on file.
+_CARRIED_DIM_UNITS = {"length": "ft", "width": "ft", "height": "ft", "payload": "lbs"}
+
+
+def _carried_value_display(name: str, value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        text = ", ".join(str(item) for item in value)
+    elif isinstance(value, float) and value.is_integer():
+        text = str(int(value))
+    else:
+        text = str(value)
+    unit = _CARRIED_DIM_UNITS.get(name)
+    return f"{text} {unit}" if unit else text
 
 
 def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> list[str]:
     if _outcome_get(turn_outcome, "contact_gate_missing"):
         return _contact_gate_lines(state, turn_outcome)
     lines: list[str] = []
+    turn_summary = (getattr(analysis, "turn_summary", "") or "").strip()
+    if turn_summary:
+        lines.append(
+            f'- WHAT THE CUSTOMER JUST SAID AND WANTS (analyst digest of their latest message): "{turn_summary}" '
+            "Address THIS in your reply - it is what they are waiting to hear about. It sets the reply's "
+            "content and tone, but the decided lines below (the question to ask, the listings to show) always "
+            "win when they differ."
+        )
     if _outcome_get(turn_outcome, "clarification_question"):
         lines.append(f'- Clarification question to ask: "{_outcome_get(turn_outcome, "clarification_question")}"')
     if _outcome_get(turn_outcome, "next_question"):
@@ -223,6 +241,17 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "this conversation. Do NOT lead up to it with a paraphrase of the same question and then repeat "
             "it verbatim: the reply contains exactly one question mark, and no other question."
         )
+        settled_category = _state_get(state, "category")
+        if settled_category:
+            # Seen live: with the category settled and this exact instruction present, the model
+            # still copied the RECOMMENDING TRAILER TYPES example and asked "which type would you
+            # like to go with?" — burying the qualification question. Decision lines outrank the
+            # static section, so state the prohibition here.
+            lines.append(
+                f"- The trailer category is SETTLED: {settled_category}. They have chosen. Do NOT list, "
+                "suggest, or recommend trailer types, do NOT use the RECOMMENDING TRAILER TYPES format, and "
+                "do NOT ask which type they want. Reply briefly and ask the ONE question above - nothing else."
+            )
     changed_to = _outcome_get(turn_outcome, "category_just_changed")
     if changed_to and _outcome_get(turn_outcome, "next_question"):
         lines.append(
@@ -235,7 +264,9 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         lines.append(_category_question_line(state, analysis))
     if int(_state_get(state, "pending_question_repeats", 0) or 0) == 1:
         lines.append("- The user did not answer it last time - acknowledge their message first, then re-ask casually, once.")
-    pending_brand = _state_get(state, "pending_brand_categories")
+    # A lookup that ran owns the reply — its result lines below say what to show/ask. A stale
+    # brand-category question must not talk over the specific trailer the customer just asked for.
+    pending_brand = None if _outcome_get(turn_outcome, "inventory_lookup_ran") else _state_get(state, "pending_brand_categories")
     if pending_brand and isinstance(pending_brand, dict):
         brand = pending_brand.get("brand") or "that brand"
         categories = list(pending_brand.get("categories") or [])
@@ -277,15 +308,19 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
     if pending_change:
         dims = pending_change.get("dimensions", {}) if isinstance(pending_change, dict) else {}
         new_cat = pending_change.get("new_category", "the new category") if isinstance(pending_change, dict) else "the new category"
-        dim_labels = {"length": "length", "width": "width", "payload": "payload capacity", "hitch": "hitch type"}
+        dim_labels = {"length": "length", "width": "width", "height": "height", "payload": "payload capacity", "hitch": "hitch type"}
         offered = ", ".join(
-            f"{dim_labels.get(name, name)} ({', '.join(str(v) for v in value) if isinstance(value, (list, tuple)) else value})"
-            for name, value in dims.items()
+            f"{dim_labels.get(name, name)} ({_carried_value_display(name, value)})" for name, value in dims.items()
         ) or "none"
         lines.append(
-            f"- Category change to {new_cat}: we're dropping all previous preferences except these. "
-            f"Confirm which to carry over (they can keep all, drop some, or change a value): {offered}. "
-            "Do NOT show listings this turn; just ask."
+            f"- CATEGORY-CHANGE KEEP/DROP QUESTION (this owns the reply): they just switched to {new_cat}. "
+            f"Every previous preference was RESET, and the ONLY thing still on file from before is: {offered}. "
+            f"Your reply is exactly two things and nothing more: (1) ONE short sentence confirming the switch "
+            f"to {new_cat}; (2) ONE question asking whether the carried-over value(s) above still apply to the "
+            f"{new_cat} they want - quote each value with its unit, and tell them they can keep them, drop "
+            "them, or change a value. That is the ONLY question this turn: do NOT ask about any other feature, "
+            "size, weight, or hitch, do NOT ask an 'anything else?' style question, do NOT show or mention "
+            "listings, stock, or availability, and the reply contains exactly ONE question mark."
         )
     referenced = _referenced_listing(state, analysis)
     if referenced is not None:
@@ -416,9 +451,19 @@ def build_respond_prompt(
             "and ask the pending question above."
         )
     reference_block = _reference_block(state, listings)
+    # Live inventory brands (built from the listings workbook at startup). Without this list the
+    # model answered "which brands do you carry?" from its imagination. Gooseneck/Bumper Pull are
+    # excluded: this project treats them strictly as hitch types, never as brands.
+    brands_line = ", ".join(
+        make for make in known_makes() if make not in {"Gooseneck", "Bumper Pull"}
+    ) or "none on file"
     collected = _state_get(state, "slots", None) or _state_get(state, "collected_slots", {}) or {}
     customer_name = _state_get(state, "customer_name")
     decision_lines = "\n".join(_decision_lines(state, analysis, turn_outcome)) or "- No special turn outcome lines."
+    if isinstance(turn_outcome, dict):
+        # For the conversation log: the exact high-priority instructions this reply was built
+        # under, so a disobedient reply can be diagnosed from the log alone.
+        turn_outcome["decision_lines_log"] = decision_lines
     repair_block = f"\n=== CORRECTION - YOUR PREVIOUS DRAFT WAS REJECTED ===\n{repair_note}\n" if repair_note else ""
     opening_block = (
         "\n=== OPENING LINE - THIS IS THE FIRST REPLY OF THE CONVERSATION ===\n"
@@ -478,6 +523,10 @@ out what they need and put the right trailer in front of them.
 - Gooseneck and Bumper Pull are HITCH TYPES, not categories and (unless the customer says "the Gooseneck brand") not makes. Quote a listing's hitch from its own data; never assume one.
 - Sizes are in feet and weights in pounds. Quote back the number we recorded, never a vaguer phrase than they gave.
 - We carry: {advertised_categories_line()}.
+- OUR BRANDS/MAKES (live inventory - the ONLY brands you may ever name): {brands_line}.
+  If they ask which brands or makes we carry, name them ALL in ONE flowing paragraph - no bullets, no
+  numbered list - then ask which brand or trailer type they are interested in. Never invent, add, or
+  drop a brand from this list.
 - 2-6 sentences, unless you are presenting listings or a bulleted list - those have their own shape below.
 
 === OUR CATEGORIES AND WHAT EACH IS BEST FOR ===
@@ -487,15 +536,16 @@ Never name a category outside this list. Gooseneck and Bumper Pull are HITCH TYP
 If the customer only ASKED which trailer suits a job, answer the question - do not assume they
 have chosen that category and do not start qualifying them for it.
 
-=== RECOMMENDING TRAILER TYPES (STRUCTURED, NEVER A PARAGRAPH) ===
+=== RECOMMENDING TRAILER TYPES (STRUCTURED - ONLY WHEN WE KNOW THEIR JOB) ===
 DO THIS ONLY when BOTH are true:
   (a) no category is settled ("Category" in CONTEXT below is empty, or they are moving off the one they
       had); AND
-  (b) they gave us something to recommend FROM: their cargo, a feature, a job - or they asked us to
-      recommend, said they cannot decide, or said they want a trailer without naming any type.
-NEVER OTHERWISE. A name, an email, a phone number, a hello, or an FAQ tells us nothing about the trailer
-they need - recommending off it is guessing. Just ask which type of trailer they are after, in one plain
-sentence.
+  (b) they gave us something to recommend FROM: their cargo, a feature, a size, a job.
+NEVER OTHERWISE. If they only asked what their options are, what types we have, or what we recommend -
+and have told us NOTHING about what they haul or need - there is nothing to tailor: answer with the
+we-carry paragraph instead ("We carry Equipment, Dump, Enclosed, Utility, Flatbed, and Livestock
+trailers, and many more - which type would you like to go with?"), never this structured list. A name,
+an email, a hello, or an FAQ is also not a basis - same paragraph.
 
 When you DO recommend, use 3 or 4 types from OUR CATEGORIES above, laid out like this:
 
@@ -652,7 +702,7 @@ def respond_turn(
     return client.structured(system=system, messages=messages, schema=ReplyOutput)
 
 
-def _repair_note(listings: list[Any], missing: list[Any], foreign: list[str]) -> str:
+def _repair_note(listings: list[Any], missing: list[Any], foreign: list[str], question: str | None = None) -> str:
     parts: list[str] = []
     if missing:
         dropped = "\n".join(
@@ -678,6 +728,12 @@ def _repair_note(listings: list[Any], missing: list[Any], foreign: list[str]) ->
             "present ONLY what the LISTINGS block gives you (if it gives you nothing, present no listings and "
             "no URLs), and cited_listing_urls must contain only those same URLs."
         )
+        if not listings:
+            ask = f' and ask the ONE pending question: "{question}"' if question else ""
+            parts.append(
+                "THIS TURN HAS NO LISTINGS AT ALL. Do not present, announce, number, or link ANY trailer - "
+                f'no "Here are some trailers" framing, no listing cards, no URLs. Reply briefly{ask}.'
+            )
     return "\n\n".join(parts)
 
 
@@ -703,8 +759,10 @@ def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnaly
         len(missing), len(foreign), len(listings),
         [_listing_get(item, "url") for item in missing], foreign,
     )
+    pending_question = _outcome_get(turn_outcome, "next_question") or _outcome_get(turn_outcome, "clarification_question")
     retry = respond_turn(
-        client, state, analysis, turn_outcome, repair_note=_repair_note(listings, missing, foreign)
+        client, state, analysis, turn_outcome,
+        repair_note=_repair_note(listings, missing, foreign, question=pending_question),
     )
     retry_missing = _missing_listings(listings, retry) if listings else []
     retry_foreign = _foreign_reply_urls(state, analysis, listings, retry)
@@ -715,6 +773,14 @@ def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnaly
     else:
         logger.warning("respond retry did not improve; keeping the first draft")
     if foreign:
+        if not listings and pending_question:
+            # Both drafts fabricated inventory on a turn that decided NONE. Stripping the cards
+            # leaves a shell ("Here are some Livestock trailers: ... Do any of these fit?") that
+            # presents nothing and buries the question qualification is waiting on — seen live,
+            # and it reads as broken. A plain reply that just asks the decided question is the
+            # honest floor.
+            logger.warning("no-listings turn still fabricating after retry; replying with the pending question only")
+            return ReplyOutput(assistant_text=pending_question, cited_listing_urls=[])
         logger.warning("stripping %d foreign listing URL(s) from the reply: %s", len(foreign), foreign)
         reply = _without_foreign(reply, foreign)
     return reply

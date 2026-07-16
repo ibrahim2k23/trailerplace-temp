@@ -5,6 +5,7 @@ from src.llm.schemas import ReplyOutput, TurnAnalysis
 
 def sample_analysis(**updates) -> TurnAnalysis:
     data = {
+        "turn_summary": "The customer wants a dump trailer, about 7x14, to haul dirt.",
         "intent": "category_selection",
         "email_triggers": [],
         "haul_classification": {"is_lightweight_utility_load": False, "needs_width_question": False, "haul_item_matched": None},
