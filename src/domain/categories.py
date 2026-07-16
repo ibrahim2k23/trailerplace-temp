@@ -132,6 +132,34 @@ def _matches_any_term(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
 
 
+# Words that may sit directly in front of "equipment" while it still names the TRAILER TYPE
+# ("an equipment trailer", "want equipment", "go with equipment"). Anything else in front of
+# it makes it the head of a CARGO phrase instead — "lawn equipment", "landscaping equipment",
+# "heavy equipment" — which must not count as the customer naming the Equipment category.
+_EQUIPMENT_NAMING_PRECEDERS = frozenset({
+    "a", "an", "the", "some", "any", "that", "this", "my", "your", "our", "another", "one",
+    "in", "for", "to", "with", "on", "of", "want", "wants", "need", "needs", "like", "prefer",
+    "choose", "chose", "pick", "picked", "go", "get", "getting", "buy", "buying", "and", "or",
+    "maybe", "probably", "actually", "instead",
+})
+
+
+def _equipment_term_is_cargo_usage(low: str, match: "re.Match[str]") -> bool:
+    """True when this "equipment" match is cargo ("lawn equipment"), not the trailer type.
+
+    Seen live: "I want one for hauling lawn equipment" resolved as NAMING the Equipment
+    category — an explicit type choice the customer never made — because the bare naming
+    term "equipment" matched inside the cargo phrase. Followed by "trailer" it is always
+    the type; preceded by a modifier word that is not a determiner/verb it is the cargo.
+    """
+    after = low[match.end():].lstrip()
+    if after.startswith("trailer"):
+        return False
+    before = low[: match.start()].rstrip()
+    preceding = re.findall(r"[a-z'\-]+$", before)
+    return bool(preceding) and preceding[0] not in _EQUIPMENT_NAMING_PRECEDERS
+
+
 def _ranked_category_matches(text: str) -> list[tuple[str, str, int, int]]:
     """Return category matches ranked by salience.
 
@@ -147,6 +175,8 @@ def _ranked_category_matches(text: str) -> list[tuple[str, str, int, int]]:
             for term in terms:
                 match = re.search(rf"(?<!\w){re.escape(term.strip())}(?!\w)", low)
                 if not match:
+                    continue
+                if tier_rank == 0 and term == "equipment" and _equipment_term_is_cargo_usage(low, match):
                     continue
                 candidate = (tier_rank, match.start(), -len(term.strip()))
                 existing = best_per_category.get(category)

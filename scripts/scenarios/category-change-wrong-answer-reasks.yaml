@@ -1,0 +1,44 @@
+name: category-change-wrong-answer-reasks
+tags: [regression, category-change]
+# Regression for the 2026-07-16 live failure (session 55c08169): after a switch to Flatbed
+# and a keep/drop "no", the ordered question was "What will you be hauling on the flatbed?"
+# — but the respond model asked its own question ("what capacity and width?") instead. The
+# customer answered THAT, the analyzer stamped the pending haul question answered, and the
+# search fired with the haul question never asked. Two fixes under test: the ordered
+# question leads the orders as a MUST-END-WITH directive, and an answer that fills only
+# OTHER slots can no longer close the pending question.
+turns:
+  - user: "my name is Ibrahim and email is ibrahim@esided.ai"
+  - user: "I need a dump trailer, 8 ft wide, for about 4000 lbs of gravel"
+    expect_state:
+      category: "Dump"
+  - user: "I am also looking for a flatbed trailer"
+    # Keep/drop owns the reply: the carried width/payload are the question, no listings.
+    expect_state:
+      category: "Flatbed"
+    expect_listings: false
+    expect_reply_contains_any: ["4000", "4,000", "8 ft"]
+  - user: "no"
+    # Values dropped; the ordered question is Flatbed's haul question - it MUST be asked.
+    expect_state:
+      category: "Flatbed"
+      pending_category_change: null
+      "slot:haul_weight_lbs": null
+    expect_listings: false
+    expect_reply_contains_any: ["haul", "carry", "transport"]
+  - user: "2000 lbs as capacity, no width in mind as of now"
+    # They answered a weight, not the haul question. The weight is recorded, but the haul
+    # question stays open and is asked again - no search until it is answered or skipped.
+    expect_state:
+      category: "Flatbed"
+      qualification_complete: false
+      "slot:haul_weight_lbs": 2000.0
+      pending_question_slot: "haul_item"
+    expect_listings: false
+    expect_reply_contains_any: ["haul", "carry", "transport"]
+  - user: "lumber mostly"
+    # The haul question answered at last - now the search may fire.
+    expect_state:
+      category: "Flatbed"
+      qualification_complete: true
+    expect_listings: true

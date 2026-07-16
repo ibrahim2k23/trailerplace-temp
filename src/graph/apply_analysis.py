@@ -192,11 +192,21 @@ _DIMENSION_TARGET_SLOTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _carried_dimensions(slots: dict[str, Any]) -> dict[str, Any]:
-    """The length/width/payload/hitch values currently held, keyed by canonical dimension."""
+def _carried_dimensions(slots: dict[str, Any], sources: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The length/width/payload/hitch values currently held, keyed by canonical dimension.
+
+    Only values the CUSTOMER put there (or kept through an earlier change) carry over. A
+    category default (Flatbed's 8 ft deck width, an env-seeded hitch) is our assumption for
+    THAT category, not a preference of theirs — offering it back in the keep/drop question
+    asked them to confirm a number they never said, and dragged one category's default into
+    another category where it does not belong.
+    """
+    sources = sources or {}
     carried: dict[str, Any] = {}
     for dim, keys in _DIMENSION_SLOT_KEYS.items():
         for key in keys:
+            if sources.get(key) == "default":
+                continue
             value = slots.get(key)
             if dim == "hitch":
                 if value:  # a hitch is text (or a one-item list), never a number
@@ -229,6 +239,16 @@ def _switch_category(
     over. Qualification then restarts for the new category.
     """
     state["category"] = new_category
+    # Snapshot what the switch is about to clear: extraction runs AFTER this, and the
+    # analyzer routinely re-emits the old category's haul_item/features off the history on
+    # the very turn of the change. Stored again, the echo lands in the NEW category's cargo
+    # slot via the aliases and silently answers a question that was never asked (seen live:
+    # the new category's use-case question got skipped). The snapshot lets extraction tell
+    # an echo from a genuinely restated value.
+    state.setdefault("turn_outcome", {})["cleared_on_category_change"] = {
+        "haul_item": (state.get("slots", {}) or {}).get("haul_item"),
+        "features": list(state.get("non_metadata_features", []) or []),
+    }
     state["slots"] = {}
     state["slot_sources"] = {}
     state["skipped_slots"] = []
@@ -266,7 +286,7 @@ def _begin_category_change(state: dict[str, Any], new_category: str) -> None:
     ``carried`` so a later "start fresh" can drop exactly those, and nothing the customer
     stated for the new category.
     """
-    carried = _carried_dimensions(state.get("slots", {}))
+    carried = _carried_dimensions(state.get("slots", {}), state.get("slot_sources", {}))
     state["pending_category_suggestion"] = None
     _switch_category(state, new_category, carried, source=CARRIED_SLOT_SOURCE)
     if carried:
@@ -307,7 +327,7 @@ def _refresh_pending_change_dimensions(state: dict[str, Any]) -> None:
     change = state.get("pending_category_change")
     if not isinstance(change, dict):
         return
-    live = _carried_dimensions(state.get("slots", {}))
+    live = _carried_dimensions(state.get("slots", {}), state.get("slot_sources", {}))
     offered = {dim: live[dim] for dim in change.get("dimensions", {}) if dim in live}
     if offered:
         change["dimensions"] = offered
@@ -427,20 +447,26 @@ def _named_and_implied_categories(state: dict[str, Any], analysis: TurnAnalysis)
     case where we must ask rather than assume.
     """
     named_all: list[str] = []
-    implied: str | None = None
+    text_implied: str | None = None
     for category, tier in resolve_category_matches(_current_user_text(state)):
         if tier == "naming":
             named_all.append(category)
-        elif tier == "cargo" and implied is None:
-            implied = category
+        elif tier == "cargo" and text_implied is None:
+            text_implied = category
     named = named_all[0] if named_all else None
-    if implied is None:
-        # With a category already chosen, only a FRESH cargo mention can imply a move —
-        # an analyzer echo of the stored haul_item must not. With none chosen yet the
-        # stored cargo is exactly what should pick the category (the contact gate defers
-        # the request a turn, and the echo is how it arrives).
-        cargo = _fresh_cargo_mention(state, analysis) if state.get("category") else _cargo_mentioned(analysis)
-        implied = _implied_category_from_cargo(cargo)
+    # The EXTRACTED haul item outranks a raw-text cargo scan: the extractor knows which noun
+    # is the load. Seen live: "I run a small landscaping outfit ... equipment trailer for my
+    # compact tractor" — the text scan hit "landscaping" (a Utility cargo term describing
+    # their BUSINESS) and suggested switching an Equipment customer to Utility, when the
+    # actual cargo ("compact tractor") maps straight back to Equipment. The text scan stays
+    # as the fallback for turns where the extractor pulled no cargo at all.
+    #
+    # With a category already chosen, only a FRESH cargo mention can imply a move — an
+    # analyzer echo of the stored haul_item must not. With none chosen yet the stored cargo
+    # is exactly what should pick the category (the contact gate defers the request a turn,
+    # and the echo is how it arrives).
+    cargo = _fresh_cargo_mention(state, analysis) if state.get("category") else _cargo_mentioned(analysis)
+    implied = _implied_category_from_cargo(cargo) or text_implied
     if ALUMINUM_CATEGORY in named_all:
         # "an aluminum utility trailer", "a utility trailer but in aluminum": two type words, and
         # only one of them is a category we stock. Aluminum IS the category; the other type is the
@@ -473,7 +499,7 @@ def _accept_category_suggestion(state: dict[str, Any], suggestion: dict[str, Any
     category change gets, instead of the silent carry-over this path used to do.
     """
     slots = state.get("slots", {}) or {}
-    carried = _carried_dimensions(slots)
+    carried = _carried_dimensions(slots, state.get("slot_sources", {}))
     haul_item = slots.get("haul_item") or suggestion.get("cargo")
     features = list(state.get("non_metadata_features", []) or [])
     new_category = suggestion["suggested_category"]
@@ -640,6 +666,30 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
 
     # An informational question never moves the category, no matter what it mentions.
     current = state.get("category")
+
+    # A results request that NAMES a different trailer type is a category change wearing the
+    # wrong label. Seen live: "show me dump trailers instead" mid-Utility came back as
+    # show_more_results — the gate below swallowed the change, and _apply_skips_and_repeats
+    # then marked every OLD-category question skipped and searched the old category. Only an
+    # explicitly NAMED type moves the category here; a cargo word on a results request stays
+    # navigation (that is what _RESULTS_NAV_INTENTS protects).
+    if (
+        analysis.intent in {"show_more_results", "skip_all_show_results"}
+        and not analysis.is_category_info_only
+    ):
+        named_only = [
+            category
+            for category, tier in resolve_category_matches(_current_user_text(state))
+            if tier == "naming"
+        ]
+        target = named_only[0] if named_only else None
+        if target and target != current:
+            if current:
+                _begin_category_change(state, target)
+            else:
+                _start_category(state, target)
+            return
+
     if not _wants_category_action(analysis, current):
         # The analyzer sometimes labels "I'll be hauling a tractor on it" as plain chat
         # (general_question, smalltalk) instead of a shopping intent, and the gate above then
@@ -880,7 +930,17 @@ def _echoes_dropped_carried(state: dict[str, Any], key: str, value: Any) -> bool
     re-storing the echo would silently undo the drop — the value only counts again when THIS
     message states a different one.
     """
-    dropped = (state.get("turn_outcome") or {}).get("dropped_carried_values") or {}
+    outcome = state.get("turn_outcome") or {}
+    dropped = dict(outcome.get("dropped_carried_values") or {})
+    if outcome.get("category_just_changed"):
+        # Same analyzer habit, other side of the change: on the turn the category moves, the
+        # carried-over measurements we are ABOUT TO ASK about get re-emitted in `extracted` off
+        # the history. Storing that echo re-tags the value from "carried" to "user", and the
+        # keep/drop answer next turn can no longer drop it (drops only touch source=="carried").
+        change = state.get("pending_category_change")
+        if isinstance(change, dict):
+            for dim, value in (change.get("dimensions") or {}).items():
+                dropped.setdefault(dim, value)
     if not dropped:
         return False
     if "hitch" in dropped and slot_value_kind(key) == slot_value_kind("hitch_type"):
@@ -893,6 +953,29 @@ def _echoes_dropped_carried(state: dict[str, Any], key: str, value: Any) -> bool
     return False
 
 
+def _echoes_cleared_on_change(state: dict[str, Any], kind: str, value: Any) -> bool:
+    """Is this extracted value just an echo of something the category change wiped THIS turn?
+
+    The old category's haul_item and features are cleared by the switch on purpose — the new
+    category asks its own cargo/use-case question from scratch. The analyzer re-emitting the
+    old value off the history (not off this message) must not sneak it back in and mark that
+    question answered. A value the customer genuinely restated differs from the cleared one
+    — or is the cleared one, in which case they said the same thing and re-asking is wrong
+    anyway only when they actually said it; a verbatim echo is indistinguishable, so the
+    cleared value never re-enters on the change turn itself.
+    """
+    cleared = (state.get("turn_outcome") or {}).get("cleared_on_category_change") or {}
+    if not cleared:
+        return False
+    if kind == "haul_item":
+        old = cleared.get("haul_item")
+        return bool(old) and str(old).strip().casefold() == str(value or "").strip().casefold()
+    if kind == "feature":
+        old_features = {str(item).strip().casefold() for item in (cleared.get("features") or [])}
+        return str(value or "").strip().casefold() in old_features
+    return False
+
+
 def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     category = state.get("category") or ""
     user_text = _current_user_text(state)
@@ -902,6 +985,8 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     # out and drop the rest (their values already live in their own slots).
     features, hitch_from_features = sanitize_non_metadata_features(analysis.extracted.non_metadata_features)
     for feature in features:
+        if _echoes_cleared_on_change(state, "feature", feature):
+            continue
         if feature not in state.setdefault("non_metadata_features", []):
             state["non_metadata_features"].append(feature)
 
@@ -925,7 +1010,7 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
 
     for key in analysis.extracted.numeric_no_preference:
         _set_slot(state, key, None)
-    if analysis.extracted.haul_item:
+    if analysis.extracted.haul_item and not _echoes_cleared_on_change(state, "haul_item", analysis.extracted.haul_item):
         _set_slot(state, "haul_item", analysis.extracted.haul_item)
     if analysis.extracted.hitch_type:
         # A single named type is a real preference; "both" (the model's way of saying
@@ -970,13 +1055,28 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
             state, answer.slot_name, normalize_answer_for_slot(category, answer.slot_name, answer.raw_answer)
         ):
             continue
+        # The old cargo re-emitted as a slot answer for the NEW category's cargo slot is the
+        # same history echo as extracted.haul_item — it must not answer a question never asked.
+        if _echoes_cleared_on_change(state, "haul_item", answer.raw_answer):
+            continue
         _store_slot_answer(state, category, answer.slot_name, answer.raw_answer)
         _mirror_optional_answer_as_feature(state, category, answer.slot_name, answer.raw_answer)
     # A question the LLM marked answered must advance even if it was vague/partial and
-    # produced no parseable value (spec: loose answer -> null, never re-ask).
+    # produced no parseable value (spec: loose answer -> null, never re-ask). But ONLY when
+    # the message was actually about the pending question: seen live, the respond model asked
+    # the wrong question ("what capacity?" while haul_item was pending), the customer answered
+    # THAT ("2000 lbs"), the analyzer stamped answered_current_question=true - and this
+    # fallback nulled haul_item, closing a question that was never asked and unlocking the
+    # search. An answer that filled only OTHER, non-equivalent slots leaves the pending
+    # question open to be asked again.
     pending = state.get("pending_question_slot")
     if pending and analysis.answered_current_question and pending not in state.get("slots", {}):
-        _set_slot(state, pending, None)
+        answered_slots = {
+            answer.slot_name for answer in analysis.slot_answers if str(answer.raw_answer or "").strip()
+        }
+        pending_family = {pending, *equivalent_slots(pending)}
+        if not answered_slots or answered_slots & pending_family:
+            _set_slot(state, pending, None)
 
 
 def _fill_category_slot_aliases(state: dict[str, Any]) -> None:
@@ -1068,6 +1168,12 @@ def _apply_skips_and_repeats(state: dict[str, Any], analysis: TurnAnalysis) -> N
         state["pending_question_slot"] = None
         state["pending_question_repeats"] = 0
     elif analysis.intent in {"skip_all_show_results", "show_more_results"}:
+        if (state.get("turn_outcome") or {}).get("category_just_changed"):
+            # The same message that asked for results also moved the category. The NEW
+            # category's questions have not been asked yet — mass-skipping them here would
+            # search with zero qualification. The change owns the turn; results wait until
+            # the new category's questions are answered or the customer skips them THEN.
+            return
         for slot in required_slots_for_state(state):
             if slot not in state.get("slots", {}):
                 _mark_skipped(state, slot)
@@ -1095,6 +1201,13 @@ def _apply_requirement_changes(state: dict[str, Any], analysis: TurnAnalysis) ->
         state.get("slots", {}).pop(field, None)
         state.get("slot_sources", {}).pop(field, None)
     if analysis.intent == "drop_requirements" and not analysis.dropped_fields:
+        if analysis.keep_fields_answer:
+            # This message answered the keep/drop question, and that machinery already
+            # dropped exactly the values the customer waved off. Seen live: "nope, no
+            # specific needs" came back keep_fields_answer="none" AND intent=
+            # drop_requirements with no dropped_fields — and this blanket wipe then
+            # destroyed every remaining slot, including the 50 ft they had just stated.
+            return
         state["slots"] = {}
         state["slot_sources"] = {}
 

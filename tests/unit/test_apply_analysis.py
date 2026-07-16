@@ -1208,3 +1208,292 @@ def test_frontend_shown_urls_do_not_flood_the_new_category_bucket():
     merge_frontend_shown_urls(state, ["https://x/livestock-9"])
     assert state["shown_urls"] == ["https://x/livestock-9"]
     assert state["shown_urls_by_category"]["Livestock"] == ["https://x/livestock-9"]
+
+
+# --- Defaults never ride the keep/drop question ------------------------------------
+
+
+def test_default_width_is_not_offered_in_keep_drop_on_category_change():
+    # Flatbed seeds trailer_width_ft=8.0 as a DEFAULT. The customer never said 8 ft, so a
+    # switch to Dump must not ask "does the 8 ft width still apply?" — only values the
+    # customer actually gave (the 20 ft length here) are offered back.
+    state = new_session_state("s1")
+    say(state, "I need a flatbed trailer, 20 ft long")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_selection",
+            category_mentioned="Flatbed",
+            extracted={**_empty_extracted(), "trailer_length_ft": 20.0},
+            slot_answers=[{"slot_name": "trailer_length_ft", "raw_answer": "20 ft"}],
+        ),
+    )
+    assert state["slots"]["trailer_width_ft"] == 8.0
+    assert state["slot_sources"]["trailer_width_ft"] == "default"
+    say(state, "actually let's make it a dump trailer")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["pending_category_change"]["dimensions"] == {"length": 20.0}
+    assert "trailer_width_ft" not in state["slots"]  # the Flatbed default did not follow them
+
+
+def test_change_with_only_default_values_asks_no_keep_drop_question_at_all():
+    state = new_session_state("s1")
+    say(state, "a flatbed trailer please")
+    apply_with(state, sample_analysis(intent="category_selection", category_mentioned="Flatbed", slot_answers=[], extracted=_empty_extracted()))
+    assert state["slot_sources"]["trailer_width_ft"] == "default"
+    say(state, "actually a dump trailer instead")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    # Nothing the customer said carries over, so there is nothing to ask about.
+    assert state["pending_category_change"] is None
+
+
+# --- A results request that names a different category is a change -----------------
+
+
+def test_show_more_naming_a_different_category_changes_it_instead_of_mass_skipping():
+    # Seen live: "show me dump trailers instead" mid-Utility came back labeled
+    # show_more_results. The old code left the category alone, marked every Utility
+    # question skipped, and searched Utility again.
+    state = new_session_state("s1")
+    state["category"] = "Utility"
+    state["slots"] = {"haul_item": "mower"}
+    state["slot_sources"] = {"haul_item": "user"}
+    state["shown_urls"] = ["https://x/1"]
+    say(state, "show me dump trailers instead")
+    apply_with(
+        state,
+        sample_analysis(intent="show_more_results", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()),
+    )
+    assert state["category"] == "Dump"
+    assert state["qualification_complete"] is False
+    assert state["skipped_slots"] == []  # the new category's questions were NOT skipped
+
+
+def test_skip_all_naming_a_different_category_changes_it_instead_of_mass_skipping():
+    state = new_session_state("s1")
+    state["category"] = "Utility"
+    state["slots"] = {"haul_item": "mower"}
+    state["slot_sources"] = {"haul_item": "user"}
+    say(state, "forget the questions, just show me enclosed trailers")
+    apply_with(
+        state,
+        sample_analysis(intent="skip_all_show_results", category_mentioned="Enclosed", slot_answers=[], extracted=_empty_extracted()),
+    )
+    assert state["category"] == "Enclosed"
+    assert state["qualification_complete"] is False
+    assert state["skipped_slots"] == []
+
+
+def test_show_more_within_the_same_category_still_skips_and_completes():
+    # The guard must not break the normal path: more of the SAME category skips the
+    # remaining questions and searches.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["slots"] = {"haul_material": "gravel"}
+    state["slot_sources"] = {"haul_material": "user"}
+    state["shown_urls"] = ["https://x/1"]
+    say(state, "show me more dump trailers")
+    apply_with(
+        state,
+        sample_analysis(intent="show_more_results", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()),
+    )
+    assert state["category"] == "Dump"
+    assert state["qualification_complete"] is True
+
+
+# --- History echoes must not answer the new category's questions -------------------
+
+
+def test_old_haul_item_echo_does_not_answer_the_new_categorys_cargo_question():
+    # The analyzer re-emits the stored haul_item off the history on the change turn.
+    # Stored, it flows through the slot aliases into Dump's haul_material and the
+    # "what will you be hauling?" question is silently never asked.
+    state = new_session_state("s1")
+    state["category"] = "Utility"
+    state["slots"] = {"haul_item": "furniture"}
+    state["slot_sources"] = {"haul_item": "user"}
+    say(state, "actually I want a dump trailer")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Dump",
+            extracted={**_empty_extracted(), "haul_item": "furniture"},  # echo, not said this turn
+            slot_answers=[],
+        ),
+    )
+    assert state["category"] == "Dump"
+    assert "haul_item" not in state["slots"]
+    assert "haul_material" not in state["slots"]
+
+
+def test_fresh_cargo_in_the_change_message_still_lands_in_the_new_category():
+    state = new_session_state("s1")
+    state["category"] = "Utility"
+    state["slots"] = {"haul_item": "furniture"}
+    state["slot_sources"] = {"haul_item": "user"}
+    say(state, "actually I want a dump trailer for gravel")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Dump",
+            extracted={**_empty_extracted(), "haul_item": "gravel"},
+            slot_answers=[{"slot_name": "haul_material", "raw_answer": "gravel"}],
+        ),
+    )
+    assert state["category"] == "Dump"
+    assert state["slots"]["haul_material"] == "gravel"
+
+
+def test_old_feature_echo_does_not_survive_the_category_change():
+    state = new_session_state("s1")
+    state["category"] = "Enclosed"
+    state["non_metadata_features"] = ["rear ramp door"]
+    say(state, "switch me to a livestock trailer")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Livestock",
+            extracted={**_empty_extracted(), "non_metadata_features": ["rear ramp door"]},  # echo
+            slot_answers=[],
+        ),
+    )
+    assert state["category"] == "Livestock"
+    assert state["non_metadata_features"] == []
+
+
+def test_carried_dimension_echo_keeps_the_carried_tag_so_a_later_drop_works():
+    # An extracted echo of the carried 20 ft on the change turn used to re-store it with
+    # source="user", and next turn's "start fresh" could no longer drop it.
+    state = new_session_state("s1")
+    state["category"] = "Livestock"
+    state["slots"] = {"trailer_length_ft": 20.0}
+    state["slot_sources"] = {"trailer_length_ft": "user"}
+    say(state, "let's look at dump trailers instead")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Dump",
+            extracted={**_empty_extracted(), "trailer_length_ft": 20.0},  # echo of the carried value
+            slot_answers=[],
+        ),
+    )
+    assert state["slot_sources"]["trailer_length_ft"] == "carried"
+    say(state, "no, start fresh")
+    apply_with(state, sample_analysis(keep_fields_answer="none", category_mentioned=None, slot_answers=[], extracted=_empty_extracted()))
+    assert "trailer_length_ft" not in state["slots"]
+
+
+def test_keep_drop_refusal_labeled_drop_requirements_does_not_nuke_everything():
+    # Seen live: "nope, no specific needs for any other feature" answering the keep/drop
+    # question came back keep_fields_answer="none" AND intent=drop_requirements with no
+    # dropped_fields. The blanket drop_requirements wipe then destroyed every slot,
+    # including the 50 ft the customer had stated for the new category one turn earlier.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["slots"] = {"haul_weight_lbs": 9062.0}
+    state["slot_sources"] = {"haul_weight_lbs": "user"}
+    say(state, "I am also looking for a 50ft trailer for my livestock")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Livestock",
+            extracted={**_empty_extracted(), "trailer_length_ft": 50.0},
+            slot_answers=[{"slot_name": "trailer_length_ft", "raw_answer": "50 ft"}],
+        ),
+    )
+    assert state["category"] == "Livestock"
+    assert state["slots"]["trailer_length_ft"] == 50.0
+    assert "payload" in state["pending_category_change"]["dimensions"]
+    say(state, "nope, no specific needs for any other feature")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="drop_requirements",
+            keep_fields_answer="none",
+            category_mentioned=None,
+            slot_answers=[],
+            extracted=_empty_extracted(),
+        ),
+    )
+    # The carried payload is dropped; the length they stated for Livestock survives.
+    assert "haul_weight_lbs" not in state["slots"]
+    assert state["slots"]["trailer_length_ft"] == 50.0
+
+
+def test_answer_to_a_different_slot_does_not_close_the_pending_question():
+    # Seen live: haul_item was pending, the respond model wrongly asked about capacity, the
+    # customer answered "2000 lbs", and the analyzer stamped answered_current_question=true.
+    # The vague-answer fallback then stored haul_item=None - closing a question that was
+    # never asked and unlocking the search. An answer that fills only OTHER slots must leave
+    # the pending question open.
+    state = new_session_state("s1")
+    state["category"] = "Flatbed"
+    state["pending_question_slot"] = "haul_item"
+    say(state, "2000 lbs as capacity, no width in mind as of now")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            answered_current_question=True,
+            extracted={**_empty_extracted(), "payload_lbs": 2000.0, "numeric_no_preference": ["trailer_width_ft"]},
+            slot_answers=[{"slot_name": "haul_weight_lbs", "raw_answer": "2000 lbs"}],
+        ),
+    )
+    assert state["slots"]["haul_weight_lbs"] == 2000.0
+    assert "haul_item" not in state["slots"]  # still open - it gets asked next
+
+
+def test_vague_answer_to_the_pending_question_still_advances_it():
+    # The fallback's real job is untouched: a vague answer TO the pending question (nothing
+    # else answered) stores null so the question is never re-asked.
+    state = new_session_state("s1")
+    state["category"] = "Flatbed"
+    state["pending_question_slot"] = "haul_item"
+    say(state, "oh all sorts of stuff really")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            answered_current_question=True,
+            extracted=_empty_extracted(),
+            slot_answers=[],
+        ),
+    )
+    assert "haul_item" in state["slots"] and state["slots"]["haul_item"] is None
+
+
+def test_business_descriptor_cargo_term_does_not_outvote_the_extracted_haul_item():
+    # "I run a small landscaping outfit ... an equipment trailer ... a compact tractor" -
+    # the raw-text scan hits "landscaping" (Utility) first, but the actual cargo is the
+    # tractor, which maps straight back to Equipment. No switch suggestion should fire.
+    state = new_session_state("s1")
+    say(
+        state,
+        "I run a small landscaping outfit outside Houston and I'm in the market for an "
+        "equipment trailer. I mostly move a compact tractor around.",
+    )
+    apply_with(
+        state,
+        sample_analysis(
+            intent="recommendation_request",
+            category_mentioned="Equipment",
+            extracted={**_empty_extracted(), "haul_item": "compact tractor"},
+            slot_answers=[{"slot_name": "haul_item", "raw_answer": "compact tractor"}],
+            haul_classification={
+                "is_lightweight_utility_load": False,
+                "needs_width_question": True,
+                "haul_item_matched": "compact tractor",
+            },
+        ),
+    )
+    assert state["category"] == "Equipment"
+    assert state["pending_category_suggestion"] is None

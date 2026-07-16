@@ -29,6 +29,10 @@ def test_brands_from_fixture_excel(tmp_path, monkeypatch):
             {"make": "Diamond C Trailers", "category": "Utility"},
             {"make": "Dimond C", "category": "Dump"},
             {"make": "Gooseneck", "category": "Equipment"},
+            # A workbook category outside the canonical 13 must never reach the prompts:
+            # advertised there, it contradicted "we carry exactly 13 categories" and could
+            # be offered as a brand-category choice nothing downstream can qualify.
+            {"make": "East Texas Trailers", "category": "Welding"},
         ]
     ).to_excel(fixture, index=False)
 
@@ -42,6 +46,8 @@ def test_brands_from_fixture_excel(tmp_path, monkeypatch):
         assert "- Diamond C: Dump, Utility" in block
         assert "- Gooseneck:" not in block
         assert "Gooseneck and Bumper Pull are strictly hitch types" in block
+        assert "Welding" not in block
+        assert brands.categories_for_make("East Texas Trailers") == ()
 
         from src.domain.categories import make_prompt_block
 

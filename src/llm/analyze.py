@@ -98,6 +98,28 @@ def build_analyze_prompt(state: Any) -> tuple[str, list[dict]]:
 Analyze the LATEST USER MESSAGE in the context of the conversation and fill the TurnAnalysis
 schema. You never write customer-facing text; you only classify and extract.
 
+=== CRITICAL RULES - THESE OUTRANK EVERYTHING ELSE IN THIS PROMPT ===
+1. CATEGORY CHANGES ARE NEVER MISSED. If the message NAMES a trailer category different from the
+   selected one, it is a category change - intent=category_change, category_mentioned=<the new
+   category> - NO MATTER how it is phrased. "Show me dump trailers instead", "just show me utility
+   trailers", "forget it, what enclosed trailers do you have?", "I'm also looking for a livestock
+   trailer" are ALL category changes: never show_more_results, never skip_all_show_results, never
+   requirement_change. (An informational ASK about another category is the one exception - see the
+   WANT vs ASK test.)
+2. A CATEGORY CHANGE RESTARTS QUALIFICATION FROM ZERO. After a change, every one of the new
+   category's questions is unanswered until the customer answers or skips it. Never mark
+   answered_current_question=true off old-category history, and on the change turn `extracted` and
+   `slot_answers` carry ONLY what THIS message states - never the old category's haul item, use
+   case, features, sizes, weights, or hitch replayed from the conversation history.
+3. YOUR LABELS ARE THE SEARCH GATE. Inventory search unlocks only when every required question for
+   the current category was asked and then answered or skipped. A slot_answer you invent for a slot
+   the message never addressed silently marks a question answered and unlocks the search early -
+   emit slot answers ONLY for what the message actually says.
+4. VAGUE MESSAGES MEAN WHAT OUR LAST MESSAGE MAKES THEM MEAN. "Show me more", "what are my
+   options", "sure", "no" point at trailer TYPES, at LISTINGS, or at a pending yes/no question
+   depending on what we just asked - read them against our last assistant message, never in
+   isolation (rules below).
+
 === TRAILER CATEGORIES ===
 {category_prompt_block()}
 
@@ -180,12 +202,23 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
 - skip_current: "skip", "next", "I don't know", "I'd rather not answer".
 - skip_all_show_results: a category IS selected and mid-qualification the user wants to stop answering
   and see inventory now: "just show me what you have", "no more questions", "give me recommendations" or something similar.
-- show_more_results: results are ALREADY on screen and the user asks for more of the same
-  ("show me more", "any others?", "what else do you have?", "more options"). Requirements unchanged.
+  NEVER this intent when the message names a DIFFERENT trailer category than the selected one - that is
+  category_change ("forget it, just show me dump trailers" with Utility selected = category_change to Dump).
+- show_more_results: results are ALREADY on screen and the user asks for more of the SAME
+  ("show me more", "any others?", "what else do you have?", "more options"). Requirements unchanged,
+  category unchanged. NEVER this intent when the message names a DIFFERENT trailer category ("show me
+  dump trailers instead", "what about utility trailers?") - a different named type is ALWAYS
+  category_change, whatever else the message asks for.
 - READ THE MESSAGE AGAINST OUR LAST ASSISTANT MESSAGE. The same words point at different things
-  depending on what we just asked. If our last message asked WHICH TYPE of trailer they want (or what
-  they plan to haul) and they reply "show me the options" / "what are my options" / "what do you have",
-  they are asking for our trailer TYPES -> recommendation_request, never a results request.
+  depending on what we just asked. Resolve every vague message ("show me more", "what are my options",
+  "sure", "go ahead", "what else?") against what OUR last message offered or asked:
+  * Our last message asked WHICH TYPE of trailer they want (or what they plan to haul, or listed our
+    trailer TYPES) and they reply "show me the options" / "show me more" / "what do you have" -> they
+    want our trailer TYPES -> recommendation_request, never a results request. There are no results on
+    screen and no category, so show_more_results/skip_all_show_results are impossible here.
+  * Our last message showed LISTINGS and they say "show me more" / "more options" -> show_more_results.
+  * Our last message asked a yes/no (a category switch, a brand category) -> read "sure"/"go ahead"/
+    "no" as the answer to THAT question (category_confirm_answer / keep_fields_answer), not as a new topic.
 - faq: the message asks one of contact_human / financing / trade_in / service_parts / store_info.
 - team_request_escalation: call/meeting scheduling, quote requests, "email me", anything needing a human.
 - listing_interest: references a shown listing -> set listing_reference to its 1-based index in the
@@ -247,6 +280,12 @@ category's questions ALL get asked again, one at a time, before any search - wha
 with them. Do not treat a value from the old category
 as an answer to a new category's question, and do not mark answered_current_question=true for a question the
 new category has not asked yet.
+ON THE CATEGORY-CHANGE TURN ITSELF, `extracted` and `slot_answers` may contain ONLY what THIS message
+states about the NEW category. NEVER re-emit the old category's haul item, use case, cargo, features,
+sizes, weights, or hitch off the conversation history - the change resets them on purpose, and echoing
+one silently marks a new-category question answered that was never asked. "I want a dump trailer
+instead" (while hauling "hay bales" on file) -> haul_item null, slot_answers empty: the message says
+nothing about what they will haul in the dump trailer, so we must ask.
 
 === CATEGORY-SWITCH / BRAND-CATEGORY CONFIRMATION ANSWER ===
 Applies ONLY when "Pending category switch suggestion" OR "Pending brand-category question" above is
@@ -265,16 +304,23 @@ That pending block means OUR LAST MESSAGE asked exactly one question: the catego
 we asked whether the carried-over value(s) listed in it (length/width/payload/hitch - everything else
 was already dropped) still apply. Read their reply as the answer to THAT question FIRST, whatever else
 it contains, and set keep_fields_answer on EVERY such turn:
-- "all": they accept ("yes", "sure", "keep them", "that's fine", "those still apply").
+- "all": ONLY an AFFIRMATIVE acceptance of the offered values ("yes", "sure", "keep them", "that's
+  fine", "those still apply"). A message that OPENS with a refusal word can NEVER be "all".
 - "none": they decline or wave the values off ("no", "nope", "no thanks", "start fresh", "drop them",
   "no specific needs", "no other requirements", "nothing else"). A broad refusal counts as "none":
-  they are declining the values we offered, not making small talk.
+  they are declining the values we offered, not making small talk. THE OPENING WORD DECIDES: any
+  message starting with "no"/"nope"/"nah" answers this question with "none" (or "some" if it also
+  names values to keep) - "nope, no specific needs for any other feature" is "none", NOT "all",
+  even though it can be read as "nothing beyond what I said". When in doubt between "all" and
+  "none", a refusal opener means "none".
 - "some": they keep only certain ones. kept_fields: the ones to keep, named as any of:
   trailer_length_ft, trailer_width_ft, payload_lbs, hitch_type.
 - null ONLY when the message does not engage with the question at all (a brand-new topic, an
   unrelated question of their own). A refusal that also mentions other requirements is still
   "none"/"some", never null.
 - dropped_fields: the ones they explicitly drop (optional; "some" already implies the rest are dropped).
+- keep_fields_answer IS the drop instruction on these turns. Never ALSO use intent=drop_requirements
+  for the same refusal - that intent wipes every requirement, not just the offered carried-over values.
 - Mixed replies are allowed: "keep the length, drop the width, and make the payload 7000" ->
   keep_fields_answer="some", kept_fields=["trailer_length_ft"], and ALSO extract payload_lbs=7000 in `extracted`.
 - A NEW value ("make it 8 ft wide instead", "gooseneck this time") is keep-with-update: extract it

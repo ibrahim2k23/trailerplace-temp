@@ -237,6 +237,74 @@ def test_no_category_and_nothing_to_go_on_gets_the_we_carry_paragraph():
     assert "so RECOMMEND" not in system
 
 
+def test_asking_the_type_question_again_switches_to_the_full_lineup_list():
+    # Seen live: the bot sent the identical we-carry sentence twice in a row — the customer
+    # said "show me more" and got a copy of the last reply. The second ask must give them
+    # something NEW (the full lineup as bullets), never the same paragraph.
+    state = {
+        "messages": [
+            {"role": "user", "content": "hi, I need a trailer"},
+            {
+                "role": "assistant",
+                "content": "We carry Equipment, Dump, Enclosed, Utility, Flatbed, and Livestock trailers, "
+                "and many more - which type would you like to go with?",
+            },
+            {"role": "user", "content": "show me more"},
+        ],
+        "slots": {},
+    }
+    analysis = sample_analysis(
+        intent="recommendation_request",
+        category_mentioned=None,
+        slot_answers=[],
+        extracted={
+            "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
+            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
+        },
+        haul_classification={"is_lightweight_utility_load": False, "needs_width_question": False, "haul_item_matched": None},
+    )
+
+    system, _ = build_respond_prompt(state, analysis, {"next_question": "What type of trailer are you looking for?"})
+
+    assert "ALREADY ASKED" in system
+    assert "DO NOT send the same sentence again" in system
+    assert "so we cannot recommend" not in system  # the fixed paragraph branch must not also fire
+
+
+def test_respond_prompt_carries_the_coherence_guardrails():
+    state = {"messages": [{"role": "user", "content": "hello"}], "slots": {}}
+    system, _ = build_respond_prompt(state, sample_analysis(), {})
+    assert "READ THE CONVERSATION BEFORE YOU WRITE" in system
+    assert "NEVER send the same or nearly the same message twice in a row" in system
+    assert "MORE OF WHATEVER YOUR LAST MESSAGE OFFERED" in system
+
+
+def test_respond_prompt_carries_the_critical_rules_section():
+    state = {"messages": [{"role": "user", "content": "hello"}], "slots": {}}
+    system, _ = build_respond_prompt(state, sample_analysis(), {})
+    assert "HARD RULES - NEVER BROKEN" in system
+    assert "AFTER A CATEGORY CHANGE" in system
+    assert "INVENTORY EXISTS ONLY IN THE LISTINGS BLOCK" in system
+    assert "THIS TURN'S ORDERS" in system
+    assert "HOW TO BUILD THE REPLY - DO THESE STEPS IN ORDER" in system
+
+
+def test_decided_question_is_first_order_and_digest_comes_last():
+    # Seen live (4o-mini): led by the analyst digest, the model followed the digest's story
+    # and asked its own question instead of the decided one. The question line now leads the
+    # orders as a MUST-END-WITH directive and the digest trails as context.
+    state = {"category": "Flatbed", "messages": [{"role": "user", "content": "no"}], "slots": {}}
+    system, _ = build_respond_prompt(
+        state, sample_analysis(), {"next_question": "What will you be hauling on the flatbed?"}
+    )
+    assert 'THE ONE QUESTION TO ASK - your reply MUST END with it: "What will you be hauling on the flatbed?"' in system
+    assert "FAILED reply" in system
+    question_pos = system.index("THE ONE QUESTION TO ASK")
+    digest_pos = system.index("WHAT THE CUSTOMER JUST SAID AND WANTS")
+    assert question_pos < digest_pos
+
+
 def test_a_feature_with_no_category_gets_the_structured_recommendation():
     state = {"messages": [{"role": "user", "content": "something with a rear ramp"}], "slots": {}, "non_metadata_features": ["rear ramp"]}
     analysis = sample_analysis(intent="feature_request_no_category", category_mentioned=None)

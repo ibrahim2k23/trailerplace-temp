@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from src.domain.categories import CANONICAL_CATEGORIES
 from src.domain.normalizer import normalize_category, normalize_make
 
 
@@ -63,7 +64,12 @@ def load_make_inventory() -> MakeInventory:
 
         make = _display_make(raw_make)
         category = _display_category(raw_category)
-        if category == "Unknown":
+        if category == "Unknown" or category not in CANONICAL_CATEGORIES:
+            # Only categories the rest of the system can actually qualify and search. The
+            # workbook carries a handful of rows outside the canonical 13 (e.g. "Welding")
+            # — advertised in the makes block, they contradicted the same prompt's "we
+            # carry exactly 13 categories" line and could be offered in the brand-category
+            # question as a choice nothing downstream could handle.
             continue
 
         categories.setdefault(make, set()).add(category)

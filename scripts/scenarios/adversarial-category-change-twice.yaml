@@ -17,7 +17,9 @@ turns:
     # The category moves at once; the reply is the keep/drop question for the carried payload.
     expect_state:
       category: "Tilt"
-    expect_reply_contains_any: ["keep", "carry over", "still apply", "start"]
+    # Any honest phrasing of the keep/drop offer counts ("keep it", "maintain the
+    # payload", "still apply") — the respond prompt words it naturally on purpose.
+    expect_reply_contains_any: ["keep", "carry over", "still apply", "start", "maintain", "adjust"]
   - user: "keep all of them"
     expect_state:
       category: "Tilt"

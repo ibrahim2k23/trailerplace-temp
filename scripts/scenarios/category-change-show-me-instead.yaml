@@ -1,0 +1,33 @@
+name: category-change-show-me-instead
+tags: [regression, category-change]
+# Regression for the 2026-07-16 live report: "show me dump trailers instead" with results
+# on screen was read as a results request (show_more_results) — the category never moved,
+# every remaining question was mass-skipped, and the OLD category was searched again with
+# no question asked. A results request that names a different type IS a category change:
+# the switch is confirmed, the keep/drop question runs, and Dump's own questions are asked
+# before any Dump inventory appears.
+turns:
+  - user: "my name is Ibrahim and email is ibrahim@esided.ai"
+  - user: "I am looking for a utility trailer to haul appliances, around 2000 lbs total"
+    expect_state:
+      category: "Utility"
+  - user: "just show me what you have"
+    expect_state:
+      category: "Utility"
+    expect_listings: true
+  - user: "show me dump trailers instead"
+    # The change owns the turn: no listings, and the carried 2000 lbs is the keep/drop ask.
+    expect_state:
+      category: "Dump"
+    expect_listings: false
+    expect_reply_contains_any: ["2000", "2,000"]
+  - user: "drop that, start fresh"
+    # The drop sticks (no analyzer echo resurrects it) and Dump's own cargo question is
+    # asked — the old category's use case must not silently answer it.
+    expect_state:
+      category: "Dump"
+      pending_category_change: null
+      "slot:haul_weight_lbs": null
+      "slot:haul_material": null
+    expect_listings: false
+    expect_reply_contains_any: ["haul", "material", "dirt", "gravel"]

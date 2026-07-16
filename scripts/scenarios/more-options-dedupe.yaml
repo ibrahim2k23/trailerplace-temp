@@ -3,10 +3,14 @@ tags: [regression, m6]
 # spec §After Results "more options": a second search must never repeat a URL
 # already shown to the user this session (backend shown_urls, not the frontend).
 turns:
+  # The opening contact gate owns the first reply; give it what it wants so the
+  # deferred request (results) lands on the next turn like every other scenario.
+  - user: "I'm Marco, marco@example.com"
+  # Qualification comes first: naming the category starts its questions, and the search is
+  # hard-blocked until they are answered or the customer skips them (next turn).
   - user: "Show me utility trailers."
     expect_state:
       category: "Utility"
-    expect_listings: true
   - user: "No preference on anything else, just show me what you have."
     expect_state:
       qualification_complete: true

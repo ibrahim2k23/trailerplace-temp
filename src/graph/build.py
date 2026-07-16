@@ -57,6 +57,12 @@ def should_search(state: dict) -> bool:
         return False
     if state.get("pending_category_change") or state.get("pending_category_suggestion") or state.get("pending_brand_categories"):
         return False
+    if (state.get("turn_outcome") or {}).get("category_just_changed"):
+        # The turn the category moves NEVER searches, even if carried/default values happen
+        # to satisfy every new-category slot: the switch is confirmed and the new category's
+        # questions are asked (or explicitly skipped by the customer) before any inventory
+        # is shown. Without this, a change whose slots all auto-filled searched immediately.
+        return False
     turn = state.get("turn")
     if turn:
         if turn.intent in _SHOW_RESULTS_INTENTS:

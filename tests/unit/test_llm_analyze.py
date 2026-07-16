@@ -40,6 +40,15 @@ def test_analyze_prompt_contains_required_blocks():
     assert messages == state["messages"]
 
 
+def test_analyze_prompt_carries_the_critical_rules_section():
+    system, _ = build_analyze_prompt({"messages": [{"role": "user", "content": "hi"}]})
+    assert "CRITICAL RULES - THESE OUTRANK EVERYTHING ELSE" in system
+    assert "CATEGORY CHANGES ARE NEVER MISSED" in system
+    assert "A CATEGORY CHANGE RESTARTS QUALIFICATION FROM ZERO" in system
+    assert "YOUR LABELS ARE THE SEARCH GATE" in system
+    assert "VAGUE MESSAGES MEAN WHAT OUR LAST MESSAGE MAKES THEM MEAN" in system
+
+
 def test_analyze_prompt_contains_inventory_lookup_guards():
     system, _ = build_analyze_prompt({"messages": [{"role": "user", "content": "stock 12345"}]})
     assert "NEVER a stock number: weights" in system

@@ -16,6 +16,27 @@ def test_category_resolution_salience_and_guards():
     assert resolve_category_from_text("gooseneck").category is None
 
 
+def test_equipment_inside_a_cargo_phrase_never_names_the_category():
+    # Seen live: "I want one for hauling lawn equipment" resolved as NAMING Equipment —
+    # an explicit type choice the customer never made — and yanked them off Utility.
+    from src.domain.categories import resolve_category_matches
+
+    for text in (
+        "ok, i actually want one for hauling lawn equipment.",
+        "hauling heavy equipment",
+        "i move landscaping equipment around",
+    ):
+        assert ("Equipment", "naming") not in resolve_category_matches(text), text
+    # The genuine naming usages still resolve.
+    for text in (
+        "i need an equipment trailer",
+        "equipment",
+        "go with equipment please",
+        "lawn equipment trailer",  # "... trailer" is always the type
+    ):
+        assert ("Equipment", "naming") in resolve_category_matches(text), text
+
+
 def test_office_clarification_and_field_coverage():
     resolution = resolve_category_from_text("I need an office trailer")
     assert resolution.needs_clarification is True

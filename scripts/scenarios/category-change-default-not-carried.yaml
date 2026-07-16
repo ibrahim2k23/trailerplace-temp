@@ -1,0 +1,22 @@
+name: category-change-default-not-carried
+tags: [regression, category-change]
+# Regression for the 2026-07-16 live report: category defaults (Flatbed's 8 ft deck width)
+# were treated as customer preferences on a category change — the keep/drop question asked
+# whether the 8 ft width "still applies" even though the customer never said it. Defaults
+# belong to the category that seeded them: only the 20 ft the customer actually gave is
+# offered back, and the old category's default is dropped outright.
+turns:
+  - user: "my name is Ibrahim and email is ibrahim@esided.ai"
+  - user: "I am looking for a flatbed trailer, about 20 ft long"
+    expect_state:
+      category: "Flatbed"
+      "slot:trailer_length_ft": 20.0
+      "slot:trailer_width_ft": 8.0
+  - user: "actually I need a dump trailer instead"
+    # The keep/drop question offers ONLY the customer's 20 ft — never the 8 ft default.
+    expect_state:
+      category: "Dump"
+      "slot:trailer_width_ft": null
+    expect_reply_contains_any: ["20"]
+    expect_reply_not_contains: ["8 ft", "width"]
+    expect_listings: false

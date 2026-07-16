@@ -1,0 +1,21 @@
+name: vague-show-more-types-no-category
+tags: [regression, respond]
+# Regression for the 2026-07-16 live report: with no category chosen, the type question got
+# the fixed we-carry sentence — and "show me more" got the IDENTICAL sentence again, reading
+# as a bot stuck in a loop. The second ask must give them something new: the full lineup as
+# a bulleted list, including types the first paragraph did not name.
+turns:
+  - user: "my name is Ibrahim and email is ibrahim@esided.ai"
+  - user: "I need a trailer"
+    # No cargo, no feature — the we-carry type question, no listings, no stock talk.
+    expect_state:
+      category: null
+    expect_listings: false
+    expect_reply_contains_any: ["which type", "what type"]
+  - user: "show me more"
+    # Still no category: this is a request for more TYPES, not inventory. The reply lists
+    # the wider lineup (types beyond the usual six prove it is not a verbatim repeat).
+    expect_state:
+      category: null
+    expect_listings: false
+    expect_reply_contains_any: ["Tilt", "Roll Off", "Car Hauler", "Aluminum", "Race"]

@@ -178,6 +178,28 @@ def _has_recommendation_basis(state: Any, analysis: TurnAnalysis) -> bool:
     return any(value not in (None, "") for value in slots.values())
 
 
+def _last_assistant_text(state: Any) -> str:
+    for message in reversed(_state_get(state, "messages", []) or []):
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+        if role == "assistant":
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+            return str(content or "")
+    return ""
+
+
+def _already_asked_category_question(state: Any) -> bool:
+    """Did OUR LAST message already ask which type of trailer they want?
+
+    When it did and we are about to ask again ("show me more", "what are my options" in reply),
+    repeating the same we-carry sentence verbatim reads as a bot stuck in a loop — seen live.
+    The second ask has to give them something NEW.
+    """
+    if int(_state_get(state, "pending_question_repeats", 0) or 0) >= 1:
+        return True
+    last = _last_assistant_text(state).lower()
+    return ("which type" in last or "what type of trailer" in last) and "trailer" in last
+
+
 def _category_question_line(state: Any, analysis: TurnAnalysis) -> str:
     """The ONE question when no category is chosen - a tailored list, or the we-carry paragraph."""
     closing = (
@@ -190,14 +212,25 @@ def _category_question_line(state: Any, analysis: TurnAnalysis) -> str:
             "they have given us something to go on, so RECOMMEND. Ask it using the RECOMMENDING TRAILER TYPES "
             "format below: 3-4 types from our lineup that suit what they told us, one short line each, then ask "
             "which they want to go with and note that we carry more. That list IS the question - do not also ask "
-            f"it in a sentence of its own. {closing}"
+            "it in a sentence of its own. If your previous reply already recommended types and they asked for "
+            f"more, pick DIFFERENT types from OUR CATEGORIES that you have not named yet. {closing}"
+        )
+    if _already_asked_category_question(state):
+        return (
+            "- No trailer category chosen yet and YOUR PREVIOUS REPLY ALREADY ASKED which type they want - they "
+            "are asking again, or asking to see more. DO NOT send the same sentence again: this time lay out our "
+            "FULL lineup as a bulleted list built from OUR CATEGORIES below (bold category name, em dash, one "
+            "short line on what it is best for - every category in that section, or at least the ones you have "
+            "not named yet), then ask which type they want to go with. Acknowledge their message in one short "
+            f"line first. That list IS the question - exactly one question mark in the reply. {closing}"
         )
     return (
         "- No trailer category chosen yet, so the ONE question above is which TYPE of trailer they want - and they "
         "have told us nothing about their job yet, so we cannot recommend. Ask it as ONE short paragraph that names "
         "5 or 6 of our trailer types INLINE in the sentence and ends by asking which they want, like: "
         '"We carry Equipment, Dump, Enclosed, Utility, Flatbed, and Livestock trailers, and many more - which type '
-        'would you like to go with?" Pick the types from OUR CATEGORIES below, always add "and many more", and use '
+        'would you like to go with?" That example is a SHAPE, not a script - phrase it naturally in your own words. '
+        'Pick the types from OUR CATEGORIES below, always note that we carry more, and use '
         "NO bullets, NO numbered list, and NOT the RECOMMENDING TRAILER TYPES format - one flowing paragraph, one "
         f"question. {closing}"
     )
@@ -223,23 +256,22 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
     if _outcome_get(turn_outcome, "contact_gate_missing"):
         return _contact_gate_lines(state, turn_outcome)
     lines: list[str] = []
-    turn_summary = (getattr(analysis, "turn_summary", "") or "").strip()
-    if turn_summary:
-        lines.append(
-            f'- WHAT THE CUSTOMER JUST SAID AND WANTS (analyst digest of their latest message): "{turn_summary}" '
-            "Address THIS in your reply - it is what they are waiting to hear about. It sets the reply's "
-            "content and tone, but the decided lines below (the question to ask, the listings to show) always "
-            "win when they differ."
-        )
     if _outcome_get(turn_outcome, "clarification_question"):
         lines.append(f'- Clarification question to ask: "{_outcome_get(turn_outcome, "clarification_question")}"')
     if _outcome_get(turn_outcome, "next_question"):
-        lines.append(f'- The ONE thing to find out this turn: "{_outcome_get(turn_outcome, "next_question")}"')
+        # This line comes FIRST and is phrased as a hard order. Seen live (4o-mini): with the
+        # question listed mid-pack after the analyst digest, the model followed the digest's
+        # story instead and asked its own question ("what capacity?" while the haul question
+        # was pending) — which then got answered, mis-marked the pending slot, and unlocked
+        # the search with a question never asked.
         lines.append(
-            "  Ask for it ONCE, at the end of your reply, in your own words - the wording above is the "
-            "information we need, not a script, so phrase it the way an experienced salesperson would in "
-            "this conversation. Do NOT lead up to it with a paraphrase of the same question and then repeat "
-            "it verbatim: the reply contains exactly one question mark, and no other question."
+            f'- THE ONE QUESTION TO ASK - your reply MUST END with it: "{_outcome_get(turn_outcome, "next_question")}"'
+        )
+        lines.append(
+            "  Rephrase it naturally in your own words and ask it ONCE, as the last sentence of the reply. "
+            "Exactly ONE question mark in the whole reply. Ending without this question, asking a DIFFERENT "
+            "question instead, or adding a second question is a FAILED reply - no matter what the customer "
+            "just said."
         )
         settled_category = _state_get(state, "category")
         if settled_category:
@@ -404,6 +436,16 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
                 "the SAME reply. Never end the turn without asking it: an unanswered question they were never "
                 "asked again is a question we lose."
             )
+    turn_summary = (getattr(analysis, "turn_summary", "") or "").strip()
+    if turn_summary:
+        # Deliberately LAST: it is context for tone and acknowledgement, and 4o-mini treats
+        # whatever leads this list as the mission. Led by the digest, it acted on the
+        # digest's story and dropped the ordered question.
+        lines.append(
+            f'- WHAT THE CUSTOMER JUST SAID AND WANTS (analyst digest, for context): "{turn_summary}" '
+            "Use this to make the reply address them naturally. It NEVER changes, replaces, or reorders "
+            "the orders above - especially not the question you must end with."
+        )
     return lines
 
 
@@ -474,80 +516,78 @@ def build_respond_prompt(
         else ""
     )
 
-    system = f"""You are the TrailerPlace sales assistant - an experienced trailer sales and lead specialist for a
-dealership in Wharton, TX (979-532-1486, https://trailerplace.com).
-Write the next assistant reply.
+    system = f"""You are the TrailerPlace sales assistant - an experienced trailer salesperson for a dealership in
+Wharton, TX (979-532-1486, {settings.trailerplace_website or "https://trailerplace.com"}). Write the next assistant reply.
 {repair_block}{opening_block}
-=== WHO YOU ARE ===
-A seasoned salesperson who knows trailers and wants to earn this sale. Professional, confident, and
-helpful. You keep the customer engaged and moving forward: every reply gives them something and then
-takes the next step. Clear and to the point - never pushy, never repetitive, never chatty.
-BANNED: praise and filler of any kind - "Great choice", "Perfect", "Awesome", "Excellent", "That's
-helpful", "Thanks for sharing", exclamation marks, emojis. You do not cheer the customer on; you find
-out what they need and put the right trailer in front of them.
-
-=== WHAT THE SYSTEM ALREADY DECIDED THIS TURN (do not contradict) ===
+=== THIS TURN'S ORDERS (the system already decided these - follow them EXACTLY) ===
 {decision_lines}
 
-=== RULES ===
-- Answer the user's question FIRST, then ask the pending qualification question - once, at the END of the
-  same reply, in your own natural words. ONE question per reply: never ask it twice (paraphrased and then
-  verbatim), never tack on a second question. The reply contains exactly one question mark.
-- DO NOT REACT TO A QUALIFICATION ANSWER: no praise, no agreement, no repeating it back, no recap of what
-  we have collected. It is recorded - go straight to the next question.
-  ONE EXCEPTION: they cannot answer or have no preference ("no idea", "doesn't matter", "skip that") -
-  give ONE short easing line ("No problem - we can keep that flexible and let the trailer decide.") and
-  move on. Two sentences, no more.
-  Neither rule ever shortens a reply with listings: when the LISTINGS block below has trailers, every one
-  is written out in full.
-- THE CUSTOMER SEES ONLY assistant_text. Every listing card, bullet, and link must be written out IN FULL
-  there. cited_listing_urls is a machine field they never see - a URL only there is a trailer they never
-  saw. Announcing listings and stopping ("Here are some trailers that match:") shows them NOTHING.
-- Never re-ask anything already collected, skipped, or marked no-preference.
-- Present listings ONLY from the "LISTINGS TO PRESENT THIS TURN" block: EVERY listing, in the exact order
-  given - never omit, add, reorder, or filter by how well a size or feature fits - and put every shown
-  listing's exact URL in cited_listing_urls. Optional fields (width, payload, hitch, height) are missing
-  on many trailers: skip the missing lines, never the listing.
-- When that block says NO SEARCH RAN, we have not looked yet - that says NOTHING about our stock. Show no
-  cards, and NEVER say we have nothing / no listings / none available for a category ("I don't have any
-  listings to show you for utility trailers" is WRONG and forbidden). Answer the customer and ask the
-  pending question instead.
-- The reference block is memory, not inventory to show: use it ONLY to answer a question about a listing
-  the customer refers back to ("the 81382", "the second one"), quoting its real fields and URL. Never
-  re-list it, renumber it, or restate it under a different category.
-- Never invent inventory, prices, or policies. Store facts: Wharton TX, 979-532-1486, financing available, delivery available, {settings.trailerplace_website or "https://trailerplace.com"}.
-- When it genuinely fits (you answered an FAQ, the conversation is wrapping up, they seem unsure, or we had
-  nothing more to show), end the reply with: "Feel free to check out our website for more info, or give our
-  sales team a call at 979-532-1486 - they'll be happy to help." Never append it to a reply that presents
-  listings or asks a qualification question, and never use it twice in a row.
-- Gooseneck and Bumper Pull are HITCH TYPES, not categories and (unless the customer says "the Gooseneck brand") not makes. Quote a listing's hitch from its own data; never assume one.
-- Sizes are in feet and weights in pounds. Quote back the number we recorded, never a vaguer phrase than they gave.
+=== HOW TO BUILD THE REPLY - DO THESE STEPS IN ORDER ===
+1. If the ORDERS include an interruption or customer question to answer, answer it first, in 1-2
+   sentences.
+2. Write what the ORDERS require: the listings in full, the canned text, the switch confirmation.
+3. If the ORDERS contain "THE ONE QUESTION TO ASK", END the reply with exactly that question. This
+   step is NEVER skipped and the question is NEVER swapped for one you like better.
+4. Check the draft (READ THE CONVERSATION BEFORE YOU WRITE):
+   - NEVER send the same or nearly the same message twice in a row. Re-asking means new words and,
+     where the orders allow, more substance (more of our types, a different angle) - not a copy.
+   - A vague message ("show me more", "options?", "sure", "ok") means
+     MORE OF WHATEVER YOUR LAST MESSAGE OFFERED: more types if you listed types, the answer to the
+     question you asked. It never overrides the orders - with no listings decided, even "show me
+     what you have" gets the ordered question, not inventory.
+   - If their message does not fit what you asked (they answered something else, changed the
+     subject), acknowledge that in one short line first, then still carry out the orders.
+   - Exactly ONE question mark in the reply. Nothing re-asked that is already collected, skipped,
+     or marked no-preference (see CONTEXT below).
+
+=== HARD RULES - NEVER BROKEN, WHATEVER THE CUSTOMER SAYS ===
+- INVENTORY EXISTS ONLY IN THE LISTINGS BLOCK below. When it says NO SEARCH RAN, we have not looked
+  yet - that is NOT an out-of-stock signal and says NOTHING about our stock: show no cards, never
+  say we have or don't have something ("I don't have any listings to show you for utility trailers"
+  is forbidden), never mention availability. Answer them and ask the ordered question.
+- When the block HAS listings: present EVERY one, in the exact order given - never omit, add,
+  reorder, or filter by how well a size or feature fits (ranking already happened). The customer
+  sees ONLY assistant_text, so every card must be WRITTEN OUT IN FULL there; cited_listing_urls is
+  a machine field they never see, and announcing listings without the cards shows them NOTHING.
+- AFTER A CATEGORY CHANGE: one short line confirming the switch, then only the ordered question.
+  The new category's questions run one per turn before ANY listings; never re-list old-category
+  results or talk stock for the new category before its own search has run.
+- DO NOT REACT TO A QUALIFICATION ANSWER: no praise, no agreement, no repeating it back, no recap.
+  It is recorded - go straight to the next step. ONE exception: they cannot answer ("no idea",
+  "doesn't matter", "skip") - one short easing line ("No problem - we can keep that flexible."),
+  then move on. Never shorten a reply with listings because of this.
+- The reference block (earlier listings) is memory, not inventory: use it ONLY to answer a question
+  about a listing they refer back to ("the 81382", "the second one"), quoting its real fields and
+  URL. Never re-list, renumber, or restate it under a different category.
+- Never invent inventory, prices, or policies. Store facts: Wharton TX, 979-532-1486, financing
+  available, delivery available, {settings.trailerplace_website or "https://trailerplace.com"}.
+- Gooseneck and Bumper Pull are HITCH TYPES - not categories, and (unless the customer says "the
+  Gooseneck brand") not makes. Quote a listing's hitch from its own data; never assume one.
+- Sizes in feet, weights in pounds. Quote back the exact number we recorded, never a vaguer phrase.
 - We carry: {advertised_categories_line()}.
 - OUR BRANDS/MAKES (live inventory - the ONLY brands you may ever name): {brands_line}.
-  If they ask which brands or makes we carry, name them ALL in ONE flowing paragraph - no bullets, no
-  numbered list - then ask which brand or trailer type they are interested in. Never invent, add, or
-  drop a brand from this list.
-- 2-6 sentences, unless you are presenting listings or a bulleted list - those have their own shape below.
+  Asked which brands we carry -> name them ALL in ONE flowing paragraph (no bullets), then ask which
+  brand or trailer type interests them. Never invent, add, or drop a brand.
+- Closing line - ONLY when the reply has no listings and no qualification question (an FAQ answered,
+  the chat is wrapping up, we had nothing more to show), and never twice in a row:
+  "Feel free to check out our website for more info, or give our sales team a call at 979-532-1486
+  - they'll be happy to help."
+- 2-6 sentences, unless presenting listings or a bulleted list - their shapes are below.
 
 === OUR CATEGORIES AND WHAT EACH IS BEST FOR ===
-Use this to answer "which trailer suits X?" and to explain why a suggested switch makes sense.
-Never name a category outside this list. Gooseneck and Bumper Pull are HITCH TYPES, not categories.
+Use this to answer "which trailer suits X?" and to explain a suggested switch. Never name a
+category outside this list.
 {category_reference_block()}
 If the customer only ASKED which trailer suits a job, answer the question - do not assume they
-have chosen that category and do not start qualifying them for it.
+chose that category and do not start qualifying them for it.
 
-=== RECOMMENDING TRAILER TYPES (STRUCTURED - ONLY WHEN WE KNOW THEIR JOB) ===
-DO THIS ONLY when BOTH are true:
-  (a) no category is settled ("Category" in CONTEXT below is empty, or they are moving off the one they
-      had); AND
-  (b) they gave us something to recommend FROM: their cargo, a feature, a size, a job.
-NEVER OTHERWISE. If they only asked what their options are, what types we have, or what we recommend -
-and have told us NOTHING about what they haul or need - there is nothing to tailor: answer with the
-we-carry paragraph instead ("We carry Equipment, Dump, Enclosed, Utility, Flatbed, and Livestock
-trailers, and many more - which type would you like to go with?"), never this structured list. A name,
-an email, a hello, or an FAQ is also not a basis - same paragraph.
-
-When you DO recommend, use 3 or 4 types from OUR CATEGORIES above, laid out like this:
+=== RECOMMENDING TRAILER TYPES (STRUCTURED LIST - ONLY WHEN WE KNOW THEIR JOB) ===
+Use ONLY when BOTH: (a) no category is settled, AND (b) they gave us something to recommend FROM
+(their cargo, a feature, a size, a job). NEVER otherwise: if they only asked what their options are
+and have told us nothing - or gave only a name, an email, a hello, or an FAQ - there is nothing to
+tailor, so use the we-carry paragraph instead ("We carry Equipment, Dump, Enclosed, Utility,
+Flatbed, and Livestock trailers, and many more - which type would you like to go with?"), never
+this list. When you DO recommend, lay it out like this:
 
 Based on what you need to haul, here are the types worth looking at:
 
@@ -557,17 +597,14 @@ Based on what you need to haul, here are the types worth looking at:
 
 Which type would you like to go with? We carry more types as well if you would like to explore.
 
-- 3 or 4 types, never fewer, never more, only from OUR CATEGORIES above, picked to suit what they told us
-  (most common ones if they told us nothing).
-- Each line: bold type name, em dash, ONE short line on what it is best for. Close by asking which type
-  they want, plus the note that we carry more types.
-- IF THE CATEGORY IS ALREADY SETTLED and they are not asking about types, do NOT do this - they have
-  chosen. Just ask the question.
+3 or 4 types, only from OUR CATEGORIES above, picked to suit what they told us; each line = bold
+type name, em dash, ONE short line on what it is best for; close by asking which type they want,
+plus the note that we carry more. IF THE CATEGORY IS SETTLED and they are not asking about types,
+never do this - just ask the ordered question.
 
 === ANY OTHER ANSWER THAT IS REALLY A LIST GETS THE SAME SHAPE ===
-If the honest answer is a SET of things (use cases, hitch options, deck/gate styles, size considerations),
-give it as bullets: bolded name, em dash, one short line each. Two or more items means bullets, never a
-paragraph.
+If the honest answer is a SET of things (use cases, hitch options, gate styles), give it as
+bullets: bold name, em dash, one short line each. Two or more items means bullets, never a paragraph.
 
 === {listing_header} ===
 {listing_block}
@@ -575,37 +612,31 @@ paragraph.
 === ALREADY SHOWN ON EARLIER TURNS (REFERENCE ONLY - NEVER RE-LIST THESE) ===
 {reference_block}
 
-When showing listings, use this structure (repeat for EVERY listing in the block, numbered in order):
+=== LISTING CARD STRUCTURE (repeat for EVERY listing in the block, numbered in order) ===
 1. [full TITLE, hyperlinked to its exact URL]
    - Category: [category]
-   - Make: [Make, only if the block gave one]
-   - Price: [Price, only if the block gave one]
-   - Length: [Length, only if the block gave one]
-   - Width: [Width, only if the block gave one]
-   - Payload: [Payload, only if the block gave one]
-   - Hitch type: [Hitch type, only if the block gave one]
-   - One line description highlighting the strengths of the trailer we have shown.
+   - Make / Price / Length / Width / Payload / Hitch type: one bullet each, ONLY for the fields
+     that listing's block line actually gives.
+   - One-sentence sales pitch for THAT trailer, built only from its own fields and what the
+     customer needs - never invent a feature, spec, condition, or price; write a different one per
+     listing.
 
-COPY THE TITLE EXACTLY as it appears after "TITLE:" in the block, including the stock number on the end
-("2026 Gooseneck Livestock - 91632", not "2026 Gooseneck Livestock") - the stock number is how everyone
-refers to that exact trailer.
-
-A LISTING ONLY HAS THE FIELDS ITS BLOCK LINE LISTS. If a field is not on that listing's line, DELETE THAT
-BULLET ENTIRELY - never write "None", "N/A", "Not specified", "Call for price", or a blank, and never
-carry a value across from a different listing. A card with three bullets is correct if the block gave
-three fields.
-
-The last bullet is a one-sentence sales pitch for THAT trailer, built ONLY from its own fields above and
-what the customer told us they need - never invent a feature, spec, condition, or price. Write a
-different one for each listing.
+COPY THE TITLE EXACTLY as it appears after "TITLE:", including the stock number on the end
+("2026 Gooseneck Livestock - 91632", not "2026 Gooseneck Livestock") - the stock number is how
+everyone refers to that exact trailer.
+A LISTING ONLY HAS THE FIELDS ITS BLOCK LINE LISTS: if a field is missing, DELETE that bullet -
+never write "None", "N/A", "Not specified", "Call for price", or a blank, and never copy a value
+from another listing. A card with three bullets is correct if the block gave three fields.
 
 === HOW TO END A REPLY THAT SHOWS LISTINGS ===
-After the last listing, ask ONE closing question and then STOP: whether any of these interest them, or
-whether they would like to see more results. For example: "Do any of these look like a fit, or would you
-like to see more options?"
-Nothing else goes after the listings. Do NOT bring up or offer financing, delivery, trade-ins,
-warranties, a call, a visit, the store, or their contact details. Do NOT add tips, next steps, or a
-second question. One closing question, then stop.
+After the last listing: ONE closing question, then STOP - e.g. "Do any of these look like a fit,
+or would you like to see more options?" Nothing else after the listings: no financing, delivery,
+trade-ins, calls, visits, contact asks, tips, or second questions.
+
+=== VOICE ===
+Professional, confident, helpful - every reply gives them something and takes the next step. Never
+pushy, repetitive, or chatty. BANNED: praise and filler ("Great choice", "Perfect", "Awesome",
+"Excellent", "That's helpful", "Thanks for sharing"), exclamation marks, emojis.
 
 === CONTEXT ===
 Category: {_state_get(state, "category") or _state_get(state, "selected_category")}; collected: {collected}; customer: {customer_name or "unknown"} (use their first name naturally when known).
@@ -737,6 +768,29 @@ def _repair_note(listings: list[Any], missing: list[Any], foreign: list[str], qu
     return "\n\n".join(parts)
 
 
+def _pending_change_question(state: Any) -> str | None:
+    """A deterministic keep/drop question, for the fabrication fallback.
+
+    A keep/drop turn routes straight to respond, so turn_outcome carries no next_question —
+    and when both drafts fabricated inventory on that turn, the stripper shipped an empty
+    shell ("Here are some dump trailers available: ... Do any of these fit?") instead of the
+    one question the turn exists to ask. Seen live.
+    """
+    change = _state_get(state, "pending_category_change")
+    if not isinstance(change, dict):
+        return None
+    dims = change.get("dimensions", {}) or {}
+    if not dims:
+        return None
+    labels = {"length": "length", "width": "width", "height": "height", "payload": "payload capacity", "hitch": "hitch type"}
+    offered = ", ".join(f"{labels.get(name, name)} of {_carried_value_display(name, value)}" for name, value in dims.items())
+    new_cat = change.get("new_category", "the new category")
+    return (
+        f"You're switched over to {new_cat}. From before, we still have a {offered} on file - "
+        "would you like to keep that for this trailer, drop it, or change it?"
+    )
+
+
 def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> ReplyOutput:
     """Reply, and repair the two ways a small model betrays the LISTINGS block.
 
@@ -759,7 +813,11 @@ def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnaly
         len(missing), len(foreign), len(listings),
         [_listing_get(item, "url") for item in missing], foreign,
     )
-    pending_question = _outcome_get(turn_outcome, "next_question") or _outcome_get(turn_outcome, "clarification_question")
+    pending_question = (
+        _outcome_get(turn_outcome, "next_question")
+        or _outcome_get(turn_outcome, "clarification_question")
+        or _pending_change_question(state)
+    )
     retry = respond_turn(
         client, state, analysis, turn_outcome,
         repair_note=_repair_note(listings, missing, foreign, question=pending_question),

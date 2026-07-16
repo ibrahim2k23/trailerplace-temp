@@ -311,3 +311,39 @@ def test_asking_which_trailer_suits_a_tractor_does_not_move_the_category():
         ),
     )
     assert state["category"] == "Livestock"
+
+
+def test_the_category_change_turn_never_searches():
+    # Even a "show me X trailers instead" whose intent screams results: the turn the
+    # category moves confirms the switch and asks; inventory waits for the new category's
+    # questions.
+    state = qualified_state()
+    say(state, "show me dump trailers instead")
+    assert not turn(
+        state,
+        sample_analysis(intent="show_more_results", category_mentioned="Dump", slot_answers=[], extracted=_empty_extracted()),
+    )
+    assert state["category"] == "Dump"
+
+
+def test_category_change_with_no_carried_values_still_waits_for_its_questions():
+    # No keep/drop question pends (nothing carried), so only the category_just_changed
+    # guard stands between the change turn and a zero-qualification search.
+    state = qualified_state()
+    state["slots"] = {}
+    state["slot_sources"] = {}
+    say(state, "actually just show me utility trailers")
+    state["turn"] = sample_analysis(
+        intent="skip_all_show_results", category_mentioned="Utility", slot_answers=[], extracted=_empty_extracted()
+    )
+    apply_analysis_to_state(state)
+    assert state["category"] == "Utility"
+    assert state["pending_category_change"] is None
+    # Belt and braces: even if some later step wrongly completed qualification this turn,
+    # the gate refuses to search on the change turn itself.
+    state["qualification_complete"] = True
+    assert not should_search(state)
+    # And the honest path: qualification re-opens the new category's questions.
+    qualification_node(state)
+    assert state["qualification_complete"] is False
+    assert state["turn_outcome"]["next_question"]
