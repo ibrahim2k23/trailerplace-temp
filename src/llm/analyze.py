@@ -18,7 +18,10 @@ from src.domain.units import parse_length_ft, parse_weight_lbs
 from src.llm.client import LLMClient
 from src.llm.schemas import TurnAnalysis
 
-MAX_CONTEXT_TURNS = 10
+# Last 4 back-and-forth turns (4 user + 4 assistant messages) go to both LLM calls.
+# Everything older is out of the window — durable facts (slots, category, contact, shown
+# listings) live in state and reach the prompts through their own blocks, not the history.
+MAX_CONTEXT_TURNS = 4
 _WIDTH_SLOT = "item_or_trailer_width_ft"
 
 
