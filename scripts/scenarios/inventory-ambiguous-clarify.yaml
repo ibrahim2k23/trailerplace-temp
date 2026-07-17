@@ -2,7 +2,9 @@ name: inventory-ambiguous-clarify
 tags: [regression, m6]
 # spec M6 step 6: multiple close model candidates with no clear winner ->
 # ask which model they mean, and never state a price before that's resolved.
+# Identifier updated when the data source moved to listings.xlsx (2026-07-17): the FHG 24k
+# matches two real trailers there (stock 12914 and 14447), a genuine ambiguity.
 turns:
-  - user: "How much is the Diamond C 7210 BT?"
+  - user: "How much is the Iron Bull fhg24k?"
     expect_reply_contains_any: ["which", "mean"]
     expect_reply_not_contains: ["$"]

@@ -4,6 +4,9 @@ tags: [regression, m5]
 # interruption, answer it, re-ask the pending question once; if still
 # unanswered, mark it skipped and move on.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I want a dump trailer"
     expect_state:
       category: "Dump"

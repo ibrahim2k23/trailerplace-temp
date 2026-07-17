@@ -6,7 +6,9 @@ tags: [regression, m7]
 turns:
   - user: "How much is the 2026 Iron Bull FHG 24k?"
     expect_listings: true
-    expect_emails_sent: none
+    expect_emails_sent: null
   - user: "I'm interested in the first one. I'm Jane, jane@example.com."
     expect_reply_contains_any: ["logged", "follow up", "team"]
-    expect_emails_sent: ["Listing Interest"]
+    # The stashed Results-Shown alert releases with the contact details, alongside the
+    # Listing Interest email (locked decision: alerts stash silently until contact arrives).
+    expect_emails_sent: ["Results Shown to User", "Listing Interest"]

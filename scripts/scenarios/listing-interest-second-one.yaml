@@ -3,7 +3,10 @@ tags: [regression, m7]
 # spec §After Pinecone Results 2: interest in a shown listing invokes Log Interest
 # with that listing; with contact present the Listing Interest email fires.
 turns:
-  - user: "I'm Jane, jane@example.com. Show me utility trailers, no preference on anything."
+  # Contact first; then the skip-all results request in its own message so the intent is
+  # unambiguous (the M7 point under test is the Listing Interest email, not intent labeling).
+  - user: "I'm Jane, jane@example.com."
+  - user: "Show me utility trailers, no preference on anything, just show me what you have."
     expect_listings: true
   - user: "I'm interested in the second one."
     expect_reply_contains_any: ["logged", "follow up", "team"]

@@ -3,6 +3,9 @@ tags: [regression, m6]
 # spec M6 step 2: a zero-result brand-filtered search re-runs once without the
 # make filter and the reply says no matches for that brand were found.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I want an Obscure Nonexistent Brand dump trailer, 7x14, hauling dirt, about 3 tons, bumper pull."
     expect_state:
       category: "Dump"

@@ -4,9 +4,9 @@ tags: [regression, m7]
 # the bot never re-asks, and the conversation continues politely.
 turns:
   - user: "Can someone call me with a quote?"
-    expect_emails_sent: none
+    expect_emails_sent: null
   - user: "No, I'd rather not share my contact info."
-    expect_emails_sent: none
+    expect_emails_sent: null
   - user: "What types of trailers do you carry?"
     expect_reply_contains_any: ["trailer"]
-    expect_emails_sent: none
+    expect_emails_sent: null

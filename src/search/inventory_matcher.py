@@ -30,7 +30,11 @@ logger = logging.getLogger(__name__)
 
 # Same depth as src/domain/brands.py (src/search/inventory_matcher.py -> search -> src -> root).
 _ROOT = Path(__file__).resolve().parents[2]
-_LISTINGS_FILE = _ROOT / "listings_final_v5.xlsx"
+# The SAME workbook (and env override) the Pinecone ingest and the prompts read — direct
+# lookups must quote the same inventory the search returns and the prompts advertise.
+# prepare_inventory backfills any column this workbook lacks, so the schema difference
+# from the old listings_final_v5.xlsx source is harmless.
+_LISTINGS_FILE = Path(os.getenv("LISTINGS_DATA_FILE", str(_ROOT / "listings.xlsx")))
 
 _MAKE_ONLY = "MAKE_SEARCH"
 _YEAR_MAKE = "YEAR_MAKE_SEARCH"

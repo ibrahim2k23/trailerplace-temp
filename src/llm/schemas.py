@@ -13,6 +13,14 @@ class ContactInfo(StrictBaseModel):
     name: str | None = Field(description="Customer name if provided, otherwise null.")
     email: str | None = Field(description="Customer email if provided, otherwise null.")
     phone: str | None = Field(description="Customer phone if provided, otherwise null.")
+    declined: bool = Field(
+        default=False,
+        description=(
+            "True when THIS message refuses to share contact details ('I'd rather not', 'no "
+            "contact info') - even when the message also does something bigger and the intent "
+            "is not contact_declined. False otherwise."
+        ),
+    )
 
 
 class SlotAnswer(StrictBaseModel):

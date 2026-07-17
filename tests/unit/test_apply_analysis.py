@@ -1213,6 +1213,135 @@ def test_frontend_shown_urls_do_not_flood_the_new_category_bucket():
 # --- Defaults never ride the keep/drop question ------------------------------------
 
 
+def test_category_word_model_text_is_not_a_lookup():
+    # "I want a Diamond C dump trailer" came back as a HIGH-confidence lookup with
+    # model_text="dump trailer" - hijacking the turn away from qualification and
+    # suppressing the brand preference as "just the lookup's make".
+    from src.graph.apply_analysis import lookup_requested
+
+    analysis = sample_analysis(
+        intent="category_selection",
+        category_mentioned="Dump",
+        inventory_lookup={"is_lookup": True, "year": None, "make": "Diamond C",
+                          "model_text": "dump trailer", "stock_number": None,
+                          "wants": "general", "confidence": "high"},
+        extracted={**_empty_extracted(), "brand_preference": "Diamond C"},
+        slot_answers=[],
+    )
+    assert not lookup_requested(analysis)
+    # And the brand preference survives extraction.
+    state = new_session_state("s1")
+    say(state, "I want a Diamond C dump trailer, 7x14, hauling dirt, about 3 tons, bumper pull.")
+    apply_with(state, analysis)
+    assert state["category"] == "Dump"
+    assert state["brand_preference"] == "Diamond C"
+
+
+def test_real_model_codes_still_count_as_lookups():
+    from src.graph.apply_analysis import lookup_requested
+
+    for model in ("fhg24k", "LPX 14", "fmax 212"):
+        analysis = sample_analysis(
+            inventory_lookup={"is_lookup": True, "year": None, "make": "Iron Bull",
+                              "model_text": model, "stock_number": None,
+                              "wants": "general", "confidence": "high"},
+        )
+        assert lookup_requested(analysis), model
+
+
+def test_keep_drop_answer_turn_ignores_analyzer_dropped_fields():
+    # Seen live: "nope, no specific needs" (keep_answer=none) ALSO listed
+    # trailer_length_ft in dropped_fields - the 50 ft the customer had stated for the NEW
+    # category, never offered in the keep/drop question. Only the keep/drop machinery may
+    # drop on these turns.
+    state = new_session_state("s1")
+    state["category"] = "Dump"
+    state["slots"] = {"haul_weight_lbs": 9062.0}
+    state["slot_sources"] = {"haul_weight_lbs": "user"}
+    say(state, "I am also looking for a 50ft trailer for my livestock")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_change",
+            category_mentioned="Livestock",
+            extracted={**_empty_extracted(), "trailer_length_ft": 50.0},
+            slot_answers=[{"slot_name": "trailer_length_ft", "raw_answer": "50 ft"}],
+        ),
+    )
+    assert state["category"] == "Livestock"
+    assert state["slots"]["trailer_length_ft"] == 50.0
+    say(state, "nope, no specific needs for any other feature")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="drop_requirements",
+            category_mentioned=None,
+            keep_fields_answer="none",
+            dropped_fields=["trailer_length_ft", "payload_lbs", "hitch_type"],
+            extracted=_empty_extracted(),
+            slot_answers=[],
+        ),
+    )
+    assert state["slots"]["trailer_length_ft"] == 50.0  # their own requirement survives
+    assert "payload_lbs" not in state["slots"]  # the offered carried value is dropped
+
+
+def test_stated_need_with_ambiguous_term_still_asks_clarification():
+    # "I need an office trailer." mislabeled info_only must still trigger the
+    # office-trailer clarification - a stated need is a want, whatever the label says.
+    state = new_session_state("s1")
+    say(state, "I need an office trailer.")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="category_exploration",
+            category_mentioned="Enclosed",
+            is_category_info_only=True,
+            extracted=_empty_extracted(),
+            slot_answers=[],
+        ),
+    )
+    assert state["clarification_key"] == "office_trailer_use"
+    assert state["category"] is None
+
+
+def test_decline_mixed_into_a_bigger_message_still_registers():
+    # "I'd rather not share that, but I need it for cargo hauling, 6x10" keeps the bigger
+    # intent, and the refusal used to vanish with it - so we asked for their email again.
+    state = new_session_state("s1")
+    state["category"] = "Enclosed"
+    say(state, "I'd rather not share that, but I need it for cargo hauling, roughly 6x10 feet")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="qualification_answer",
+            category_mentioned=None,
+            contact={"name": None, "email": None, "phone": None, "declined": True},
+            extracted={**_empty_extracted(), "trailer_length_ft": 10.0, "trailer_width_ft": 6.0},
+            slot_answers=[{"slot_name": "trailer_size", "raw_answer": "6x10"}],
+        ),
+    )
+    assert state["contact_declined"] is True
+    assert state["slots"]["trailer_length_ft"] == 10.0  # the bigger message still lands
+
+
+def test_decline_that_still_hands_over_a_name_records_the_name():
+    state = new_session_state("s1")
+    say(state, "I'm Maria, but I won't share my email")
+    apply_with(
+        state,
+        sample_analysis(
+            intent="contact_info_provided",
+            category_mentioned=None,
+            contact={"name": "Maria", "email": None, "phone": None, "declined": True},
+            extracted=_empty_extracted(),
+            slot_answers=[],
+        ),
+    )
+    assert state["contact_declined"] is True
+    assert state["customer_name"] == "Maria"
+
+
 def test_default_width_is_not_offered_in_keep_drop_on_category_change():
     # Flatbed seeds trailer_width_ft=8.0 as a DEFAULT. The customer never said 8 ft, so a
     # switch to Dump must not ask "does the 8 ft width still apply?" — only values the

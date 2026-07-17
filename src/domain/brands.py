@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -12,7 +13,11 @@ from src.domain.normalizer import normalize_category, normalize_make
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-_LISTINGS_FILE = _ROOT / "listings_final_v5.xlsx"
+# The SAME workbook (and env override) the Pinecone ingest reads (src/search/ingest.py):
+# the brands/categories the prompts advertise must be the inventory the search can actually
+# return. This used to read listings_final_v5.xlsx while ingest read listings.xlsx, so the
+# prompts promised makes the index had never seen.
+_LISTINGS_FILE = Path(os.getenv("LISTINGS_DATA_FILE", str(_ROOT / "listings.xlsx")))
 
 _CATEGORY_ALIASES = {
     "Atv Trailer": "Utility",

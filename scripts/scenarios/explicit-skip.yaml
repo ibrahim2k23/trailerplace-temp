@@ -3,6 +3,9 @@ tags: [regression, m5]
 # spec §Step 8 explicit skip: "skip"/"next"/"I don't know" marks the current
 # question skipped and moves on, without needing a repeated non-answer.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so qualification is actually
+  # pending when the skip arrives (scenario predates the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I want a tilt trailer."
     expect_state:
       category: "Tilt"

@@ -2,6 +2,8 @@ name: inventory-model-typo
 tags: [regression, m6]
 # spec M6 step 6: rapidfuzz partial/typo matching on model_text should find the
 # closest real model even when the user drops punctuation/case.
+# Identifier updated when the data source moved to listings.xlsx (2026-07-17): the old
+# "7210 bt" existed only in listings_final_v5.xlsx.
 turns:
-  - user: "Do you have the 7210 bt?"
+  - user: "Do you have the baseline htl207?"
     expect_listings: true

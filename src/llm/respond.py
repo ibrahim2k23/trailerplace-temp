@@ -389,6 +389,15 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "A listing missing an optional field (width, payload, hitch) is normal: show the fields it has and skip the "
             "missing lines - never omit the listing itself. Count them before you finish."
         )
+    if _outcome_get(turn_outcome, "brand_relaxed"):
+        wanted_brand = _state_get(state, "brand_preference") or "the brand they asked for"
+        lines.append(
+            f"- BRAND HAD NO MATCHES: nothing in stock matched their requirements from {wanted_brand}, so we "
+            f"searched again without the brand filter - the listings below are the closest we have from OTHER "
+            f"makes. Open with ONE short line saying we do not currently show a {wanted_brand} matching their "
+            "requirements and these are the closest alternatives, then present EVERY listing as normal. Never "
+            f"imply any of them is a {wanted_brand}."
+        )
     if _outcome_get(turn_outcome, "filters_relaxed"):
         dropped = ", ".join(_outcome_get(turn_outcome, "relaxed_filters_dropped", []) or [])
         on = f" on {dropped}" if dropped else ""
@@ -404,6 +413,13 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         lines.append("  exact -> present the match(es) warmly, then ask whether they're interested in any models shown.")
         lines.append("  no_exact -> say we do not currently show the requested exact trailer, then present closest alternatives; never invent specs.")
         lines.append("  ambiguous -> ask which model they mean, naming the candidates; do not state prices yet.")
+        candidates = _outcome_get(turn_outcome, "ambiguous_candidates", None) or []
+        if candidates:
+            named = " / ".join(str(title) for title in candidates if title)
+            lines.append(
+                f"  The candidates to name are: {named}. Ask which one they mean in ONE short question - "
+                "present NO listing cards, NO URLs, and NO prices until they pick one."
+            )
     if _outcome_get(turn_outcome, "contact_invite_suppressed"):
         lines.append("- Contact invite suppressed this turn (inventory lookup fired) - do NOT ask for name/email/phone in this reply.")
     canned_keys = _outcome_get(turn_outcome, "canned_keys", []) or []
@@ -539,6 +555,8 @@ Wharton, TX (979-532-1486, {settings.trailerplace_website or "https://trailerpla
      subject), acknowledge that in one short line first, then still carry out the orders.
    - Exactly ONE question mark in the reply. Nothing re-asked that is already collected, skipped,
      or marked no-preference (see CONTEXT below).
+   - NO exclamation marks, NO praise or filler ("Great choice", "Perfect", "Thanks for sharing") -
+     see VOICE at the bottom.
 
 === HARD RULES - NEVER BROKEN, WHATEVER THE CUSTOMER SAYS ===
 - INVENTORY EXISTS ONLY IN THE LISTINGS BLOCK below. When it says NO SEARCH RAN, we have not looked

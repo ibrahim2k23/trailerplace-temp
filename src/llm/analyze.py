@@ -202,6 +202,9 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
 - skip_current: "skip", "next", "I don't know", "I'd rather not answer".
 - skip_all_show_results: a category IS selected and mid-qualification the user wants to stop answering
   and see inventory now: "just show me what you have", "no more questions", "give me recommendations" or something similar.
+  ALSO when one message both NAMES the category and waves the questions off ("show me utility trailers,
+  no preference on anything, just show me options") - use skip_all_show_results with category_mentioned
+  set to that category; the code selects it and skips its questions in one turn.
   NEVER this intent when the message names a DIFFERENT trailer category than the selected one - that is
   category_change ("forget it, just show me dump trailers" with Utility selected = category_change to Dump).
 - show_more_results: results are ALREADY on screen and the user asks for more of the SAME
@@ -233,6 +236,9 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   If the make is ambiguous (two Iron Bulls on screen) and nothing else narrows it, still set
   intent=listing_interest but leave listing_reference null rather than guessing.
 - email_triggers: list EVERY email-worthy request made in THIS message: faq, escalation, team_request, listing_interest. One message may contain SEVERAL.
+  kind is DETERMINISTIC: a call/meeting/quote/follow-up request ("can someone call me with a quote?")
+  is ALWAYS kind=team_request. Reserve kind=escalation for a complaint, an urgent problem, or an
+  explicit demand for a manager/human NOW - never for an ordinary quote or call-back request.
   Only what they ask for NOW. A request from an earlier turn is already recorded — re-emitting it (because they
   are still talking about that trailer, or have just given us their email so we can act on it) sends the team
   the same lead twice. Handing over contact details is not itself a new request: email_triggers stays empty.
@@ -250,6 +256,10 @@ We ask ONCE for name and an email or phone (once more only if they gave half). R
   null, slot_answers empty, no features, no brand - and it is NEVER a recommendation_request.
 - They refuse ("no thanks", "I'd rather not", "just show me trailers first") -> intent=contact_declined.
   Only when they really are refusing; we drop the subject permanently.
+- A refusal MIXED INTO a bigger message ("I'd rather not share that, but I need it for cargo, 6x10",
+  "I don't want to give my info, just tell me about dump trailers") keeps the bigger intent - and you
+  set contact.declined=true so the refusal is not lost. Also set it when they refuse BEFORE we asked.
+  contact.declined=false on every other turn; simply not answering the contact ask is NOT a refusal.
 - They ignore it and say something else -> classify the message on its own merits, every `contact` field
   null. Do NOT invent a name from the conversation.
 - A contact ask is never a qualification answer: if a qualification question is pending and the message
@@ -319,6 +329,9 @@ it contains, and set keep_fields_answer on EVERY such turn:
   unrelated question of their own). A refusal that also mentions other requirements is still
   "none"/"some", never null.
 - dropped_fields: the ones they explicitly drop (optional; "some" already implies the rest are dropped).
+  dropped_fields may ONLY name values from the pending keep/drop offer - NEVER a value the customer
+  stated for the NEW category themselves ("a 50ft trailer for my livestock" makes 50 ft THEIR
+  requirement; a later "nope, no other needs" declines the OFFERED values, not the 50 ft).
 - keep_fields_answer IS the drop instruction on these turns. Never ALSO use intent=drop_requirements
   for the same refusal - that intent wipes every requirement, not just the offered carried-over values.
 - Mixed replies are allowed: "keep the length, drop the width, and make the payload 7000" ->
@@ -476,6 +489,10 @@ STILL fill inventory_lookup completely - leaving it empty silently drops the cus
 - confidence: high explicit, medium probable, low doubtful. Low never triggers the lookup.
 - NOT lookups: make alone (that is brand_preference), category shopping, feature requests,
   requirement/filter updates, or references to listings already shown (that is listing_interest).
+- model_text must be a REAL model code or name ("LPX", "fmax 212", "FHG24K"). A trailer CATEGORY
+  word is NEVER a model: "I want a Diamond C dump trailer" is brand_preference="Diamond C" +
+  category_mentioned="Dump" with inventory_lookup EMPTY (is_lookup=false) - it names what kind of
+  trailer they are shopping for, not one specific unit.
 Coexistence rules:
 - A lookup NEVER changes the selected category, brand_preference, or any collected slot. Do not set category_mentioned or extracted fields from lookup identifiers themselves.
 - Mid-qualification, a lookup is an interruption: set answered_current_question=false.

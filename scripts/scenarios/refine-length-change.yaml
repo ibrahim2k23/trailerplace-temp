@@ -3,6 +3,9 @@ tags: [regression, m6]
 # spec §After Results: a requirement change re-runs search the same turn while
 # keeping every other previously collected slot.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I need a 7x20 dump trailer for hauling dirt, about 3 tons, bumper pull."
     expect_state:
       category: "Dump"

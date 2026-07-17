@@ -3,7 +3,13 @@ tags: [regression, m6]
 # spec: an ordinal reference to a shown listing ("the second one") resolves
 # from state.shown_listings without triggering a new search.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "Show me utility trailers, no preference on anything, just show me options."
     expect_listings: true
   - user: "Tell me more about the second one."
-    expect_reply_contains_any: ["second"]
+    # The reply talks about THAT listing - it may quote the card (title + stock number)
+    # without literally saying "second".
+    expect_reply_contains_any: ["second", "stock", "Price"]
+    expect_listings: false

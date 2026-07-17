@@ -197,7 +197,11 @@ def _dedupe(resolved: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple] = set()
     unique: list[dict[str, Any]] = []
     for event in resolved:
-        key = (event["kind"], event.get("canned_key"), event.get("item_of_interest"), event.get("description"))
+        # description is deliberately NOT in the key: the extractor re-words the same
+        # request each time it re-emits it ("call me with a quote" stashed as one
+        # description, re-emitted with another on the turn the contact details arrive),
+        # and keyed on wording the team still got the email twice.
+        key = (event["kind"], event.get("canned_key"), event.get("item_of_interest"))
         if key in seen:
             logger.info("TOOL email: dropping duplicate %s trigger in this batch", event["kind"])
             continue

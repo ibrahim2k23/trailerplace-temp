@@ -43,6 +43,26 @@ ALUMINUM_CATEGORY = "Aluminum"
 BASE_CATEGORY_SLOT = "base_category"
 
 
+def _model_text_is_category_word(model_text: str | None) -> bool:
+    """True when the "model" is really a trailer CATEGORY ("dump trailer", "utility").
+
+    Seen live: "I want a Diamond C dump trailer, 7x14, ..." came back as a HIGH-confidence
+    lookup with model_text="dump trailer". The lookup hijacked the turn (one arbitrary
+    "exact" match instead of a qualified search) and suppressed the Diamond C brand
+    preference as "just the lookup's make". A category word names what they are shopping
+    for, never a specific unit.
+    """
+    text = str(model_text or "").strip().lower()
+    if not text:
+        return False
+    stripped = re.sub(r"\b(trailers?)\b", " ", text).strip()
+    if not stripped:
+        return True  # "trailer" alone is not a model either
+    return any(tier == "naming" for _cat, tier in resolve_category_matches(stripped) if _cat) and not re.search(
+        r"[a-z]*\d", stripped
+    )  # a digit-bearing token ("lpx14", "fhg 24k") is a real model code, category word or not
+
+
 def lookup_requested(turn: Any) -> bool:
     """A direct-identifier inventory lookup rides along with ANY intent, not just intent=inventory_lookup.
 
@@ -53,8 +73,11 @@ def lookup_requested(turn: Any) -> bool:
     lookup = getattr(turn, "inventory_lookup", None) if turn else None
     if not (lookup and lookup.is_lookup and lookup.confidence in {"medium", "high"}):
         return False
-    # Make alone is a brand preference, never a lookup — require a real identifier.
-    return bool(lookup.stock_number or lookup.model_text or (lookup.year and lookup.make))
+    if lookup.stock_number or (lookup.year and lookup.make):
+        return True
+    # Make alone is a brand preference, never a lookup — require a real identifier, and a
+    # category word posing as the model is category shopping, not an identifier.
+    return bool(lookup.model_text) and not _model_text_is_category_word(lookup.model_text)
 
 
 def _brand_is_lookup_make(analysis: TurnAnalysis, brand: str) -> bool:
@@ -113,13 +136,21 @@ def _mark_skipped(state: dict[str, Any], slot: str | None) -> None:
 
 def _apply_contact(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     contact = analysis.contact
-    if analysis.intent == "contact_declined":
+    # contact.declined catches the mixed message the intent field loses: "I'd rather not
+    # share that, but I need it for cargo hauling, 6x10" carries a bigger intent, and read
+    # only off the intent the refusal vanished - so we asked for their email again, the one
+    # thing the spec says never happens after a decline.
+    declined = analysis.intent == "contact_declined" or getattr(contact, "declined", False)
+    if declined:
         state["contact_declined"] = True
+    gave_contact = bool(contact.name or contact.email or contact.phone)
+    if declined and not gave_contact:
         state["contact_followup_pending"] = None
         state["contact_repeat_charged"] = False
         update_contact_gate(state, gave_contact_this_turn=False)
         return
-    gave_contact = bool(contact.name or contact.email or contact.phone)
+    # A decline can still hand over a piece ("I'm Maria, but no email") - record what they
+    # gave; the declined flag above stops any further asking.
     if contact.name:
         state["customer_name"] = contact.name
     if contact.email:
@@ -604,13 +635,27 @@ def _apply_clarification(state: dict[str, Any], analysis: TurnAnalysis) -> bool:
             return True
         state["clarification_key"] = None
         return False
-    if not state.get("category") and not analysis.is_category_info_only:
+    if not state.get("category") and (not analysis.is_category_info_only or _states_a_need(text)):
+        # The info_only override: the analyzer labeled "I need an office trailer." an
+        # informational ask (seen live), which silently skipped the office-trailer
+        # clarification the spec requires. A message that opens by stating a need is a
+        # WANT whatever the label says.
         resolution = resolve_category_from_text(text)
         if resolution.needs_clarification:
             state["clarification_key"] = resolution.clarification_key
             state["turn_outcome"]["clarification_question"] = resolution.clarification_question
             return True
     return False
+
+
+_NEED_PHRASE_RE = re.compile(
+    r"\b(i\s+(?:need|want|would\s+like)|i'?m\s+(?:looking|after|in\s+the\s+market)|looking\s+for)\b",
+    re.IGNORECASE,
+)
+
+
+def _states_a_need(text: str) -> bool:
+    return "?" not in (text or "") and bool(_NEED_PHRASE_RE.search(text or ""))
 
 
 def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
@@ -1197,17 +1242,20 @@ def _apply_skips_and_repeats(state: dict[str, Any], analysis: TurnAnalysis) -> N
 
 
 def _apply_requirement_changes(state: dict[str, Any], analysis: TurnAnalysis) -> None:
+    if analysis.keep_fields_answer:
+        # This message answered the keep/drop question, and that machinery already dropped
+        # exactly the carried values the customer waved off. The analyzer routinely piles
+        # MORE into this turn — seen live twice: intent=drop_requirements with no
+        # dropped_fields (the blanket wipe below then destroyed every slot), and
+        # dropped_fields listing trailer_length_ft when the 50 ft was the customer's OWN
+        # requirement for the new category, stated in the change message and never offered
+        # in the keep/drop question. On these turns the keep/drop answer is the ONLY
+        # authority on what gets dropped.
+        return
     for field in analysis.dropped_fields:
         state.get("slots", {}).pop(field, None)
         state.get("slot_sources", {}).pop(field, None)
     if analysis.intent == "drop_requirements" and not analysis.dropped_fields:
-        if analysis.keep_fields_answer:
-            # This message answered the keep/drop question, and that machinery already
-            # dropped exactly the values the customer waved off. Seen live: "nope, no
-            # specific needs" came back keep_fields_answer="none" AND intent=
-            # drop_requirements with no dropped_fields — and this blanket wipe then
-            # destroyed every remaining slot, including the 50 ft they had just stated.
-            return
         state["slots"] = {}
         state["slot_sources"] = {}
 

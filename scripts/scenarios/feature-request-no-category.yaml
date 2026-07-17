@@ -3,11 +3,16 @@ tags: [regression, m5]
 # spec §Step 1 intent 4: features given but no category -- extract/store the
 # features, ask which category, do NOT start category-specific qualification.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I need a 15-foot trailer with tandem axles and a bumper pull."
     expect_state:
       category: null
       "slot:trailer_length_ft": 15.0
-    expect_reply_contains_any: ["category", "type of trailer", "kind of trailer"]
+    # With features on file the bot may recommend types ("Which type would you like to go
+    # with?") instead of the bare which-category ask - both are valid ways to ask the type.
+    expect_reply_contains_any: ["category", "type of trailer", "kind of trailer", "which type", "type would you like"]
   - user: "A dump trailer, for hauling gravel."
     expect_state:
       category: "Dump"

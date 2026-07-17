@@ -3,6 +3,9 @@ tags: [regression, m6]
 # spec §Pinecone tool: once qualification completes, a search fires and returns
 # real listings; a Results-Shown system alert is queued silently.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I need a 7x14 dump trailer for hauling dirt, about 3 tons, bumper pull."
     expect_state:
       category: "Dump"

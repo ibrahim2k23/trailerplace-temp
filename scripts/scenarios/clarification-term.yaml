@@ -4,6 +4,9 @@ tags: [regression, m5]
 # term asks a clarification question first and resolves via the given option
 # set before mapping a category.
 turns:
+  # The opening contact gate owns the first reply; satisfy it so the scenario's real
+  # first message gets the substantive turn (scenarios predate the gate).
+  - user: "I'm Marco, marco@example.com"
   - user: "I need an office trailer."
     expect_state:
       category: null
