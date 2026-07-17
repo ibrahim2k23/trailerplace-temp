@@ -666,12 +666,21 @@ def _apply_category(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     # (a) Answer to a pending "should we switch you to X?" suggestion.
     suggestion = state.get("pending_category_suggestion")
     if suggestion:
-        if analysis.category_confirm_answer == "yes":
+        # The analyzer often labels an acceptance that NAMES the category ("yes, switch to
+        # equipment") as a plain category_change with no confirm answer. Falling through to
+        # the ordinary change path wipes the cargo that motivated the suggestion — so while
+        # the yes/no is pending, a non-informational mention of the suggested category IS
+        # the yes, and a mention of the category they are already on IS the no.
+        mentioned = None if analysis.is_category_info_only else analysis.category_mentioned
+        if analysis.category_confirm_answer == "yes" or (
+            analysis.category_confirm_answer is None
+            and mentioned == suggestion.get("suggested_category")
+        ):
             _accept_category_suggestion(state, suggestion)
             return
         # "no", or they moved on without answering -> stay put and never re-ask.
         state["pending_category_suggestion"] = None
-        if analysis.category_confirm_answer == "no":
+        if analysis.category_confirm_answer == "no" or mentioned == suggestion.get("from_category"):
             # Remember the refusal: the same cargo must never raise this switch again,
             # as a suggestion or as an outright change.
             _record_declined_suggestion(state, suggestion)

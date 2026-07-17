@@ -311,9 +311,10 @@ Set category_confirm_answer to null on every other turn.
 === CATEGORY-CHANGE KEEP/DROP ANSWER ===
 Applies ONLY when "Pending category change awaiting keep/drop answer" above is not "none".
 That pending block means OUR LAST MESSAGE asked exactly one question: the category just changed, and
-we asked whether the carried-over value(s) listed in it (length/width/payload/hitch - everything else
-was already dropped) still apply. Read their reply as the answer to THAT question FIRST, whatever else
-it contains, and set keep_fields_answer on EVERY such turn:
+we offered THREE choices about the carried-over value(s) listed in it (length/width/payload/hitch -
+everything else was already dropped): KEEP them, DROP them, or CHANGE them to new values. Read their
+reply as the answer to THAT question FIRST, whatever else it contains, and set keep_fields_answer on
+EVERY such turn:
 - "all": ONLY an AFFIRMATIVE acceptance of the offered values ("yes", "sure", "keep them", "that's
   fine", "those still apply"). A message that OPENS with a refusal word can NEVER be "all".
 - "none": they decline or wave the values off ("no", "nope", "no thanks", "start fresh", "drop them",
@@ -469,9 +470,12 @@ inventory by identifier, on ANY turn including the first:
 - make + model code/phrase, partial or typo'd ("Diamond C LPX", "the fmax", "iron bull fhg24k");
 - make + year ("a 2025 Diamond C", "any 2024 Iron Bulls?");
 - an explicit stock number.
-PHRASING NEVER MATTERS HERE. Statements ("I want a Diamond C LPX"), questions ("What about the
-Diamond C LPX?", "Do you carry the fmax 212?", "How much is stock 02570?"), and follow-ups to earlier
-results all fill inventory_lookup the same way. The WANT vs ASK test does NOT apply to identifier
+PHRASING NEVER MATTERS HERE. Statements ("I want a Diamond C LPX", "I also want an Iron Bull DTB"),
+questions ("What about the Diamond C LPX?", "Do you carry the fmax 212?", "How much is stock 02570?"),
+and follow-ups to earlier results all fill inventory_lookup the same way - INCLUDING mid-qualification
+and right after another lookup ("I also want an Iron Bull DTB" while discussing the Fmax is a NEW
+lookup: make="Iron Bull", model_text="DTB", confidence=high - never just a brand_preference, and
+never a category change). The WANT vs ASK test does NOT apply to identifier
 references: naming a specific model or stock number means they want it looked up in our stock,
 so is_category_info_only stays false for the lookup itself.
 FILL THE BLOCK REGARDLESS OF INTENT. The lookup runs off this block, not off the intent field. When

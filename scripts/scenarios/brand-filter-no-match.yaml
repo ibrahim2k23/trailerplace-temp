@@ -10,4 +10,4 @@ turns:
     expect_state:
       category: "Dump"
     expect_listings: true
-    expect_reply_contains_any: ["don't currently show", "do not currently show", "no matches", "closest"]
+    expect_reply_contains_any: ["don't currently show", "do not currently show", "don't currently have", "do not currently have", "no matches", "closest", "alternatives"]

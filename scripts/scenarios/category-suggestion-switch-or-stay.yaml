@@ -1,0 +1,17 @@
+name: category-suggestion-switch-or-stay
+tags: [regression, category-change]
+# Live regression (2026-07-17, session 66d2618b): "a tractor" on a Flatbed raised the Equipment
+# suggestion, but the respond model bulleted flatbed "types" and asked "Which type would you like
+# to go with?" instead of the switch-or-stay question. The suggestion line now owns the reply, and
+# the fabrication-repair retry re-anchors on the switch-or-stay question. Answering "stay" must
+# move on to the next flatbed question, never re-ask the already answered haul_item.
+turns:
+  - user: "my name is Ibrahim and my phone is 03304388550"
+  - user: "I am looking for a flatbed trailer"
+  - user: "a tractor"
+    expect_listings: false
+    expect_reply_contains_any: ["switch", "stay"]
+    expect_reply_not_contains: ["Which type would you like to go with"]
+  - user: "stay with flatbed"
+    expect_listings: false
+    expect_reply_not_contains: ["hauling on the flatbed", "will you be hauling"]

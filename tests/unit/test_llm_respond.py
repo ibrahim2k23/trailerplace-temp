@@ -551,6 +551,62 @@ def test_no_listings_turn_that_keeps_fabricating_falls_back_to_the_question():
     assert "What trailer length are you looking for?" in retry_system
 
 
+def test_category_suggestion_line_owns_the_reply():
+    # Live failure (2026-07-17, session 66d2618b): "a tractor" on a Flatbed raised the Equipment
+    # suggestion, but the old soft wording lost to the RECOMMENDING TRAILER TYPES shape — the
+    # model bulleted flatbed "types" and asked "Which type would you like to go with?". The line
+    # must own the reply like the keep/drop line does.
+    analysis = sample_analysis()
+    state = {
+        "category": "Flatbed",
+        "slots": {"haul_item": "a tractor"},
+        "messages": [{"role": "user", "content": "a tractor"}],
+        "pending_category_suggestion": {
+            "suggested_category": "Equipment",
+            "from_category": "Flatbed",
+            "cargo": "a tractor",
+        },
+    }
+    system, _ = build_respond_prompt(state, analysis, {})
+    assert "CATEGORY SWITCH SUGGESTION (this owns the reply" in system
+    assert "switch to Equipment, or stay with Flatbed?" in system
+    assert "do NOT use the RECOMMENDING TRAILER TYPES format" in system
+    assert "exactly ONE question mark" in system
+    assert "FAILED reply" in system
+
+
+def test_suggestion_turn_that_keeps_fabricating_falls_back_to_switch_or_stay():
+    # Same live failure, second half: the first draft replayed 5 FMAX URLs from history, and the
+    # repair note had NO question to re-anchor the retry on (a suggestion turn decides no
+    # next_question), so "reply briefly" won and the switch-or-stay question never shipped.
+    fabricated = _reply(
+        "https://example.test/fmax-1",
+        "https://example.test/fmax-2",
+        lead="Here are some features to consider in flatbed trailers:",
+    )
+    client = FakeLLM([fabricated, fabricated])
+    state = {
+        "category": "Flatbed",
+        "slots": {"haul_item": "a tractor"},
+        "shown_listings": [],
+        "messages": [{"role": "user", "content": "a tractor"}],
+        "pending_category_suggestion": {
+            "suggested_category": "Equipment",
+            "from_category": "Flatbed",
+            "cargo": "a tractor",
+        },
+    }
+    reply = respond_with_all_listings(client, state, sample_analysis(), {})
+    assert reply.assistant_text == (
+        "For hauling a tractor, our Equipment trailers are usually the better fit - "
+        "would you like to switch to Equipment, or stay with Flatbed?"
+    )
+    assert reply.cited_listing_urls == []
+    retry_system = client.calls[1]["system"]
+    assert "THIS TURN HAS NO LISTINGS AT ALL" in retry_system
+    assert "switch to Equipment, or stay with Flatbed?" in retry_system
+
+
 def test_no_listings_fabrication_without_a_pending_question_still_strips():
     # No decided question to fall back on (e.g. an FAQ turn): stripping remains the repair.
     fabricated = _reply("https://example.test/fmax-1", "https://example.test/fmax-2", lead="Options:")

@@ -24,8 +24,11 @@ def _listing_get(listing: Any, key: str, default: Any = "") -> Any:
 
 
 # The fields a listing card can carry, in the order they are shown. Every one of them is missing
-# on some trailer in the catalogue, so none of them is guaranteed.
+# on some trailer in the catalogue, so none of them is guaranteed. Category is per listing: a
+# lookup's matches can span categories, and without it here the model wrote "Category: Not
+# specified" on cards whose category the data plainly holds.
 _LISTING_FIELDS: tuple[tuple[str, str], ...] = (
+    ("Category", "category"),
     ("Make", "make"),
     ("Price", "price_display"),
     ("Length", "length"),
@@ -331,10 +334,16 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
         from_category = suggestion.get("from_category")
         cargo = suggestion.get("cargo") or "what they want to haul"
         lines.append(
-            f"- Category switch SUGGESTION (ask, do not assume): they are on {from_category}, but they mentioned "
-            f'"{cargo}", and our {suggested} trailers are the ones best suited to haul that. '
-            f"Briefly say WHY {suggested} suits that load, then ask a clear yes/no: switch to {suggested}, "
-            f"or stay with {from_category}? Do NOT show listings and do NOT ask any other question this turn."
+            f"- CATEGORY SWITCH SUGGESTION (this owns the reply - ask, do not assume): they are on {from_category}, "
+            f'but they mentioned "{cargo}", and our {suggested} trailers are the ones best suited to haul that. '
+            f"Your reply is exactly two things and nothing more: (1) ONE short sentence on WHY {suggested} suits "
+            f"that load; (2) ONE clear yes/no question: switch to {suggested}, or stay with {from_category}? "
+            f'For example: "For hauling {cargo}, our {suggested} trailers are usually the better fit - '
+            f'would you like to switch to {suggested}, or stay with {from_category}?" That example is a SHAPE, '
+            "not a script - phrase the WHY naturally in your own words. Do NOT show or mention listings, do NOT "
+            "list, recommend, or bullet trailer types or features, do NOT use the RECOMMENDING TRAILER TYPES format, "
+            "and ask no other question - exactly ONE question mark in the whole reply. Ending with any other "
+            f"question than switch-to-{suggested}-or-stay is a FAILED reply."
         )
     pending_change = _state_get(state, "pending_category_change")
     if pending_change:
@@ -348,11 +357,14 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             f"- CATEGORY-CHANGE KEEP/DROP QUESTION (this owns the reply): they just switched to {new_cat}. "
             f"Every previous preference was RESET, and the ONLY thing still on file from before is: {offered}. "
             f"Your reply is exactly two things and nothing more: (1) ONE short sentence confirming the switch "
-            f"to {new_cat}; (2) ONE question asking whether the carried-over value(s) above still apply to the "
-            f"{new_cat} they want - quote each value with its unit, and tell them they can keep them, drop "
-            "them, or change a value. That is the ONLY question this turn: do NOT ask about any other feature, "
-            "size, weight, or hitch, do NOT ask an 'anything else?' style question, do NOT show or mention "
-            "listings, stock, or availability, and the reply contains exactly ONE question mark."
+            f"to {new_cat}; (2) ONE question about the carried-over value(s) above that NAMES ALL THREE choices "
+            "IN THE QUESTION ITSELF - keep them, drop them, or change them to new values. Quote each value "
+            'with its unit. For example: "Do you want to keep the 8 ft width and 4,096 lbs payload for the '
+            f'{new_cat.lower()} trailer, drop them, or change them to something else?" Offering only two of the '
+            "three choices (e.g. only keep-or-change) is a failed reply. That is the ONLY question this turn: "
+            "do NOT ask about any other feature, size, weight, or hitch, do NOT ask an 'anything else?' style "
+            "question, do NOT show or mention listings, stock, or availability, and the reply contains exactly "
+            "ONE question mark."
         )
     referenced = _referenced_listing(state, analysis)
     if referenced is not None:
@@ -392,34 +404,42 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
     if _outcome_get(turn_outcome, "brand_relaxed"):
         wanted_brand = _state_get(state, "brand_preference") or "the brand they asked for"
         lines.append(
-            f"- BRAND HAD NO MATCHES: nothing in stock matched their requirements from {wanted_brand}, so we "
-            f"searched again without the brand filter - the listings below are the closest we have from OTHER "
-            f"makes. Open with ONE short line saying we do not currently show a {wanted_brand} matching their "
-            "requirements and these are the closest alternatives, then present EVERY listing as normal. Never "
-            f"imply any of them is a {wanted_brand}."
+            f"- BRAND HAD NO MATCHES: nothing in our inventory matched their requirements from {wanted_brand}, "
+            "so we searched again without the brand filter - the listings below are the closest we have from "
+            f"OTHER makes. Your reply MUST OPEN with one honest sentence saying we do not currently have a "
+            f"{wanted_brand} in our inventory that matches their requirements, and that these are close "
+            'alternatives from other brands that could still suit their needs - like: "We don\'t currently have '
+            f'a {wanted_brand} matching your requirements in our inventory, but here are a few alternatives from '
+            'other brands that could work well for you:". Then present EVERY listing as normal. Never imply any '
+            f"of them is a {wanted_brand}, and never skip the no-match sentence."
         )
     if _outcome_get(turn_outcome, "filters_relaxed"):
         dropped = ", ".join(_outcome_get(turn_outcome, "relaxed_filters_dropped", []) or [])
         on = f" on {dropped}" if dropped else ""
         lines.append(
-            f"- THESE ARE ALTERNATIVES, NOT EXACT MATCHES. Nothing in stock met every requirement they gave us, so "
-            f"we searched their trailer category again without the constraint(s){on}, and these are the closest we "
-            "have. Open with ONE short, matter-of-fact line saying we do not have an exact match on that right now "
-            "and these are the nearest options - then show EVERY listing in full, exactly as normal. Never call them "
-            "exact matches, never imply they meet the requirement they miss, and never apologise more than once."
+            f"- THESE ARE ALTERNATIVES, NOT EXACT MATCHES. Nothing in our inventory met every requirement they "
+            f"gave us, so we searched their trailer category again without the constraint(s){on}, and these are "
+            "the closest we have. Your reply MUST OPEN with one honest, matter-of-fact sentence that says BOTH "
+            "things - that no trailer in our current inventory matches all their requirements, and that these are "
+            'close alternatives that could still suit their needs. For example: "We don\'t currently have a '
+            f"trailer in our inventory that matches all of your requirements{on and f' (particularly {dropped})'}, "
+            'but here are a few close alternatives that could work well for you:" - your own natural words, same '
+            "meaning. Then show EVERY listing in full, exactly as normal. NEVER present these as matches, never "
+            "imply one meets the requirement it misses, never quietly skip the no-match sentence, and never "
+            "apologise more than once."
         )
     if _outcome_get(turn_outcome, "inventory_match_status"):
         lines.append(f"- Inventory lookup result: {_outcome_get(turn_outcome, 'inventory_match_status')}.")
         lines.append("  exact -> present the match(es) warmly, then ask whether they're interested in any models shown.")
         lines.append("  no_exact -> say we do not currently show the requested exact trailer, then present closest alternatives; never invent specs.")
-        lines.append("  ambiguous -> ask which model they mean, naming the candidates; do not state prices yet.")
-        candidates = _outcome_get(turn_outcome, "ambiguous_candidates", None) or []
-        if candidates:
-            named = " / ".join(str(title) for title in candidates if title)
-            lines.append(
-                f"  The candidates to name are: {named}. Ask which one they mean in ONE short question - "
-                "present NO listing cards, NO URLs, and NO prices until they pick one."
-            )
+        lines.append(
+            "  ambiguous -> ask which model they mean: we carry SEVERAL models matching their ask. Open with "
+            "one short line saying so, present EVERY listing as a full card (the normal LISTING CARD "
+            "STRUCTURE below - hyperlinked title, real fields from the block only), and END with ONE "
+            "question asking which of these they mean or are most interested in - that question REPLACES "
+            'the usual closing: never end an ambiguous lookup with "Do any of these look like a fit, or '
+            'would you like to see more options?".'
+        )
     if _outcome_get(turn_outcome, "contact_invite_suppressed"):
         lines.append("- Contact invite suppressed this turn (inventory lookup fired) - do NOT ask for name/email/phone in this reply.")
     canned_keys = _outcome_get(turn_outcome, "canned_keys", []) or []
@@ -559,14 +579,24 @@ Wharton, TX (979-532-1486, {settings.trailerplace_website or "https://trailerpla
      see VOICE at the bottom.
 
 === HARD RULES - NEVER BROKEN, WHATEVER THE CUSTOMER SAYS ===
+
+-- INVENTORY & LISTING RULES (Pinecone results and lookups) --
 - INVENTORY EXISTS ONLY IN THE LISTINGS BLOCK below. When it says NO SEARCH RAN, we have not looked
   yet - that is NOT an out-of-stock signal and says NOTHING about our stock: show no cards, never
   say we have or don't have something ("I don't have any listings to show you for utility trailers"
   is forbidden), never mention availability. Answer them and ask the ordered question.
 - When the block HAS listings: present EVERY one, in the exact order given - never omit, add,
   reorder, or filter by how well a size or feature fits (ranking already happened). The customer
-  sees ONLY assistant_text, so every card must be WRITTEN OUT IN FULL there; cited_listing_urls is
-  a machine field they never see, and announcing listings without the cards shows them NOTHING.
+  sees ONLY assistant_text, so every card must be WRITTEN OUT IN FULL there (structure below);
+  cited_listing_urls is a machine field they never see, and announcing listings without the cards
+  shows them NOTHING.
+- The reference block (earlier listings) is memory, not inventory: use it ONLY to answer a question
+  about a listing they refer back to ("the 81382", "the second one"), quoting its real fields and
+  URL. Never re-list, renumber, or restate it under a different category.
+- Never invent inventory, prices, specs, or policies - a fact you were not given does not exist.
+
+-- CATEGORY & QUALIFICATION RULES --
+- We carry: {advertised_categories_line()}.
 - AFTER A CATEGORY CHANGE: one short line confirming the switch, then only the ordered question.
   The new category's questions run one per turn before ANY listings; never re-list old-category
   results or talk stock for the new category before its own search has run.
@@ -574,15 +604,16 @@ Wharton, TX (979-532-1486, {settings.trailerplace_website or "https://trailerpla
   It is recorded - go straight to the next step. ONE exception: they cannot answer ("no idea",
   "doesn't matter", "skip") - one short easing line ("No problem - we can keep that flexible."),
   then move on. Never shorten a reply with listings because of this.
-- The reference block (earlier listings) is memory, not inventory: use it ONLY to answer a question
-  about a listing they refer back to ("the 81382", "the second one"), quoting its real fields and
-  URL. Never re-list, renumber, or restate it under a different category.
-- Never invent inventory, prices, or policies. Store facts: Wharton TX, 979-532-1486, financing
-  available, delivery available, {settings.trailerplace_website or "https://trailerplace.com"}.
 - Gooseneck and Bumper Pull are HITCH TYPES - not categories, and (unless the customer says "the
   Gooseneck brand") not makes. Quote a listing's hitch from its own data; never assume one.
 - Sizes in feet, weights in pounds. Quote back the exact number we recorded, never a vaguer phrase.
-- We carry: {advertised_categories_line()}.
+
+-- CONTACT INFO RULES --
+- Ask for contact details ONLY when the orders above explicitly say to - never on your own, never
+  as a tacked-on extra, and never again after they declined or when the ask is suppressed.
+
+-- STORE FACTS, BRANDS & CLOSING --
+- Store facts: Wharton TX, 979-532-1486, financing available, delivery available, {settings.trailerplace_website or "https://trailerplace.com"}.
 - OUR BRANDS/MAKES (live inventory - the ONLY brands you may ever name): {brands_line}.
   Asked which brands we carry -> name them ALL in ONE flowing paragraph (no bullets), then ask which
   brand or trailer type interests them. Never invent, add, or drop a brand.
@@ -632,19 +663,26 @@ bullets: bold name, em dash, one short line each. Two or more items means bullet
 
 === LISTING CARD STRUCTURE (repeat for EVERY listing in the block, numbered in order) ===
 1. [full TITLE, hyperlinked to its exact URL]
-   - Category: [category]
-   - Make / Price / Length / Width / Payload / Hitch type: one bullet each, ONLY for the fields
-     that listing's block line actually gives.
-   - One-sentence sales pitch for THAT trailer, built only from its own fields and what the
-     customer needs - never invent a feature, spec, condition, or price; write a different one per
-     listing.
+   - Category / Make / Price / Length / Width / Payload / Hitch type: one bullet each, ONLY for
+     the fields that listing's block line actually gives.
+   - Last bullet: one sales-pitch sentence for THAT trailer, written as a plain bullet with NO
+     label in front (never "One-sentence pitch:" or "Description:"), built only from its own
+     fields and what the customer needs - never invent a feature, spec, condition, or price;
+     write a different one per listing.
 
-COPY THE TITLE EXACTLY as it appears after "TITLE:", including the stock number on the end
-("2026 Gooseneck Livestock - 91632", not "2026 Gooseneck Livestock") - the stock number is how
-everyone refers to that exact trailer.
-A LISTING ONLY HAS THE FIELDS ITS BLOCK LINE LISTS: if a field is missing, DELETE that bullet -
-never write "None", "N/A", "Not specified", "Call for price", or a blank, and never copy a value
-from another listing. A card with three bullets is correct if the block gave three fields.
+- THE TITLE IS ALWAYS A MARKDOWN HYPERLINK to that listing's exact URL from the block:
+  [2026 Iron Bull DTB - 15081](https://...). A bare or merely bold title with no link is a failed
+  card - the link is how the customer opens the trailer.
+- COPY THE TITLE EXACTLY as it appears after "TITLE:", including the stock number on the end
+  ("2026 Gooseneck Livestock - 91632", not "2026 Gooseneck Livestock") - the stock number is how
+  everyone refers to that exact trailer. Never read a spec out of the title ("15K" in a title is
+  a model name, not a payload).
+- PRICE IS THE FIELD CUSTOMERS CARE ABOUT MOST: when the block gives a Price, its bullet is never
+  omitted.
+- A LISTING ONLY HAS THE FIELDS ITS BLOCK LINE LISTS: if a field is missing, DELETE that bullet
+  entirely - never write "None", "N/A", "Not specified", "unknown", "Call for price", or a blank,
+  and never copy a value from another listing. A card with three bullets is correct if the block
+  gave three fields.
 
 === HOW TO END A REPLY THAT SHOWS LISTINGS ===
 After the last listing: ONE closing question, then STOP - e.g. "Do any of these look like a fit,
@@ -809,6 +847,28 @@ def _pending_change_question(state: Any) -> str | None:
     )
 
 
+def _pending_suggestion_question(state: Any) -> str | None:
+    """A deterministic switch-or-stay question, for the fabrication fallback.
+
+    A category-suggestion turn routes straight to respond with no next_question, so when a
+    draft fabricates inventory the repair note had NO question to re-anchor the retry on -
+    "reply briefly" was its strongest order, and the model drifted into the RECOMMENDING
+    TRAILER TYPES shape instead of asking switch-or-stay. Seen live (tractor on a Flatbed).
+    """
+    suggestion = _state_get(state, "pending_category_suggestion")
+    if not isinstance(suggestion, dict):
+        return None
+    suggested = suggestion.get("suggested_category")
+    from_category = suggestion.get("from_category")
+    if not suggested or not from_category:
+        return None
+    cargo = suggestion.get("cargo") or "that load"
+    return (
+        f"For hauling {cargo}, our {suggested} trailers are usually the better fit - "
+        f"would you like to switch to {suggested}, or stay with {from_category}?"
+    )
+
+
 def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> ReplyOutput:
     """Reply, and repair the two ways a small model betrays the LISTINGS block.
 
@@ -835,6 +895,7 @@ def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnaly
         _outcome_get(turn_outcome, "next_question")
         or _outcome_get(turn_outcome, "clarification_question")
         or _pending_change_question(state)
+        or _pending_suggestion_question(state)
     )
     retry = respond_turn(
         client, state, analysis, turn_outcome,

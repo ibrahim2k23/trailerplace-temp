@@ -4,7 +4,10 @@ tags: [regression, m6]
 # ask which model they mean, and never state a price before that's resolved.
 # Identifier updated when the data source moved to listings.xlsx (2026-07-17): the FHG 24k
 # matches two real trailers there (stock 12914 and 14447), a genuine ambiguity.
+# Presentation (2026-07-17): candidates render as FULL structured cards (hyperlinked title,
+# real fields) and the closing question asks which one they mean.
 turns:
   - user: "How much is the Iron Bull fhg24k?"
-    expect_reply_contains_any: ["which", "mean"]
-    expect_reply_not_contains: ["$"]
+    expect_listings: true
+    expect_reply_contains_any: ["which", "mean", "interested"]
+    expect_reply_not_contains: ["Not specified", "N/A"]

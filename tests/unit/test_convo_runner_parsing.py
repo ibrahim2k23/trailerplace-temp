@@ -141,6 +141,7 @@ def test_expected_scenario_set_is_complete():
         "category-change-keep-drop-asked",
         "category-change-default-not-carried", "category-change-show-me-instead",
         "vague-show-more-types-no-category", "category-change-wrong-answer-reasks",
+        "category-suggestion-switch-or-stay",
     }
     actual = {path.stem for path in SCENARIOS_DIR.glob("*.yaml")}
     assert actual == expected
@@ -162,7 +163,7 @@ def test_regression_suite_covers_every_scenario():
     scenarios = load_scenarios(SCENARIOS_DIR)
     regression = filter_by_tag(scenarios, REGRESSION_SUITE)
     assert {s["name"] for s in regression} == {s["name"] for s in scenarios}
-    assert len(regression) == 53  # 21 (M5) + 13 (M6) + 9 (M7) + 5 (M9 adversarial) + 5 (live-log regressions)
+    assert len(regression) == 54  # 21 (M5) + 13 (M6) + 9 (M7) + 5 (M9 adversarial) + 6 (live-log regressions)
 
 
 def test_adversarial_suite_is_the_five_new_scenarios():

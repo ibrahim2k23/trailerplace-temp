@@ -44,17 +44,11 @@ def inventory_lookup_node(state: dict) -> dict:
     )
 
     # Recorded as shown by respond, from what it actually cited — see nodes/respond.py.
-    if result["match_status"] == "ambiguous":
-        # Spec: ambiguous -> ask WHICH model they mean, no cards, no prices. Handing the
-        # candidates over as listings made the LISTINGS block present them all in full,
-        # prices included, instead of asking (seen live with the two FHG 24k variants).
-        outcome["listings"] = []
-        outcome["ambiguous_candidates"] = [
-            (match.get("title") if isinstance(match, dict) else getattr(match, "title", "")) or ""
-            for match in matches
-        ]
-    else:
-        outcome["listings"] = matches
+    # Ambiguous matches are DELIBERATELY passed as listings too: they render as full,
+    # structured cards (real fields from the block, never invented), and the closing
+    # question asks which one they mean. An earlier titles-only presentation was rolled
+    # back — bare names with no link, price, or specs read worse than the cards.
+    outcome["listings"] = matches
     outcome["inventory_result"] = result
     outcome["inventory_match_status"] = result["match_status"]
     # Durable signal the respond node/prompt key off — preserved from the M4 stub
@@ -62,7 +56,7 @@ def inventory_lookup_node(state: dict) -> dict:
     outcome["inventory_lookup_ran"] = True
     outcome["contact_invite_suppressed"] = True
 
-    if outcome["listings"]:
+    if matches:
         description = f"Inventory lookup — {len(matches)} results — {result['requested_label']}"
         outcome.setdefault("system_email_triggers", []).append(
             {"kind": "results_shown", "description": description}

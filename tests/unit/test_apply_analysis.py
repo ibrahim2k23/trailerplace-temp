@@ -422,6 +422,52 @@ def test_rule2_cargo_term_suggests_switch_and_yes_applies_it():
     assert state["pending_category_suggestion"] is None
 
 
+def test_rule2_accepting_by_naming_the_suggested_category_keeps_the_cargo():
+    # Live failure (2026-07-17, session f3bda65a): "yes, switch to equipment" came back
+    # labeled category_change with no confirm answer — it fell through to the ordinary
+    # change path, which wiped the tractor that motivated the suggestion, and Equipment
+    # re-asked what they were hauling. Naming the suggested category IS the yes.
+    state = new_session_state("s1")
+    state["category"] = "Flatbed"
+    say(state, "a tractor")
+    apply_with(state, sample_analysis(intent="qualification_answer", category_mentioned=None, slot_answers=[], extracted={**_empty_extracted(), "haul_item": "a tractor"}))
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+    say(state, "yes, switch to equipment")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Equipment", category_confirm_answer=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Equipment"
+    assert state["slots"]["haul_item"] == "a tractor"
+    assert state["pending_category_suggestion"] is None
+
+
+def test_rule2_naming_the_current_category_declines_and_never_reasks():
+    # "stay with flatbed" sometimes arrives with category_mentioned=Flatbed and no confirm
+    # answer: that is the no — stay put, and the same cargo must not raise the switch again.
+    state = new_session_state("s1")
+    state["category"] = "Flatbed"
+    say(state, "a tractor")
+    apply_with(state, sample_analysis(intent="qualification_answer", category_mentioned=None, slot_answers=[], extracted={**_empty_extracted(), "haul_item": "a tractor"}))
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+    say(state, "stay with flatbed")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Flatbed", category_confirm_answer=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Flatbed"
+    assert state["slots"]["haul_item"] == "a tractor"
+    assert state["pending_category_suggestion"] is None
+    assert {"category": "Equipment", "cargo": "a tractor"} in state["declined_category_suggestions"]
+
+
+def test_rule2_naming_a_third_category_is_an_ordinary_change():
+    # A pending suggestion must not swallow a genuine change to a THIRD category.
+    state = new_session_state("s1")
+    state["category"] = "Flatbed"
+    say(state, "a tractor")
+    apply_with(state, sample_analysis(intent="qualification_answer", category_mentioned=None, slot_answers=[], extracted={**_empty_extracted(), "haul_item": "a tractor"}))
+    assert state["pending_category_suggestion"]["suggested_category"] == "Equipment"
+    say(state, "actually show me dump trailers")
+    apply_with(state, sample_analysis(intent="category_change", category_mentioned="Dump", category_confirm_answer=None, slot_answers=[], extracted=_empty_extracted()))
+    assert state["category"] == "Dump"
+    assert state["pending_category_suggestion"] is None
+
+
 def test_rule2_declining_the_suggestion_stays_put_and_never_reasks():
     state = new_session_state("s1")
     state["category"] = "Tilt"
