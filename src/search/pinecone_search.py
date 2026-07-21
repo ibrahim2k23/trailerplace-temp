@@ -1021,15 +1021,13 @@ def _combined_feature_fit_rerank(
         stored_features = list(listing.get("features") or [])
         match_sources = _candidate_feature_match_sources(listing)
         candidate_id = f"C{int(entry['fetch_pos']):03d}"
-        reasoning_summary: str | None = None
-        semantic_rank: int | None = None
-        if semantic_rerank is not None:
+        semantic_source = "deterministic_fallback"
+        if semantic_rerank is not None and candidate_id in semantic_rerank.assessments_by_id:
             assessment = semantic_rerank.assessments_by_id[candidate_id]
             matched_count = sum(1 for match in assessment.feature_matches if match.matched)
             feature_coverage = round(matched_count / len(requested_features), 6)
             feature_matches = [match.model_dump() for match in assessment.feature_matches]
-            reasoning_summary = assessment.reasoning_summary
-            semantic_rank = semantic_rerank.semantic_rank_by_id[candidate_id]
+            semantic_source = "gpt_semantic"
         else:
             feature_coverage, feature_matches = _feature_match_details(
                 requested_features, match_sources
@@ -1049,8 +1047,7 @@ def _combined_feature_fit_rerank(
                 "fit_order_score": round(fit_order_score, 6),
                 "final_score": round(final_score, 6),
                 "feature_matches": feature_matches,
-                "reasoning_summary": reasoning_summary,
-                "semantic_rank": semantic_rank,
+                "semantic_source": semantic_source,
                 "stored_features": stored_features,
                 "match_source_count": len(match_sources),
                 "penalty": entry.get("penalty", 0.0),
@@ -1089,8 +1086,7 @@ def _combined_feature_fit_rerank(
             "stored_features": item["stored_features"],
             "match_source_count": item["match_source_count"],
             "feature_matches": item["feature_matches"],
-            "reasoning_summary": item["reasoning_summary"],
-            "semantic_rank": item["semantic_rank"],
+            "semantic_source": item["semantic_source"],
             "feature_coverage": item["feature_coverage"],
             "fit_order_score": item["fit_order_score"],
             "feature_weight": FEATURE_RERANK_WEIGHT,
@@ -1136,12 +1132,22 @@ def _combined_feature_fit_rerank(
     )
     return [item["listing"] for item in scored], {
         "applied": True,
-        "feature_match_mode": "gpt_semantic" if semantic_rerank is not None else "deterministic_fallback",
+        "feature_match_mode": (
+            "gpt_semantic"
+            if semantic_rerank is not None and not semantic_rerank.fallback_candidate_ids
+            else "hybrid_semantic_deterministic"
+            if semantic_rerank is not None
+            else "deterministic_fallback"
+        ),
         "semantic_fallback_reason": semantic_fallback_reason,
         "semantic_model": semantic_rerank.model if semantic_rerank is not None else None,
         "semantic_reasoning_effort": semantic_rerank.reasoning_effort if semantic_rerank is not None else None,
         "semantic_latency_ms": semantic_rerank.latency_ms if semantic_rerank is not None else None,
         "semantic_request_id": semantic_rerank.request_id if semantic_rerank is not None else None,
+        "semantic_request_ids": list(semantic_rerank.request_ids) if semantic_rerank is not None else [],
+        "semantic_batch_count": semantic_rerank.batch_count if semantic_rerank is not None else 0,
+        "semantic_fallback_candidate_ids": sorted(semantic_rerank.fallback_candidate_ids) if semantic_rerank is not None else [],
+        "semantic_validation_errors": semantic_rerank.validation_errors_by_id if semantic_rerank is not None else {},
         "candidate_count": candidate_count,
         "matched_candidate_count": matched_candidates,
         "requested_features": requested_features,

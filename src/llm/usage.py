@@ -1,7 +1,7 @@
 """Per-turn LLM call/token accounting (M9 §3).
 
 The cost audit asserts 2 LLM calls per normal turn (Analyze + Respond), with one
-additional tagged completion only when semantic feature reranking runs. Pinecone
+additional tagged completion(s) only when batched semantic feature reranking runs. Pinecone
 search turns add one embedding; inventory-lookup turns add no extra calls. To
 assert that from local logs we have to count the calls where they happen.
 

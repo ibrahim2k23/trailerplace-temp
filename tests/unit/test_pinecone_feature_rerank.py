@@ -364,26 +364,25 @@ def _semantic_result(listings: list[dict], requested: list[str], matched_urls: s
                         requested_feature=requested[0],
                         matched=matched,
                         evidence=evidence if matched else None,
-                        reason="semantic equivalent" if matched else "no supporting evidence",
+                        reason_code="semantic_equivalent" if matched else "not_found",
+                        reason="semantic equivalent" if matched else None,
                     )
                 ],
-                reasoning_summary="grounded assessment",
             )
         )
         evidence_by_id[candidate_id] = evidence
-    output = FeatureRerankOutput(
-        ranked_candidate_ids=[item.candidate_id for item in assessments],
-        assessments=assessments,
-    )
+    output = FeatureRerankOutput(assessments=assessments)
     return ValidatedFeatureRerank(
         output=output,
         assessments_by_id={item.candidate_id: item for item in assessments},
-        semantic_rank_by_id={item.candidate_id: rank for rank, item in enumerate(assessments, 1)},
         evidence_by_id=evidence_by_id,
+        fallback_candidate_ids=frozenset(),
+        validation_errors_by_id={},
         model="gpt-5-nano-2025-08-07",
         reasoning_effort="medium",
         latency_ms=12.0,
-        request_id="req-test",
+        request_ids=("req-test",),
+        batch_count=1,
     )
 
 
@@ -426,27 +425,30 @@ def test_semantic_multiple_features_use_evidence_supported_partial_coverage():
                 requested_feature="insulated",
                 matched=True,
                 evidence="w/insl",
+                reason_code="abbreviation",
                 reason="Catalog abbreviation for insulation.",
             ),
             FeatureMatch(
                 requested_feature="air conditioning",
                 matched=False,
                 evidence=None,
-                reason="No A/C evidence.",
+                reason_code="not_found",
+                reason=None,
             ),
         ],
-        reasoning_summary="One of two requested features is supported.",
     )
-    output = FeatureRerankOutput(ranked_candidate_ids=["C001"], assessments=[assessment])
+    output = FeatureRerankOutput(assessments=[assessment])
     semantic = ValidatedFeatureRerank(
         output=output,
         assessments_by_id={"C001": assessment},
-        semantic_rank_by_id={"C001": 1},
         evidence_by_id={"C001": "w/insl"},
+        fallback_candidate_ids=frozenset(),
+        validation_errors_by_id={},
         model="gpt-5-nano-2025-08-07",
         reasoning_effort="medium",
         latency_ms=10.0,
-        request_id="req-partial",
+        request_ids=("req-partial",),
+        batch_count=1,
     )
 
     _, debug = search._combined_feature_fit_rerank(
