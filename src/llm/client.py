@@ -33,7 +33,8 @@ class OpenAILLMClient:
         if self.reasoning_effort:
             request["reasoning_effort"] = self.reasoning_effort
         parsed = self._client.beta.chat.completions.parse(**request)
-        # Counted for the M9 cost audit: exactly 2 of these per normal turn.
+        # Counted for the M9 cost audit: Analyze + Respond on a normal turn.
+        # Feature reranking records its separately tagged conditional third call.
         tokens = getattr(parsed, "usage", None)
         prompt_tokens = getattr(tokens, "prompt_tokens", 0) or 0
         completion_tokens = getattr(tokens, "completion_tokens", 0) or 0

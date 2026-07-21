@@ -19,6 +19,7 @@ from openai import OpenAI
 from pinecone import Pinecone
 from rapidfuzz import fuzz
 
+from src import config
 from src.domain.brands import make_filter_values
 from src.domain.make_aliases import MAKE_ALIASES as MAKE_ALIAS_MAP
 from src.llm import usage
@@ -30,6 +31,7 @@ from src.domain.units import (
     parse_length_ft as _parse_length_ft,
     parse_weight_lbs as _parse_number,
 )
+from src.search.feature_ranker import ValidatedFeatureRerank, rank_non_metadata_features
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +58,8 @@ MAKE_RERANK_VERBOSE_LOGS = (os.getenv("MAKE_RERANK_VERBOSE_LOGS") or "0").strip(
     "yes",
     "on",
 }
-FEATURE_RERANK_WEIGHT = 0.80
-FIT_RERANK_WEIGHT = 0.20
+FEATURE_RERANK_WEIGHT = config.settings.feature_rerank_weight
+FIT_RERANK_WEIGHT = config.settings.feature_fit_weight
 FEATURE_MATCH_THRESHOLD = 0.70
 FEATURE_RERANK_VERBOSE_LOGS = (
     os.getenv("FEATURE_RERANK_VERBOSE_LOGS") or "1"
@@ -759,7 +761,7 @@ def _rerank_listings_by_fit(
 
     # The legacy/no-feature path drops failing entries whenever a non-failing
     # option exists. Feature-aware search sets retain_all=True so every hard-
-    # filtered Pinecone candidate reaches the combined 80/20 scorer.
+    # filtered Pinecone candidate reaches the combined feature/fit scorer.
     nonfailing = [e for e in entries if e["fail_count"] == 0]
     fallback_pool = entries if retain_all or not nonfailing else nonfailing
     ranked_entries = sorted(
@@ -953,11 +955,16 @@ def _combined_feature_fit_rerank(
     required_height_ft: Optional[float],
     metadata_filter: dict[str, Any] | None,
     query_text: str,
+    semantic_rerank: ValidatedFeatureRerank | None = None,
+    semantic_fallback_reason: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Rank every hard-filtered Pinecone candidate with an 80/20 blend.
+    """Rank every hard-filtered Pinecone candidate with an 85/15 blend.
 
     Unlike the legacy fit reranker, this never removes dimensionally failing
-    candidates. Fit only supplies the secondary 20% ordering signal.
+    candidates. Fit only supplies the secondary 15% ordering signal. When a
+    validated GPT assessment is supplied, Python derives feature coverage from
+    its evidence-grounded booleans; otherwise the deterministic matcher is the
+    availability fallback.
     """
     if not listings:
         return listings, {
@@ -1013,9 +1020,20 @@ def _combined_feature_fit_rerank(
         )
         stored_features = list(listing.get("features") or [])
         match_sources = _candidate_feature_match_sources(listing)
-        feature_coverage, feature_matches = _feature_match_details(
-            requested_features, match_sources
-        )
+        candidate_id = f"C{int(entry['fetch_pos']):03d}"
+        reasoning_summary: str | None = None
+        semantic_rank: int | None = None
+        if semantic_rerank is not None:
+            assessment = semantic_rerank.assessments_by_id[candidate_id]
+            matched_count = sum(1 for match in assessment.feature_matches if match.matched)
+            feature_coverage = round(matched_count / len(requested_features), 6)
+            feature_matches = [match.model_dump() for match in assessment.feature_matches]
+            reasoning_summary = assessment.reasoning_summary
+            semantic_rank = semantic_rerank.semantic_rank_by_id[candidate_id]
+        else:
+            feature_coverage, feature_matches = _feature_match_details(
+                requested_features, match_sources
+            )
         final_score = (
             FEATURE_RERANK_WEIGHT * feature_coverage
             + FIT_RERANK_WEIGHT * fit_order_score
@@ -1023,6 +1041,7 @@ def _combined_feature_fit_rerank(
         scored.append(
             {
                 "listing": listing,
+                "candidate_id": candidate_id,
                 "fetch_pos": entry["fetch_pos"],
                 "fit_rank": fit_rank,
                 "pinecone_score": float(listing.get("relevance_score") or 0.0),
@@ -1030,6 +1049,8 @@ def _combined_feature_fit_rerank(
                 "fit_order_score": round(fit_order_score, 6),
                 "final_score": round(final_score, 6),
                 "feature_matches": feature_matches,
+                "reasoning_summary": reasoning_summary,
+                "semantic_rank": semantic_rank,
                 "stored_features": stored_features,
                 "match_source_count": len(match_sources),
                 "penalty": entry.get("penalty", 0.0),
@@ -1057,6 +1078,7 @@ def _combined_feature_fit_rerank(
         listing = item["listing"]
         diagnostic = {
             "fetch_position": item["fetch_pos"],
+            "candidate_id": item["candidate_id"],
             "fit_position": item["fit_rank"],
             "final_position": final_rank,
             "title": listing.get("title"),
@@ -1067,6 +1089,8 @@ def _combined_feature_fit_rerank(
             "stored_features": item["stored_features"],
             "match_source_count": item["match_source_count"],
             "feature_matches": item["feature_matches"],
+            "reasoning_summary": item["reasoning_summary"],
+            "semantic_rank": item["semantic_rank"],
             "feature_coverage": item["feature_coverage"],
             "fit_order_score": item["fit_order_score"],
             "feature_weight": FEATURE_RERANK_WEIGHT,
@@ -1112,6 +1136,12 @@ def _combined_feature_fit_rerank(
     )
     return [item["listing"] for item in scored], {
         "applied": True,
+        "feature_match_mode": "gpt_semantic" if semantic_rerank is not None else "deterministic_fallback",
+        "semantic_fallback_reason": semantic_fallback_reason,
+        "semantic_model": semantic_rerank.model if semantic_rerank is not None else None,
+        "semantic_reasoning_effort": semantic_rerank.reasoning_effort if semantic_rerank is not None else None,
+        "semantic_latency_ms": semantic_rerank.latency_ms if semantic_rerank is not None else None,
+        "semantic_request_id": semantic_rerank.request_id if semantic_rerank is not None else None,
         "candidate_count": candidate_count,
         "matched_candidate_count": matched_candidates,
         "requested_features": requested_features,
@@ -1192,6 +1222,30 @@ def search_pinecone_listing_result(
         required_payload_lbs = _required_payload_lbs_from_filters(slots, metadata_filters)
         required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
         required_height_ft = _required_height_ft_from_filters(slots, metadata_filters)
+        semantic_rerank: ValidatedFeatureRerank | None = None
+        semantic_fallback_reason: str | None = None
+        if config.settings.feature_llm_rerank_enabled and listings:
+            try:
+                semantic_rerank = rank_non_metadata_features(listings, requested_features)
+            except Exception as exc:  # noqa: BLE001 - deterministic availability fallback
+                semantic_fallback_reason = f"{type(exc).__name__}: {exc}"
+                logger.exception(
+                    "feature_rank_fallback | reason=%r candidates=%s requested_features=%s",
+                    semantic_fallback_reason,
+                    len(listings),
+                    json.dumps(requested_features, ensure_ascii=False),
+                )
+        else:
+            semantic_fallback_reason = (
+                "no_candidates" if not listings else "feature_llm_rerank_disabled"
+            )
+            logger.info(
+                "feature_rank_not_invoked | reason=%s candidates=%s requested_features=%s",
+                semantic_fallback_reason,
+                len(listings),
+                json.dumps(requested_features, ensure_ascii=False),
+            )
+
         listings, match_analysis = _combined_feature_fit_rerank(
             listings,
             requested_features=requested_features,
@@ -1201,6 +1255,8 @@ def search_pinecone_listing_result(
             required_height_ft=required_height_ft,
             metadata_filter=metadata_filter,
             query_text=query,
+            semantic_rerank=semantic_rerank,
+            semantic_fallback_reason=semantic_fallback_reason,
         )
         rerank_debug = {
             "applied": True,

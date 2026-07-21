@@ -15,7 +15,10 @@ import cost_report  # noqa: E402
 from cost_report import audit, load_turns, summarize, violations  # noqa: E402
 
 
-def _record(*, completions=2, embeddings=0, tools=(), intent="qualification_answer", tokens=1000):
+def _record(
+    *, completions=2, feature_reranks=0, embeddings=0, tools=(),
+    intent="qualification_answer", tokens=1000
+):
     return {
         "event": "chat_turn",
         "session_id": "s1",
@@ -27,6 +30,7 @@ def _record(*, completions=2, embeddings=0, tools=(), intent="qualification_answ
         "emails_sent": [],
         "llm_calls": {
             "chat_completions": completions,
+            "feature_reranks": feature_reranks,
             "embeddings": embeddings,
             "prompt_tokens": tokens,
             "completion_tokens": 0,
@@ -74,6 +78,30 @@ def test_three_completions_violates_the_two_call_budget():
     problems = violations(summarize(_record(completions=3)))
     assert len(problems) == 1
     assert "3 chat completions" in problems[0]
+
+
+def test_feature_search_allows_one_tagged_third_completion():
+    turn = summarize(
+        _record(
+            completions=3,
+            feature_reranks=1,
+            embeddings=1,
+            tools=["search", "feature_rerank"],
+        )
+    )
+    assert violations(turn) == []
+
+
+def test_feature_rerank_on_non_search_turn_is_flagged():
+    turn = summarize(_record(completions=3, feature_reranks=1, tools=["feature_rerank"]))
+    assert "feature rerank ran on a non-search turn" in violations(turn)
+
+
+def test_more_than_one_feature_rerank_is_flagged():
+    turn = summarize(
+        _record(completions=4, feature_reranks=2, embeddings=1, tools=["search", "feature_rerank"])
+    )
+    assert any("maximum 1" in problem for problem in violations(turn))
 
 
 def test_search_turn_gets_exactly_one_embedding():

@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+# Analyze + Respond. One separately tagged feature-rerank completion may be
+# added by violations() on non-metadata feature search turns.
 MAX_CHAT_COMPLETIONS_PER_TURN = 2
 
 
@@ -59,6 +61,7 @@ class TurnCost:
     intent: str | None
     tools: list[str]
     chat_completions: int
+    feature_reranks: int
     embeddings: int
     total_tokens: int
     latency_ms: float
@@ -77,6 +80,7 @@ def summarize(record: dict[str, Any]) -> TurnCost:
         intent=record.get("intent"),
         tools=list(record.get("tools_fired") or []),
         chat_completions=int(calls.get("chat_completions", 0) or 0),
+        feature_reranks=int(calls.get("feature_reranks", 0) or 0),
         embeddings=int(calls.get("embeddings", 0) or 0),
         total_tokens=int(calls.get("total_tokens", 0) or 0),
         latency_ms=float(record.get("latency_ms", 0) or 0),
@@ -89,10 +93,18 @@ def violations(turn: TurnCost, *, max_completions: int = MAX_CHAT_COMPLETIONS_PE
         return []
 
     problems: list[str] = []
-    if turn.chat_completions > max_completions:
-        problems.append(f"{turn.chat_completions} chat completions (budget {max_completions}: Analyze + Respond)")
+    if turn.feature_reranks > 1:
+        problems.append(f"{turn.feature_reranks} feature-rerank completions (maximum 1)")
+    allowed_completions = max_completions + min(turn.feature_reranks, 1)
+    if turn.chat_completions > allowed_completions:
+        problems.append(
+            f"{turn.chat_completions} chat completions (budget {allowed_completions}: "
+            "Analyze + Respond + optional Feature Rerank)"
+        )
 
     searched = "search" in turn.tools
+    if turn.feature_reranks and not searched:
+        problems.append("feature rerank ran on a non-search turn")
     expected_embeddings = 1 if searched else 0
     if turn.embeddings != expected_embeddings:
         where = "a search turn" if searched else "a non-search turn"

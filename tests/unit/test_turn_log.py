@@ -44,6 +44,28 @@ def test_usage_scope_counts_a_search_turn():
     assert turn.models == ["gpt-4o-mini", "text-embedding-3-small"]
 
 
+def test_usage_scope_tags_feature_rerank_completion():
+    with usage.usage_scope() as turn:
+        usage.record_completion("gpt-4o-mini", 100, 10)
+        usage.record_embedding("text-embedding-3-small", 20)
+        usage.record_completion("gpt-5-nano-2025-08-07", 1000, 100, purpose="feature_rerank")
+        usage.record_completion("gpt-4o-mini", 100, 10)
+    assert turn.chat_completions == 3
+    assert turn.feature_reranks == 1
+
+    record = turn_log.log_turn(
+        session_id="s1",
+        turn_id="t1",
+        intent="recommendation_request",
+        category="Enclosed",
+        latency_ms=10,
+        turn_outcome={"search_ran": True},
+        usage=turn,
+    )
+    assert record["tools_fired"] == ["search", "feature_rerank"]
+    assert record["llm_calls"]["feature_reranks"] == 1
+
+
 def test_scopes_do_not_leak_into_each_other():
     with usage.usage_scope() as first:
         usage.record_completion("m", 1, 1)

@@ -5,6 +5,12 @@ import logging
 import pytest
 
 from src.search import pinecone_search as search
+from src.search.feature_ranker import (
+    CandidateFeatureAssessment,
+    FeatureMatch,
+    FeatureRerankOutput,
+    ValidatedFeatureRerank,
+)
 
 
 def _listing(
@@ -62,7 +68,7 @@ def test_feature_match_dominates_closer_dimension_without_dropping_candidate():
     feature_debug = next(x for x in debug["candidates"] if x["url"] == "feature")
     assert feature_debug["feature_coverage"] == 1.0
     assert feature_debug["fit_position"] == 2
-    assert feature_debug["final_score"] == pytest.approx(0.8)
+    assert feature_debug["final_score"] == pytest.approx(0.85)
 
 
 def test_dimension_failure_remains_eligible_in_combined_pool():
@@ -322,6 +328,11 @@ def test_feature_search_reranks_full_pinecone_pool_before_result_limit(monkeypat
     fake_index = FakeIndex()
     monkeypatch.setattr(search, "_embed", lambda text: [0.1, 0.2])
     monkeypatch.setattr(search, "_pinecone_index", lambda: fake_index)
+    monkeypatch.setattr(
+        search,
+        "rank_non_metadata_features",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline fallback")),
+    )
 
     result = search.search_pinecone_listing_result(
         category="Equipment",
@@ -336,6 +347,122 @@ def test_feature_search_reranks_full_pinecone_pool_before_result_limit(monkeypat
     assert result.match_analysis["candidate_count"] == 3
     assert [item["url"] for item in result.listings] == ["feature", "closest"]
     assert result.make_debug["reason"] == "feature_order_preserved"
+
+
+def _semantic_result(listings: list[dict], requested: list[str], matched_urls: set[str]):
+    assessments = []
+    evidence_by_id = {}
+    for position, listing in enumerate(listings, 1):
+        candidate_id = f"C{position:03d}"
+        matched = listing["url"] in matched_urls
+        evidence = str(listing.get("match_evidence_text") or listing.get("title") or "")
+        assessments.append(
+            CandidateFeatureAssessment(
+                candidate_id=candidate_id,
+                feature_matches=[
+                    FeatureMatch(
+                        requested_feature=requested[0],
+                        matched=matched,
+                        evidence=evidence if matched else None,
+                        reason="semantic equivalent" if matched else "no supporting evidence",
+                    )
+                ],
+                reasoning_summary="grounded assessment",
+            )
+        )
+        evidence_by_id[candidate_id] = evidence
+    output = FeatureRerankOutput(
+        ranked_candidate_ids=[item.candidate_id for item in assessments],
+        assessments=assessments,
+    )
+    return ValidatedFeatureRerank(
+        output=output,
+        assessments_by_id={item.candidate_id: item for item in assessments},
+        semantic_rank_by_id={item.candidate_id: rank for rank, item in enumerate(assessments, 1)},
+        evidence_by_id=evidence_by_id,
+        model="gpt-5-nano-2025-08-07",
+        reasoning_effort="medium",
+        latency_ms=12.0,
+        request_id="req-test",
+    )
+
+
+def test_semantic_feature_score_is_85_percent_and_unmatched_candidate_gets_zero_feature_component():
+    unmatched_best_fit = _listing("best-fit", length="20 ft")
+    semantic_match = _listing("abbreviation", length="30 ft")
+    semantic_match["match_evidence_text"] = "Title: Enclosed trailer w/insl"
+    listings = [unmatched_best_fit, semantic_match]
+
+    ranked, debug = search._combined_feature_fit_rerank(
+        listings,
+        requested_features=["insulated"],
+        required_length_ft=20.0,
+        required_payload_lbs=None,
+        required_width_ft=None,
+        required_height_ft=None,
+        metadata_filter={"category": {"$eq": "Enclosed"}},
+        query_text="Category: Enclosed | Details: insulated",
+        semantic_rerank=_semantic_result(listings, ["insulated"], {"abbreviation"}),
+    )
+
+    assert [item["url"] for item in ranked] == ["abbreviation", "best-fit"]
+    matched = next(item for item in debug["candidates"] if item["url"] == "abbreviation")
+    unmatched = next(item for item in debug["candidates"] if item["url"] == "best-fit")
+    assert matched["feature_coverage"] == 1.0
+    assert matched["final_score"] >= 0.85
+    assert unmatched["feature_coverage"] == 0.0
+    assert unmatched["final_score"] == pytest.approx(0.15)
+    assert debug["feature_match_mode"] == "gpt_semantic"
+    assert debug["semantic_request_id"] == "req-test"
+
+
+def test_semantic_multiple_features_use_evidence_supported_partial_coverage():
+    listing = _listing("partial")
+    requested = ["insulated", "air conditioning"]
+    assessment = CandidateFeatureAssessment(
+        candidate_id="C001",
+        feature_matches=[
+            FeatureMatch(
+                requested_feature="insulated",
+                matched=True,
+                evidence="w/insl",
+                reason="Catalog abbreviation for insulation.",
+            ),
+            FeatureMatch(
+                requested_feature="air conditioning",
+                matched=False,
+                evidence=None,
+                reason="No A/C evidence.",
+            ),
+        ],
+        reasoning_summary="One of two requested features is supported.",
+    )
+    output = FeatureRerankOutput(ranked_candidate_ids=["C001"], assessments=[assessment])
+    semantic = ValidatedFeatureRerank(
+        output=output,
+        assessments_by_id={"C001": assessment},
+        semantic_rank_by_id={"C001": 1},
+        evidence_by_id={"C001": "w/insl"},
+        model="gpt-5-nano-2025-08-07",
+        reasoning_effort="medium",
+        latency_ms=10.0,
+        request_id="req-partial",
+    )
+
+    _, debug = search._combined_feature_fit_rerank(
+        [listing],
+        requested_features=requested,
+        required_length_ft=None,
+        required_payload_lbs=None,
+        required_width_ft=None,
+        required_height_ft=None,
+        metadata_filter=None,
+        query_text="Details: insulated; air conditioning",
+        semantic_rerank=semantic,
+    )
+
+    assert debug["candidates"][0]["feature_coverage"] == 0.5
+    assert debug["candidates"][0]["final_score"] == pytest.approx(0.575)
 
 
 def test_hard_metadata_filters_are_unchanged_for_feature_search_inputs():

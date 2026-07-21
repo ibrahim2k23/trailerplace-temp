@@ -37,6 +37,12 @@ class Settings:
     pinecone_index_name: str = "trailerplace-listings"
     search_top_k: int = 50
     search_max_recommendations: int = 5
+    feature_llm_rerank_enabled: bool = True
+    feature_rerank_model: str = "gpt-5-nano-2025-08-07"
+    feature_rerank_reasoning_effort: str = "medium"
+    feature_rerank_timeout_seconds: float = 60.0
+    feature_rerank_weight: float = 0.85
+    feature_fit_weight: float = 0.15
     rerank_enabled: bool = True
     rerank_warn_ratio: float = 1.35
     rerank_extreme_ratio: float = 1.9
@@ -90,7 +96,13 @@ class Settings:
             pinecone_api_key=os.getenv("PINECONE_API_KEY", ""),
             pinecone_index_name=os.getenv("PINECONE_INDEX_NAME", "trailerplace-listings"),
             search_top_k=_int(os.getenv("SEARCH_TOP_K"), 50),
-            search_max_recommendations=_int(os.getenv("SEARCH_MAX_RECOMMENDATIONS"), 6),
+            search_max_recommendations=_int(os.getenv("SEARCH_MAX_RECOMMENDATIONS"), 5),
+            feature_llm_rerank_enabled=_bool(os.getenv("FEATURE_LLM_RERANK_ENABLED"), True),
+            feature_rerank_model=os.getenv("FEATURE_RERANK_MODEL", "gpt-5-nano-2025-08-07"),
+            feature_rerank_reasoning_effort=os.getenv("FEATURE_RERANK_REASONING_EFFORT", "medium"),
+            feature_rerank_timeout_seconds=_float(os.getenv("FEATURE_RERANK_TIMEOUT_SECONDS"), 60.0),
+            feature_rerank_weight=_float(os.getenv("FEATURE_RERANK_WEIGHT"), 0.85),
+            feature_fit_weight=_float(os.getenv("FEATURE_FIT_WEIGHT"), 0.15),
             rerank_enabled=_bool(os.getenv("RERANK_ENABLED"), True),
             rerank_warn_ratio=_float(os.getenv("RERANK_WARN_RATIO"), 1.35),
             rerank_extreme_ratio=_float(os.getenv("RERANK_EXTREME_RATIO"), 1.9),

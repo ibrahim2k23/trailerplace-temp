@@ -1,8 +1,9 @@
 """Per-turn LLM call/token accounting (M9 §3).
 
-The cost audit asserts the Locked Decision "exactly 2 LLM calls per normal turn"
-(Analyze + Respond), +1 embedding on Pinecone search turns, +0 on inventory-lookup
-turns. To assert that from local logs we have to count the calls where they happen.
+The cost audit asserts 2 LLM calls per normal turn (Analyze + Respond), with one
+additional tagged completion only when semantic feature reranking runs. Pinecone
+search turns add one embedding; inventory-lookup turns add no extra calls. To
+assert that from local logs we have to count the calls where they happen.
 
 A turn is a contextvar scope: `usage_scope()` installs a fresh `TurnUsage`, the
 OpenAI client records each chat completion into it, and `pinecone_search._embed`
@@ -25,6 +26,7 @@ class TurnUsage:
     """Counters for one /chat turn."""
 
     chat_completions: int = 0
+    feature_reranks: int = 0
     embeddings: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -59,11 +61,19 @@ def current_usage() -> TurnUsage | None:
     return _current.get()
 
 
-def record_completion(model: str, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+def record_completion(
+    model: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    *,
+    purpose: str | None = None,
+) -> None:
     usage = _current.get()
     if usage is None:
         return
     usage.chat_completions += 1
+    if purpose == "feature_rerank":
+        usage.feature_reranks += 1
     usage.prompt_tokens += int(prompt_tokens or 0)
     usage.completion_tokens += int(completion_tokens or 0)
     if model and model not in usage.models:

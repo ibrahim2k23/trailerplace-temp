@@ -89,6 +89,9 @@ def log_turn(
 ) -> dict[str, Any]:
     """Emit (and return) one turn record."""
     _ensure_file_handler()
+    fired = tools_fired(turn_outcome or {})
+    if usage is not None and int(getattr(usage, "feature_reranks", 0) or 0):
+        fired.append("feature_rerank")
     record: dict[str, Any] = {
         "event": "chat_turn",
         "session_id": session_id,
@@ -96,7 +99,7 @@ def log_turn(
         "intent": intent,
         "category": category,
         "latency_ms": round(float(latency_ms), 2),
-        "tools_fired": tools_fired(turn_outcome or {}),
+        "tools_fired": fired,
         "emails_sent": list((turn_outcome or {}).get("emails_sent") or []),
         "llm_calls": usage.as_dict() if usage is not None else None,
     }

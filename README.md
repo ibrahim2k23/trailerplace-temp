@@ -141,6 +141,11 @@ non-search turn.
 | `PINECONE_INDEX_NAME` | `trailerplace-listings` | Index name. |
 | `SEARCH_TOP_K` | `50` | Candidates fetched per query before rerank. |
 | `SEARCH_MAX_RECOMMENDATIONS` | `5` | Cards shown after rerank. |
+| `FEATURE_LLM_RERANK_ENABLED` | `true` | Use evidence-grounded GPT reranking only when non-metadata features are present. |
+| `FEATURE_RERANK_MODEL` | `gpt-5-nano-2025-08-07` | Pinned structured-output feature reranker. |
+| `FEATURE_RERANK_REASONING_EFFORT` | `medium` | Feature-rerank reasoning effort; set `high` after latency evaluation if needed. |
+| `FEATURE_RERANK_TIMEOUT_SECONDS` | `60` | Timeout for the single feature-rerank request. |
+| `FEATURE_RERANK_WEIGHT` / `FEATURE_FIT_WEIGHT` | `0.85` / `0.15` | Semantic feature coverage and unchanged fit-order blend. |
 | `RERANK_ENABLED` | `true` | Fit rerank (length-first, no under-length). |
 | `RERANK_WARN_RATIO` / `RERANK_EXTREME_RATIO` | `1.35` / `1.9` | Oversize penalties. |
 | `RERANK_LENGTH_WEIGHT` / `RERANK_MISSING_DIM_PENALTY` | `8.0` / `0.35` | Rerank weights. |
