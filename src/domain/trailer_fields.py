@@ -159,16 +159,16 @@ _SPECS: dict[str, TrailerFieldSpec] = {
 
     "Roll Off": TrailerFieldSpec(
         category="Roll Off",
-        required=["package_scope", "bin_size"],
+        required=[ "bin_size"], #"package_scope",
         optional=["deck_style", "cdl_concern"],
         questions={
-            "package_scope": "Are you looking for just the trailer, just bins, or the trailer-and-bins package?",
+            #"package_scope": "Are you looking for just the trailer, just bins, or the trailer-and-bins package?",
             "bin_size":      "What size bins are you needing (e.g. 10 yd, 20 yd)?",
             "deck_style":    "Do you prefer a step-deck or standard deck?",
             "cdl_concern":   "Is staying under CDL weight thresholds a concern for you?",
         },
         answer_guidance={
-            "package_scope": "Store whether the customer wants only the trailer, only bins, or the full trailer-and-bins package.",
+            #"package_scope": "Store whether the customer wants only the trailer, only bins, or the full trailer-and-bins package.",
             "bin_size": (
                 "Store the requested bin size, including cubic-yard wording such as 10 yd or 20 yd. "
                 "For Pinecone, map its numeric value directly to trailer length_ft: 15 yd means length_ft='15 ft', "
