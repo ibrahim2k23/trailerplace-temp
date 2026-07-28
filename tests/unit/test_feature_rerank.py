@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
-from src.search import pinecone_search as search
+from src.search import listing_search as search
 from src.search.feature_ranker import (
     CandidateFeatureAssessment,
     FeatureMatch,
@@ -242,7 +243,7 @@ def test_retain_all_false_still_culls_undersize_candidates():
     assert debug["retained_candidate_count"] == 1
 
 
-def test_combined_debug_logs_contain_cosine_features_fit_and_rank(caplog):
+def test_combined_debug_logs_contain_features_fit_and_rank(caplog):
     caplog.set_level(logging.INFO, logger=search.__name__)
     _combined(
         [_listing("logged", features=["electric winch"], score=0.87)],
@@ -251,7 +252,6 @@ def test_combined_debug_logs_contain_cosine_features_fit_and_rank(caplog):
 
     text = caplog.text
     assert "feature_fit_candidate" in text
-    assert "pinecone_cosine_similarity" in text
     assert "feature_matches" in text
     assert "fit_order_score" in text
     assert "rank_movement" in text
@@ -261,8 +261,8 @@ def test_combined_debug_logs_contain_cosine_features_fit_and_rank(caplog):
 def test_public_search_results_strip_internal_features_and_evidence(monkeypatch):
     monkeypatch.setattr(
         search,
-        "search_pinecone_listing_result",
-        lambda **kwargs: search.PineconeListingSearchResult(
+        "search_listing_result",
+        lambda **kwargs: search.ListingSearchResult(
             listings=[
                 {
                     "title": "Trailer",
@@ -276,74 +276,56 @@ def test_public_search_results_strip_internal_features_and_evidence(monkeypatch)
         ),
     )
 
-    result = search.search_pinecone_listings(category="Utility", slots={})
+    result = search.search_listings(category="Utility", slots={})
     assert result == [{"title": "Trailer", "url": "u1"}]
 
 
-def test_feature_search_reranks_full_pinecone_pool_before_result_limit(monkeypatch):
-    class FakeIndex:
-        def __init__(self):
-            self.query_args = None
+def _row(**fields):
+    """A TrailerListingRow stub carrying only what _row_to_listing reads."""
+    defaults = {
+        "title": "", "url": "", "condition": None, "category": "", "subcategory": None,
+        "make": "", "color": None, "hitch_type": None, "price": None, "price_display": None,
+        "year": None, "model": None, "trim": None, "stock_number": None,
+        "length": None, "width": None, "height": None, "axles": None, "gvwr": None,
+        "payload_capacity": None, "trailer_material": None, "floor": None,
+        "features": [], "match_evidence_text": "",
+    }
+    return SimpleNamespace(**{**defaults, **fields})
 
-        def query(self, **kwargs):
-            self.query_args = kwargs
-            return {
-                "matches": [
-                    {
-                        "score": 0.99,
-                        "metadata": {
-                            "title": "closest",
-                            "url": "closest",
-                            "category": "Equipment",
-                            "make": "Diamond C",
-                            "length": "20 ft",
-                            "features": [],
-                        },
-                    },
-                    {
-                        "score": 0.88,
-                        "metadata": {
-                            "title": "feature",
-                            "url": "feature",
-                            "category": "Equipment",
-                            "make": "P&C",
-                            "length": "30 ft",
-                            "features": ["spring-assisted rear ramp gate"],
-                        },
-                    },
-                    {
-                        "score": 0.77,
-                        "metadata": {
-                            "title": "third",
-                            "url": "third",
-                            "category": "Equipment",
-                            "make": "Iron Bull Trailers",
-                            "length": "22 ft",
-                            "features": [],
-                        },
-                    },
-                ]
-            }
 
-    fake_index = FakeIndex()
-    monkeypatch.setattr(search, "_embed", lambda text: [0.1, 0.2])
-    monkeypatch.setattr(search, "_pinecone_index", lambda: fake_index)
+def test_feature_search_reranks_full_candidate_pool_before_result_limit(monkeypatch):
+    """Every filter match reaches the reranker, and the limit applies only at the end."""
+    captured = {}
+
+    def fake_fetch(filters):
+        captured["filters"] = filters
+        return [
+            _row(title="closest", url="closest", category="Equipment",
+                 make="Diamond C", length="20 ft", features=[]),
+            _row(title="feature", url="feature", category="Equipment",
+                 make="P&C", length="30 ft", features=["spring-assisted rear ramp gate"]),
+            _row(title="third", url="third", category="Equipment",
+                 make="Iron Bull Trailers", length="22 ft", features=[]),
+        ]
+
+    monkeypatch.setattr(search, "fetch_listings", fake_fetch)
     monkeypatch.setattr(
         search,
         "rank_non_metadata_features",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline fallback")),
     )
 
-    result = search.search_pinecone_listing_result(
+    result = search.search_listing_result(
         category="Equipment",
         slots={"haul_length_ft": 20.0},
         metadata_filters={"length_ft": 20.0},
         requested_features=["ramp gate"],
-        top_k=50,
         max_recommendations=2,
     )
 
-    assert fake_index.query_args["top_k"] == 50
+    # The gates reached SQL; all three rows were scored; only the limit trimmed.
+    assert ("category", "eq", "Equipment") in captured["filters"]
+    assert ("length_ft_num", "gte", 20.0) in captured["filters"]
     assert result.match_analysis["candidate_count"] == 3
     assert [item["url"] for item in result.listings] == ["feature", "closest"]
     assert result.make_debug["reason"] == "feature_order_preserved"
@@ -467,14 +449,34 @@ def test_semantic_multiple_features_use_evidence_supported_partial_coverage():
     assert debug["candidates"][0]["final_score"] == pytest.approx(0.575)
 
 
-def test_hard_metadata_filters_are_unchanged_for_feature_search_inputs():
-    filters = search._metadata_filter(
+def test_hard_filters_are_unchanged_for_feature_search_inputs():
+    filters = search._listing_filters(
         "Equipment",
         {"hitch_type": "Gooseneck", "haul_length_ft": 20.0},
         {"make": "Diamond C", "length_ft": 20.0},
     )
-    clauses = filters["$and"]
-    assert {"category": {"$eq": "Equipment"}} in clauses
-    assert any("make" in clause for clause in clauses)
-    assert {"hitch_type": {"$eq": "Gooseneck"}} in clauses
-    assert {"length_ft_num": {"$gte": 20.0}} in clauses
+    assert ("category", "eq", "Equipment") in filters
+    assert any(column == "make" and op == "in" for column, op, _ in filters)
+    assert ("hitch_type", "eq", "Gooseneck") in filters
+    assert ("length_ft_num", "gte", 20.0) in filters
+
+
+def test_category_only_relaxation_keeps_only_the_category_gate():
+    args = (
+        "Equipment",
+        {"hitch_type": "Gooseneck", "haul_length_ft": 20.0},
+        {"make": "Diamond C", "length_ft": 20.0},
+    )
+    assert search._listing_filters(*args, category_only=True) == [
+        ("category", "eq", "Equipment")
+    ]
+    # ...and that difference is exactly what triggers the relaxed retry.
+    assert search.narrowing_filters_present(*args) is True
+    assert search.narrowing_filters_present("Equipment", {}, {}) is False
+
+
+def test_make_filter_matches_every_workbook_spelling_of_the_brand():
+    """The $in over brand aliases has to survive as a SQL IN, or brand search breaks."""
+    filters = search._listing_filters("Equipment", {}, {"make": "Diamond C"})
+    values = next(value for column, op, value in filters if column == "make")
+    assert "Diamond C" in values

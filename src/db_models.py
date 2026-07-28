@@ -5,7 +5,19 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -76,6 +88,84 @@ class ChatbotTurn(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     conversation: Mapped[ChatbotConversation] = relationship(back_populates="turns")
+
+
+class TrailerListingRow(Base):
+    """Searchable inventory, one row per workbook listing.
+
+    Replaces the Pinecone index: the five hard gates that used to be metadata
+    filters ($eq on category/make/hitch_type/subcategory, $gte on
+    length_ft_num) are plain columns here, and search is a SELECT rather than a
+    vector query. There is no embedding column — ranking is handled entirely by
+    the fit reranker (dimensions) and the feature reranker (gpt-5-nano).
+
+    Every column but the primary key is nullable. Pinecone stripped nulls and
+    empty strings from metadata before upsert, so any field could be absent on
+    any vector, and the read path already coalesces each one. A NOT NULL here
+    would reject workbook rows the old pipeline accepted.
+    """
+
+    __tablename__ = "trailer_listings"
+    __table_args__ = (
+        Index("ix_trailer_listings_category", "category"),
+        Index("ix_trailer_listings_category_make", "category", "make"),
+        Index("ix_trailer_listings_category_length", "category", "length_ft_num"),
+        Index("ix_trailer_listings_url", "url", unique=True),
+    )
+
+    # build_vector_id()'s value, reused so ingest stays idempotent across runs.
+    listing_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    stock_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    condition: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subcategory: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    make: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hitch_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    price_display: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # Text, not integer: Pinecone stored year as a string and the search path
+    # passes it through to the card untouched.
+    year: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    trim: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Raw display strings ("24 ft 0 in", "9990 lbs") beside their parsed
+    # numerics. The fit reranker re-parses the raw strings; the numerics back
+    # the SQL gates. Both are kept so neither side has to guess.
+    length: Mapped[str | None] = mapped_column(Text, nullable=True)
+    width: Mapped[str | None] = mapped_column(Text, nullable=True)
+    height: Mapped[str | None] = mapped_column(Text, nullable=True)
+    axles: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gvwr: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_capacity: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    length_ft_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    width_ft_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    height_ft_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gvwr_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    trailer_material: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    floor: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    features: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # The only evidence the feature reranker (gpt-5-nano) and its deterministic
+    # fallback ever see. Capped at MATCH_EVIDENCE_TEXT_MAX_CHARS by ingest.
+    match_evidence_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # SHA-256 of the canonical row payload; drives skip-unchanged on re-ingest.
+    # NULL simply forces that row to be rewritten.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    info_json_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class ChatbotOutbox(Base):

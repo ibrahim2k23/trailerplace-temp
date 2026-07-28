@@ -41,11 +41,27 @@ def get_session_factory() -> sessionmaker:
 
 
 def ensure_schema() -> None:
+    """Create any table declared in the models but missing from the database.
+
+    create_all defaults to checkfirst=True, so existing tables are left exactly
+    as they are — no column, index or row is touched.
+    """
     Base.metadata.create_all(get_engine())
 
 
 def run_migrations() -> None:
-    """Apply Alembic migrations up to head (M8: boot-time when DB_AUTO_CREATE=1).
+    """Bring the database up to date (M8: boot-time when DB_AUTO_CREATE=1).
+
+    Two steps, because neither alone is sufficient:
+
+    1. ``alembic upgrade head`` applies outstanding revisions. Every revision is
+       written to skip objects that already exist, so this is safe on a database
+       whose tables were created by create_all() and never stamped.
+    2. ``ensure_schema()`` then creates anything still missing. Alembic alone
+       cannot do this: once alembic_version reads head it considers its work
+       done, so a table dropped afterwards would never come back.
+
+    Together: whatever is missing gets created, whatever exists is left alone.
 
     alembic/env.py resolves the engine through get_engine(), so no URL is passed here.
     """
@@ -53,6 +69,7 @@ def run_migrations() -> None:
     from alembic.config import Config
 
     command.upgrade(Config(str(_ALEMBIC_INI)), "head")
+    ensure_schema()
 
 
 def ping() -> bool:

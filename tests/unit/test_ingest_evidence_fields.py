@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from src.search.ingest import build_flattened_embedding_text
+from src.search.ingest import build_flattened_evidence_text
 
 
-def test_all_flattened_info_and_specification_fields_enter_embedding_text():
-    text = build_flattened_embedding_text(
+def test_all_flattened_info_and_specification_fields_enter_evidence_text():
+    text = build_flattened_evidence_text(
         {
             "make": "Cargo Craft",
             "length": "16 ft",
@@ -24,8 +24,8 @@ def test_all_flattened_info_and_specification_fields_enter_embedding_text():
     assert "Features: insulated walls" in text
 
 
-def test_msrp_remains_excluded_from_embedding_text():
-    text = build_flattened_embedding_text(
+def test_msrp_remains_excluded_from_evidence_text():
+    text = build_flattened_evidence_text(
         {"price": "$10,000", "msrp": "$15,000"}, "Trailer", []
     )
     assert "Price: $10,000" in text

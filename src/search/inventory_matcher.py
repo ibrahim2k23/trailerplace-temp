@@ -6,7 +6,7 @@ identifier extraction is now the Analyze LLM's job (``TurnAnalysis.inventory_loo
 and reply wording is the Respond LLM's job (both already built in M3). This module
 is a pure function of identifiers: given year/make/model_text/stock_number it
 fuzzy-matches against the dealership Excel catalog and returns card dicts shaped
-identically to Pinecone search results.
+identically to inventory search results.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Same depth as src/domain/brands.py (src/search/inventory_matcher.py -> search -> src -> root).
 _ROOT = Path(__file__).resolve().parents[2]
-# The SAME workbook (and env override) the Pinecone ingest and the prompts read — direct
+# The SAME workbook (and env override) the ingest and the prompts read — direct
 # lookups must quote the same inventory the search returns and the prompts advertise.
 # prepare_inventory backfills any column this workbook lacks, so the schema difference
 # from the old listings_final_v5.xlsx source is harmless.
@@ -234,7 +234,7 @@ def _row_to_listing(row: pd.Series | dict[str, Any], score: float | None = None)
         "gvwr": _clean_scalar(get("gvwr")),
         "payload_capacity": _clean_scalar(get("payload_capacity")),
         "hitch_type": _clean_scalar(get("hitch_type")),
-        # Card-shape parity with Pinecone results (milestone.md M6 step 6).
+        # Card-shape parity with search results (milestone.md M6 step 6).
         "color": _clean_scalar(get("color")),
         "axles": _clean_scalar(get("axles")),
         "material": _clean_scalar(get("trailer_material")),

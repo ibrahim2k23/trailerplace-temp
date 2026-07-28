@@ -890,7 +890,7 @@ def _store_dimension_pair(state: dict[str, Any], category: str, slot_name: str, 
 def _store_slot_answer(state: dict[str, Any], category: str, slot_name: str, raw_answer: Any) -> None:
     """Store one slot answer.
 
-    For a slot that maps to Pinecone metadata target(s) (e.g. cargo_size -> length_ft,
+    For a slot that maps to search filter target(s) (e.g. cargo_size -> length_ft,
     width_ft), parse the answer for each target and store the NUMBER under that target
     slot key — never a re-encoded "key=value" string. The slot itself holds its answer
     normalized to its own kind: a numeric slot keeps a number (a range resolves to its
@@ -1270,7 +1270,7 @@ def _apply_requirement_changes(state: dict[str, Any], analysis: TurnAnalysis) ->
 
 
 def _search_inputs(state: dict[str, Any]) -> str:
-    """Everything a Pinecone search is built from, as a comparable string."""
+    """Everything a listing search is built from, as a comparable string."""
     return json.dumps(
         {
             "category": state.get("category"),
@@ -1304,6 +1304,6 @@ def apply_analysis_to_state(state: dict[str, Any]) -> dict[str, Any]:
         # Something a search is built from moved, so the results on screen are stale. This
         # stays set until a search actually runs (the change may land several turns before
         # qualification finishes), and it is what keeps chat-only turns — a listing the
-        # customer likes, their email address — from re-querying Pinecone for nothing.
+        # customer likes, their email address — from re-running the search for nothing.
         state["search_pending"] = True
     return state

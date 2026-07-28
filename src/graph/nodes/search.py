@@ -5,12 +5,14 @@ from typing import Any
 
 from src.config import settings
 from src.domain.slot_map import normalize_slot_targets, sanitize_non_metadata_features
-from src.search.pinecone_search import narrowing_filters_present, search_pinecone_listings
+from src.search.listing_search import narrowing_filters_present, search_listings
 
 logger = logging.getLogger(__name__)
 
-# The hard Pinecone gates, in the words a customer would recognise them by. Everything else they
+# The hard SQL gates, in the words a customer would recognise them by. Everything else they
 # told us (width, payload, features) is already a ranking signal rather than a gate.
+# Add a label here whenever a new column becomes a filter in listing_search._listing_filters,
+# so a relaxed retry can still tell the customer what it stopped filtering on.
 _HARD_FILTER_LABELS = {
     "make": "brand",
     "hitch_type": "hitch type",
@@ -28,12 +30,12 @@ def _relaxed_filter_labels(state: dict, metadata_filters: dict[str, Any]) -> lis
 
 
 def _build_metadata_filters(state: dict) -> dict[str, Any]:
-    """Translate answered slots into Pinecone metadata filter targets.
+    """Translate answered slots into SQL filter targets.
 
     Only category/make/hitch_type/subcategory/min-length become hard filters
-    here; width/payload/height stay in ``slots`` for pinecone_search's fit
-    rerank to weigh but are never passed as Pinecone `$eq`/`$gte` filters
-    themselves (milestone.md M6 step 2).
+    here; width/payload/height stay in ``slots`` for listing_search's fit
+    rerank to weigh but are never gated on in the query itself
+    (milestone.md M6 step 2).
     """
     category = state.get("category") or ""
     slots = state.get("slots", {}) or {}
@@ -60,7 +62,8 @@ def search_node(state: dict) -> dict:
     slots = state.get("slots", {}) or {}
     metadata_filters = _build_metadata_filters(state)
     # Every non-searchable preference they have voiced so far (sliding gates, tandem axle, ramp),
-    # not just this turn's — the embedding query is the customer's full spec, not their last line.
+    # not just this turn's — the feature reranker scores the customer's full spec, not their
+    # last line.
     requested_features, _ = sanitize_non_metadata_features(
         state.get("non_metadata_features", []) or []
     )
@@ -74,13 +77,12 @@ def search_node(state: dict) -> dict:
         state.get("session_id"), category, metadata_filters, requested_features, len(shown_urls),
     )
 
-    results = search_pinecone_listings(
+    results = search_listings(
         category=category,
         slots=slots,
         metadata_filters=metadata_filters,
         requested_features=requested_features,
         already_shown_urls=shown_urls,
-        top_k=settings.search_top_k,
         max_recommendations=settings.search_max_recommendations,
     )
 
@@ -93,13 +95,12 @@ def search_node(state: dict) -> dict:
             "TOOL search: session=%s zero results with make filter, relaxing and retrying filters=%s",
             state.get("session_id"), relaxed_filters,
         )
-        results = search_pinecone_listings(
+        results = search_listings(
             category=category,
             slots=slots,
             metadata_filters=relaxed_filters,
             requested_features=requested_features,
             already_shown_urls=shown_urls,
-            top_k=settings.search_top_k,
             max_recommendations=settings.search_max_recommendations,
         )
         brand_relaxed = True
@@ -107,9 +108,9 @@ def search_node(state: dict) -> dict:
     # Still nothing. Every hard filter is all-or-nothing — one 24 ft minimum, one hitch type, one
     # brand — so a single unmet requirement empties the screen even when the category is full of
     # trailers the customer would happily look at. Drop the gates, keep the CATEGORY, and search
-    # again: their requirements survive in the embedding query and the fit rerank, so what comes
-    # back is the closest thing we have, ordered by how close. The reply presents it as
-    # alternatives rather than as matches.
+    # again: their size requirements survive in the fit rerank and their feature requests in the
+    # feature rerank, so what comes back is ordered by how close it gets. The reply presents it
+    # as alternatives rather than as matches.
     #
     # The non-metadata features are NOT dropped here. They are the customer's standing preferences
     # (sliding gates, a ramp), they only ever ranked rather than filtered, and they are cleared in
@@ -120,13 +121,12 @@ def search_node(state: dict) -> dict:
             "TOOL search: session=%s zero results, relaxing every filter except category=%r and retrying",
             state.get("session_id"), category,
         )
-        results = search_pinecone_listings(
+        results = search_listings(
             category=category,
             slots=slots,
             metadata_filters=metadata_filters,
             requested_features=requested_features,
             already_shown_urls=shown_urls,
-            top_k=settings.search_top_k,
             max_recommendations=settings.search_max_recommendations,
             category_only_filters=True,
         )
@@ -156,7 +156,7 @@ def search_node(state: dict) -> dict:
 
     if results:
         filter_desc = ", ".join(f"{key}={value}" for key, value in metadata_filters.items())
-        description = f"Pinecone search — {len(results)} results — {category or 'Unknown'}"
+        description = f"Inventory search — {len(results)} results — {category or 'Unknown'}"
         if filter_desc:
             description += f" ({filter_desc})"
         outcome.setdefault("system_email_triggers", []).append(

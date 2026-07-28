@@ -1,8 +1,14 @@
-"""Pinecone semantic search for trailer listings (ported from the reference ``pinecone_search.py``).
+"""SQL search over the ``trailer_listings`` table.
 
-Logic is unchanged from the reference file; only import paths were updated to
-the new ``src.domain.*`` layout (M1 ported ``normalizer.py``/``units.py``/
-``make_aliases.py``/``make_inventory.py`` there).
+Replaces the former Pinecone vector search. The five hard gates that used to be
+metadata filters are now a SQL WHERE, and there is no embedding: every row that
+passes the filter is handed to the rerankers, which do all the ordering.
+
+Ranking responsibilities, in full:
+  * stated columns (category, make, hitch type, min length) -> the SQL filter
+  * dimensional fit (length/width/height/payload)           -> _rerank_listings_by_fit
+  * non-metadata features ("sliding gates", "insulated")    -> feature_ranker (gpt-5-nano)
+Nothing else is ranked, by design, so no similarity score is needed.
 """
 
 from __future__ import annotations
@@ -12,21 +18,19 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, Optional
 
-from openai import OpenAI
-from pinecone import Pinecone
 from rapidfuzz import fuzz
+from sqlalchemy import select
 
-from src import config
+from src import config, db
+from src.db_models import TrailerListingRow
 from src.domain.brands import make_filter_values
 from src.domain.make_aliases import MAKE_ALIASES as MAKE_ALIAS_MAP
-from src.llm import usage
 from src.domain.normalizer import normalize_category, normalize_hitch, normalize_subcategory
-# Single-sourced parsers (units.py) so query/rerank parse raw catalog strings the
-# same way ingest did when it wrote the index. _parse_number/_parse_length_ft are
-# kept as local aliases to avoid churning the many call sites.
+# Single-sourced parsers (units.py) so the rerank path parses raw catalog
+# strings the same way ingest did when it wrote the table. _parse_number and
+# _parse_length_ft are kept as local aliases to avoid churning the many call sites.
 from src.domain.units import (
     parse_length_ft as _parse_length_ft,
     parse_weight_lbs as _parse_number,
@@ -35,7 +39,6 @@ from src.search.feature_ranker import ValidatedFeatureRerank, rank_non_metadata_
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 RERANK_ENABLED = (os.getenv("RERANK_ENABLED") or "1").strip().lower() not in {
     "0",
     "false",
@@ -87,7 +90,7 @@ CATEGORY_MAKE_PREFERENCES: dict[str, list[str]] = {
 
 
 @dataclass
-class PineconeListingSearchResult:
+class ListingSearchResult:
     listings: list[dict[str, Any]]
     query_text: str
     metadata_filter: dict[str, Any] | None
@@ -99,66 +102,59 @@ class PineconeListingSearchResult:
 _ALLOWED_HITCH_TYPES = {"Gooseneck", "Bumper Pull"}
 
 
-@lru_cache(maxsize=1)
-def _openai_client() -> OpenAI:
-    return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
-
-@lru_cache(maxsize=1)
-def _pinecone_index():
-    pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-    index_name = os.getenv("PINECONE_INDEX_NAME", "trailerplace-listings").strip()
-    return pc.Index(index_name)
-
-
-def _embed(text: str) -> list[float]:
-    response = _openai_client().embeddings.create(model=EMBEDDING_MODEL, input=text)
-    # The one embedding a search turn is allowed to make (M9 cost audit).
-    tokens = getattr(response, "usage", None)
-    usage.record_embedding(EMBEDDING_MODEL, prompt_tokens=getattr(tokens, "prompt_tokens", 0) or 0)
-    return response.data[0].embedding
-
-
-def _metadata_filter(
+def _listing_filters(
     category: str | None,
     slots: dict[str, Any],
     metadata_filters: dict[str, Any] | None = None,
     category_only: bool = False,
-) -> dict[str, Any]:
+) -> list[tuple[str, str, Any]]:
+    """The hard gates, as ``(column, op, value)`` descriptors.
+
+    Descriptors rather than SQLAlchemy clauses so they stay comparable (see
+    narrowing_filters_present) and loggable. _to_sql_clauses turns them into
+    the actual WHERE.
+
+    To gate on another column the customer stated — colour, material, floor —
+    add a descriptor here and a label in search_node's _HARD_FILTER_LABELS so
+    the relaxation message names it. Two things to remember: compare through
+    the matching normalizer so the value lines up with what ingest wrote, and
+    note that ``col == value`` excludes NULL rows, so each new gate narrows the
+    result set and pushes more searches onto the relaxation ladder.
+    """
     metadata_filters = metadata_filters or {}
-    filters: list[dict[str, Any]] = []
+    filters: list[tuple[str, str, Any]] = []
     normalized_category = normalize_category(category) if category else None
     if category:
-        filters.append({"category": {"$eq": normalized_category}})
+        filters.append(("category", "eq", normalized_category))
 
     if category_only:
         # The last-resort pass: every hard filter but the category is dropped so we can show the
         # customer the closest alternatives instead of an empty screen. Their requirements are not
-        # thrown away — they still shape the embedding query and the fit rerank, so what comes back
-        # is ordered by how near it gets. Only the all-or-nothing $eq/$gte gates are gone.
-        return filters[0] if filters else {}
+        # thrown away — the fit rerank and the feature rerank still order what comes back by how
+        # near it gets. Only the all-or-nothing gates are gone.
+        return filters[:1]
 
     make_value = metadata_filters.get("make")
     if make_value:
         values = [value for value in make_filter_values(str(make_value)) if value]
-        if len(values) == 1:
-            filters.append({"make": {"$eq": values[0]}})
-        elif values:
-            filters.append({"make": {"$in": values}})
+        if values:
+            # make_filter_values returns every raw workbook spelling AND the
+            # normalized form of each, so this matches the normalized column.
+            filters.append(("make", "in", tuple(values)))
 
     hitch_value = metadata_filters.get("hitch_type") or slots.get("hitch_type")
     if hitch_value:
         hitch = normalize_hitch(str(hitch_value))
         if hitch in _ALLOWED_HITCH_TYPES:
-            filters.append({"hitch_type": {"$eq": hitch}})
+            filters.append(("hitch_type", "eq", hitch))
         else:
-            logger.info("pinecone_hitch_filter_rejected | value=%r | normalized=%r", hitch_value, hitch)
+            logger.info("listing_hitch_filter_rejected | value=%r | normalized=%r", hitch_value, hitch)
 
     subcategory_value = metadata_filters.get("subcategory")
     if normalized_category == "Aluminum" and subcategory_value:
         subcategory = normalize_subcategory(str(subcategory_value))
         if subcategory:
-            filters.append({"subcategory": {"$eq": subcategory}})
+            filters.append(("subcategory", "eq", subcategory))
 
     min_length = (
         _parse_length_ft(metadata_filters.get("length_ft"))
@@ -168,13 +164,34 @@ def _metadata_filter(
         or _parse_length_ft(slots.get("trailer_size"))
     )
     if min_length:
-        filters.append({"length_ft_num": {"$gte": min_length}})
+        filters.append(("length_ft_num", "gte", min_length))
 
+    return filters
+
+
+def _to_sql_clauses(filters: list[tuple[str, str, Any]]) -> list[Any]:
+    clauses = []
+    for column_name, op, value in filters:
+        column = getattr(TrailerListingRow, column_name)
+        if op == "eq":
+            clauses.append(column == value)
+        elif op == "in":
+            clauses.append(column.in_(list(value)))
+        elif op == "gte":
+            clauses.append(column >= value)
+        else:  # pragma: no cover - guards a typo in _listing_filters
+            raise ValueError(f"unsupported filter op: {op!r}")
+    return clauses
+
+
+def _filters_as_dict(filters: list[tuple[str, str, Any]]) -> dict[str, Any] | None:
+    """Readable form for logs, state and the API contract."""
     if not filters:
-        return {}
-    if len(filters) == 1:
-        return filters[0]
-    return {"$and": filters}
+        return None
+    rendered: dict[str, Any] = {}
+    for column_name, op, value in filters:
+        rendered[column_name] = list(value) if op == "in" else value
+    return rendered
 
 
 def narrowing_filters_present(
@@ -187,182 +204,82 @@ def narrowing_filters_present(
     If it does not, a category-only retry would run the identical query for a second time and come
     back just as empty — the category really has nothing left to show.
     """
-    full = _metadata_filter(category, slots, metadata_filters)
-    return full != _metadata_filter(category, slots, metadata_filters, category_only=True)
+    full = _listing_filters(category, slots, metadata_filters)
+    return full != _listing_filters(category, slots, metadata_filters, category_only=True)
 
 
-# The query vector is compared against listing vectors built by normalizer.build_embedding_text
-# ("Title | Make: X | Category: Livestock | Length: 24 ft 0 in | ... | Details: ..."), so the query
-# mirrors that shape: the customer's requirements as a spec sheet, not as chat.
-_SLOT_QUERY_LABELS: dict[str, str] = {
+_FILTER_LABELS = {
+    "category": "Category",
     "make": "Make",
-    "brand": "Make",
-    "subcategory": "Subcategory",
     "hitch_type": "Hitch Type",
-    "color": "Color",
-    "axles": "Axles",
-    "trailer_material": "Material",
-    "floor": "Floor",
-    "length_ft": "Length",
-    "trailer_length_ft": "Length",
-    "haul_length_ft": "Length",
-    "vehicle_length_ft": "Length",
-    "trailer_size": "Length",
-    "width_ft": "Width",
-    "trailer_width_ft": "Width",
-    "item_or_trailer_width_ft": "Width",
-    "height_ft": "Height",
-    "payload_lbs": "Payload Capacity",
-    "payload_need": "Payload Capacity",
-    "haul_weight_lbs": "Payload Capacity",
-    "total_weight": "Payload Capacity",
+    "subcategory": "Subcategory",
+    "length_ft_num": "Length",
 }
 
-_QUERY_LABEL_ORDER = [
-    "Make",
-    "Category",
-    "Subcategory",
-    "Hitch Type",
-    "Length",
-    "Width",
-    "Height",
-    "Payload Capacity",
-    "Color",
-    "Axles",
-    "Material",
-    "Floor",
-]
 
-_QUERY_LABEL_UNITS = {"Length": "ft", "Width": "ft", "Height": "ft", "Payload Capacity": "lbs"}
+def _filter_description(filters: list[tuple[str, str, Any]]) -> str:
+    """Human-readable rendering of the active gates, for logs and debug output.
 
-
-def _join_values(value: Any) -> str:
-    if isinstance(value, (list, tuple, set)):
-        return ", ".join(str(item).strip() for item in value if str(item or "").strip())
-    return str(value).strip()
-
-
-def _format_field_value(label: str, value: Any) -> str:
-    text = _join_values(value)
-    unit = _QUERY_LABEL_UNITS.get(label)
-    if not unit or not text:
-        return text
-    if isinstance(value, bool):
-        return text
-    if isinstance(value, (int, float)):
-        return f"{value:g} {unit}"
-    return f"{text} {unit}" if re.fullmatch(r"\d+(\.\d+)?", text) else text
-
-
-def _add_detail(details: list[str], text: str) -> None:
-    """Add a free-text preference, keeping the most specific phrasing of it.
-
-    Slot and feature lists overlap ("gate preferences: sliding gates" from a slot, "sliding
-    gates" from the feature list); repeating the same words dilutes the embedding.
+    Replaces the old embedding query text. Nothing consumes it as an input any
+    more — it exists so a search's behaviour is legible in the logs.
     """
-    text = text.strip(" ;,")
-    if not text:
-        return
-    lowered = text.lower()
-    if any(lowered in existing.lower() for existing in details):
-        return
-    details[:] = [existing for existing in details if existing.lower() not in lowered]
-    details.append(text)
-
-
-def _detail_phrase(key: str, value: Any) -> str:
-    text = _join_values(value)
-    if not text:
-        return ""
-    label = key.replace("_", " ").strip()
-    if not label or label.lower() in text.lower() or text.lower() in label.lower():
-        return text
-    return f"{label}: {text}"
-
-
-def _query_text(
-    category: str | None,
-    slots: dict[str, Any],
-    metadata_filters: dict[str, Any],
-    requested_features: list[str] | None = None,
-) -> str:
-    """Embed everything the customer asked for - and nothing else.
-
-    The raw user message is deliberately NOT prepended: it is one turn of chat ("20ft sounds
-    good to me"), it drowns the accumulated requirements in conversational filler, and every
-    requirement it does carry is already in slots/filters by the time we search.
-    """
-    fields: dict[str, str] = {}
-    details: list[str] = []
-
-    if category:
-        fields["Category"] = str(category).strip()
-
-    # Filters first, then slots: a filter is the resolved value, a slot may be the raw phrasing.
-    for source in (metadata_filters or {}, slots or {}):
-        for key, value in source.items():
-            if value in (None, "", [], {}):
-                continue
-            label = _SLOT_QUERY_LABELS.get(key)
-            if label:
-                text = _format_field_value(label, value)
-                if text:
-                    fields.setdefault(label, text)
-                continue
-            _add_detail(details, _detail_phrase(key, value))
-
-    for feature in requested_features or []:
-        _add_detail(details, str(feature or ""))
-
-    ordered = [label for label in _QUERY_LABEL_ORDER if fields.get(label)]
-    ordered += [label for label in fields if label not in _QUERY_LABEL_ORDER]
-    parts = [f"{label}: {fields[label]}" for label in ordered]
-    if details:
-        parts.append(f"Details: {'; '.join(details)}")
+    parts: list[str] = []
+    for column_name, op, value in filters:
+        label = _FILTER_LABELS.get(column_name, column_name.replace("_", " ").title())
+        if op == "in":
+            rendered = ", ".join(str(item) for item in value)
+        elif op == "gte":
+            rendered = f">= {value:g} ft" if column_name.endswith("_ft_num") else f">= {value}"
+        else:
+            rendered = str(value)
+        parts.append(f"{label}: {rendered}")
     return " | ".join(parts)
 
 
-def _clean_match(match: Any) -> dict[str, Any]:
-    metadata = dict(getattr(match, "metadata", None) or match.get("metadata", {}) or {})
-    score = getattr(match, "score", None)
-    if score is None and isinstance(match, dict):
-        score = match.get("score")
-    price = metadata.get("price_display") or metadata.get("price")
-    raw_features = metadata.get("features") or []
+def _row_to_listing(row: TrailerListingRow) -> dict[str, Any]:
+    """Flatten a table row into the card dict the rest of the app expects.
+
+    Key set and coalescing behaviour are unchanged from the Pinecone version:
+    every column is nullable, exactly as metadata fields were optional before.
+    """
+    price = float(row.price) if row.price is not None else None
+    raw_features = row.features or []
     if isinstance(raw_features, str):
         raw_features = [raw_features]
     return {
-        "title": metadata.get("title") or "",
-        "condition": metadata.get("condition") or "New",
-        "price": price,
-        "price_display": metadata.get("price_display") or (f"${metadata['price']:,.0f}" if metadata.get("price") else None),
-        "category": metadata.get("category") or "",
-        "subcategory": metadata.get("subcategory") or "",
-        "make": metadata.get("make") or "",
-        "model": metadata.get("model") or "",
-        "trim": metadata.get("trim") or "",
-        "stock_number": metadata.get("stock_number") or metadata.get("stock") or "",
-        "color": metadata.get("color") or "",
-        "hitch_type": metadata.get("hitch_type"),
-        "year": metadata.get("year"),
-        "length": metadata.get("length"),
-        "width": metadata.get("width"),
-        "height": metadata.get("height"),
-        "axles": metadata.get("axles"),
-        "gvwr": metadata.get("gvwr"),
-        "payload_capacity": metadata.get("payload_capacity"),
-        "material": metadata.get("trailer_material"),
-        "floor": metadata.get("floor"),
-        "url": metadata.get("url") or "",
-        "relevance_score": score,
-        # Kept only while ranking. search_pinecone_listings strips this internal
+        "title": row.title or "",
+        "condition": row.condition or "New",
+        "price": row.price_display or price,
+        "price_display": row.price_display or (f"${price:,.0f}" if price else None),
+        "category": row.category or "",
+        "subcategory": row.subcategory or "",
+        "make": row.make or "",
+        "model": row.model or "",
+        "trim": row.trim or "",
+        "stock_number": row.stock_number or "",
+        "color": row.color or "",
+        "hitch_type": row.hitch_type,
+        "year": row.year,
+        "length": row.length,
+        "width": row.width,
+        "height": row.height,
+        "axles": row.axles,
+        "gvwr": row.gvwr,
+        "payload_capacity": row.payload_capacity,
+        "material": row.trailer_material,
+        "floor": row.floor,
+        "url": row.url or "",
+        # No similarity score exists any more. Kept at 0.0 because it is the
+        # last term in both rerank sort keys, where a constant is a no-op.
+        "relevance_score": 0.0,
+        # Kept only while ranking. search_listings strips this internal
         # evidence before results enter conversation state or the API response.
         "features": [
             str(value).strip()
             for value in raw_features
             if str(value or "").strip()
         ],
-        "match_evidence_text": metadata.get("match_evidence_text") or "",
+        "match_evidence_text": row.match_evidence_text or "",
     }
 
 
@@ -761,7 +678,7 @@ def _rerank_listings_by_fit(
 
     # The legacy/no-feature path drops failing entries whenever a non-failing
     # option exists. Feature-aware search sets retain_all=True so every hard-
-    # filtered Pinecone candidate reaches the combined feature/fit scorer.
+    # filtered candidate reaches the combined feature/fit scorer.
     nonfailing = [e for e in entries if e["fail_count"] == 0]
     fallback_pool = entries if retain_all or not nonfailing else nonfailing
     ranked_entries = sorted(
@@ -958,7 +875,7 @@ def _combined_feature_fit_rerank(
     semantic_rerank: ValidatedFeatureRerank | None = None,
     semantic_fallback_reason: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Rank every hard-filtered Pinecone candidate with an 85/15 blend.
+    """Rank every hard-filtered candidate with an 85/15 blend.
 
     Unlike the legacy fit reranker, this never removes dimensionally failing
     candidates. Fit only supplies the secondary 15% ordering signal. When a
@@ -988,7 +905,7 @@ def _combined_feature_fit_rerank(
     fit_entries = fit_debug.get("fit_entries") or []
     if not fit_entries:
         # With no dimension/weight requirement, the existing order is the
-        # Pinecone cosine order, so it becomes the secondary fit-order signal.
+        # SQL fetch order, so it becomes the secondary fit-order signal.
         fit_entries = [
             {
                 "listing": listing,
@@ -1042,7 +959,7 @@ def _combined_feature_fit_rerank(
                 "candidate_id": candidate_id,
                 "fetch_pos": entry["fetch_pos"],
                 "fit_rank": fit_rank,
-                "pinecone_score": float(listing.get("relevance_score") or 0.0),
+                "base_score": float(listing.get("relevance_score") or 0.0),
                 "feature_coverage": round(feature_coverage, 6),
                 "fit_order_score": round(fit_order_score, 6),
                 "final_score": round(final_score, 6),
@@ -1065,7 +982,7 @@ def _combined_feature_fit_rerank(
             -item["final_score"],
             -item["feature_coverage"],
             item["fit_rank"],
-            -item["pinecone_score"],
+            -item["base_score"],
             item["fetch_pos"],
         )
     )
@@ -1081,7 +998,6 @@ def _combined_feature_fit_rerank(
             "title": listing.get("title"),
             "url": listing.get("url"),
             "make": listing.get("make"),
-            "pinecone_cosine_similarity": item["pinecone_score"],
             "requested_features": requested_features,
             "stored_features": item["stored_features"],
             "match_source_count": item["match_source_count"],
@@ -1105,7 +1021,7 @@ def _combined_feature_fit_rerank(
             "fit_fail_count": item["fail_count"],
             "fit_missing_count": item["missing_count"],
             "rank_movement": {
-                "pinecone_to_fit": item["fetch_pos"] - item["fit_rank"],
+                "fetch_to_fit": item["fetch_pos"] - item["fit_rank"],
                 "fit_to_final": item["fit_rank"] - final_rank,
             },
         }
@@ -1155,12 +1071,45 @@ def _combined_feature_fit_rerank(
         "fit_weight": FIT_RERANK_WEIGHT,
         "feature_match_threshold": FEATURE_MATCH_THRESHOLD,
         "hard_metadata_filter": metadata_filter or {},
-        "embedding_query_text": query_text,
+        "filter_description": query_text,
         "candidates": analysis_candidates,
     }
 
 
-def search_pinecone_listing_result(
+def fetch_listings(filters: list[tuple[str, str, Any]]) -> list[TrailerListingRow]:
+    """Every row matching the hard gates, in a stable order.
+
+    No LIMIT: the catalogue is small enough that a category filter returns far
+    fewer rows than the old top_k=50, and the rerankers want the full set.
+
+    The ORDER BY is not cosmetic. Fetch position feeds the final rerank
+    tiebreaker and, when the customer stated no dimension at all, becomes the
+    fallback fit rank — so an unordered SELECT would let results reshuffle
+    between identical runs. Price ascending makes that fallback "cheapest
+    first"; stock_number breaks any remaining tie.
+    """
+    if not db.database_enabled():
+        # Same guard every public function in conversation_store uses: with the
+        # database off, return the neutral value rather than raising. A turn
+        # then reports "nothing found" instead of 500ing, and readiness.py is
+        # the thing that fails loudly about a misconfigured database.
+        logger.warning("listing_search_skipped | reason=database_disabled")
+        return []
+
+    statement = (
+        select(TrailerListingRow)
+        .where(*_to_sql_clauses(filters))
+        .order_by(
+            TrailerListingRow.price.asc().nullslast(),
+            TrailerListingRow.stock_number.asc().nullslast(),
+            TrailerListingRow.listing_id.asc(),
+        )
+    )
+    with db.get_session_factory()() as session:
+        return list(session.execute(statement).scalars())
+
+
+def search_listing_result(
     *,
     category: str | None,
     slots: dict[str, Any],
@@ -1170,52 +1119,37 @@ def search_pinecone_listing_result(
     top_k: int | None = None,
     max_recommendations: int | None = None,
     category_only_filters: bool = False,
-) -> PineconeListingSearchResult:
+) -> ListingSearchResult:
     metadata_filters = metadata_filters or {}
     requested_features = [
         str(feature).strip()
         for feature in (requested_features or [])
         if str(feature or "").strip()
     ]
-    # "trailer" only when we know literally nothing — the embeddings API rejects an empty input.
-    query = _query_text(category, slots, metadata_filters, requested_features) or "trailer"
-    top_k = top_k or int(os.getenv("SEARCH_TOP_K", "50"))
     max_recommendations = max_recommendations or int(os.getenv("SEARCH_MAX_RECOMMENDATIONS", "5"))
-    metadata_filter = _metadata_filter(category, slots, metadata_filters, category_only_filters) or None
-    query_preview = query[:2000] + ("...(truncated)" if len(query) > 2000 else "")
+    filters = _listing_filters(category, slots, metadata_filters, category_only_filters)
+    metadata_filter = _filters_as_dict(filters)
+    filter_description = _filter_description(filters)
     shown_urls = {str(u).strip() for u in (already_shown_urls or []) if str(u or "").strip()}
 
-    logger.info(
-        "pinecone_embedding_query | category=%r | metadata_filter=%s | query_text=%r",
-        category,
-        json.dumps(metadata_filter, default=str) if metadata_filter else "{}",
-        query,
-    )
-    vector = _embed(query)
+    rows = fetch_listings(filters)
 
     logger.info(
-        "pinecone_search | category=%r | top_k=%s | max_recommendations=%s | "
-        "already_shown_url_count=%s | metadata_filter=%s | slots=%s | metadata_filters_collected=%s | query_text=%r",
+        "listing_search | category=%r | matched_rows=%s | max_recommendations=%s | "
+        "already_shown_url_count=%s | filters=%s | slots=%s | metadata_filters_collected=%s",
         category,
-        top_k,
+        len(rows),
         max_recommendations,
         len(shown_urls),
         json.dumps(metadata_filter, default=str) if metadata_filter else "{}",
         json.dumps(slots or {}, default=str),
         json.dumps(metadata_filters or {}, default=str),
-        query_preview,
     )
 
-    response = _pinecone_index().query(
-        vector=vector,
-        top_k=top_k,
-        include_metadata=True,
-        filter=metadata_filter,
-    )
     shown = shown_urls
     listings: list[dict[str, Any]] = []
-    for match in getattr(response, "matches", None) or response.get("matches", []):
-        item = _clean_match(match)
+    for row in rows:
+        item = _row_to_listing(row)
         if item["url"] and item["url"] in shown:
             continue
         listings.append(item)
@@ -1260,7 +1194,7 @@ def search_pinecone_listing_result(
             required_width_ft=required_width_ft,
             required_height_ft=required_height_ft,
             metadata_filter=metadata_filter,
-            query_text=query,
+            query_text=filter_description,
             semantic_rerank=semantic_rerank,
             semantic_fallback_reason=semantic_fallback_reason,
         )
@@ -1289,8 +1223,8 @@ def search_pinecone_listing_result(
             extreme_ratio=RERANK_EXTREME_RATIO,
             length_weight=RERANK_LENGTH_WEIGHT,
             missing_dim_penalty=RERANK_MISSING_DIM_PENALTY,
-            # This is the category-only relaxed retry: the hard metadata gates were dropped at
-            # the Pinecone level precisely because nothing met them. If the fit rerank then
+            # This is the category-only relaxed retry: the hard gates were dropped from the SQL
+            # filter precisely because nothing met them. If the fit rerank then
             # hard-culls the same under-size candidates (retain_all=False drops fail_count>0
             # whenever any non-failing row exists), the relaxation is undone one stage later and
             # the screen collapses to the lone row that happened to meet the gate — seen live as
@@ -1312,9 +1246,9 @@ def search_pinecone_listing_result(
         )
     logger.info("make_rerank_debug=%s", json.dumps(make_debug, default=str))
 
-    return PineconeListingSearchResult(
+    return ListingSearchResult(
         listings=listings[:max_recommendations],
-        query_text=query,
+        query_text=filter_description,
         metadata_filter=metadata_filter,
         rerank_debug=rerank_debug,
         make_debug=make_debug,
@@ -1322,7 +1256,7 @@ def search_pinecone_listing_result(
     )
 
 
-def search_pinecone_listings(
+def search_listings(
     *,
     category: str | None,
     slots: dict[str, Any],
@@ -1333,7 +1267,7 @@ def search_pinecone_listings(
     max_recommendations: int | None = None,
     category_only_filters: bool = False,
 ) -> list[dict[str, Any]]:
-    result = search_pinecone_listing_result(
+    result = search_listing_result(
         category=category,
         slots=slots,
         metadata_filters=metadata_filters,

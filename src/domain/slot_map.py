@@ -283,7 +283,7 @@ _DIMENSION_TARGETS = {"length_ft", "width_ft", "height_ft"}
 
 
 def normalize_slot_targets(category: str, slot_name: str, value: Any) -> dict[str, Any]:
-    """Every Pinecone metadata target this one answer fills, with its parsed number.
+    """Every search filter target this one answer fills, with its parsed number.
 
     A combined size question ("Do you have a size preference (length / width)?") maps to
     several dimension targets, but a lone number answering it states ONE of them - and it

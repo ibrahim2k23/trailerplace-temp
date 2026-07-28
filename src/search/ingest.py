@@ -1,9 +1,13 @@
-"""Run once to embed all listings and upsert them to Pinecone (ported from the reference ``ingest.py``).
+"""Run once to load all listings from the workbook into the ``trailer_listings`` table.
 
 Usage:
     python -m src.search.ingest
-    python -m src.search.ingest --force   # re-index even if vectors exist
-    python -m src.search.ingest --force --no-wipe  # force re-upsert without clearing index
+    python -m src.search.ingest --force   # rewrite every row, ignoring content hashes
+    python -m src.search.ingest --force --no-wipe  # force rewrite without deleting first
+
+Replaces the former Pinecone ingest: rows are upserted to Postgres and there
+are no embeddings. The flattening, feature extraction and change-detection
+logic is unchanged — only the destination is different.
 """
 import argparse
 import hashlib
@@ -18,9 +22,11 @@ from typing import Any, Callable, Optional, TypeVar
 
 import pandas as pd
 from dotenv import load_dotenv
-from openai import OpenAI
-from pinecone import Pinecone, ServerlessSpec
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from src import db
+from src.db_models import TrailerListingRow
 from src.domain.normalizer import (
     build_embedding_text,
     normalize_category,
@@ -31,7 +37,7 @@ from src.domain.normalizer import (
     normalize_subcategory,
 )
 # Weight/length parsing is single-sourced in units.py so the numbers written to
-# the index here match how the query/rerank path re-parses the same raw strings.
+# the table here match how the query/rerank path re-parses the same raw strings.
 from src.domain.units import parse_weight_lbs as parse_lbs, parse_length_ft
 
 # src/search/ingest.py -> src/search -> src -> repository root.
@@ -41,12 +47,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_ROOT / ".env")
 load_dotenv()
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
-INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIM = 1536
-BATCH_SIZE = 50
+UPSERT_BATCH_SIZE = 100
 MATCH_EVIDENCE_TEXT_MAX_CHARS = 12000
 MAX_RETRIES = int(os.getenv("INGEST_MAX_RETRIES", "4"))
 FEATURE_EXTRACTION_VERSION = os.getenv(
@@ -102,7 +103,7 @@ def normalize_features(value: Any) -> list[str]:
 
 
 def _flatten_mapping(value: dict[str, Any], prefix: str = "") -> dict[str, Any]:
-    """Flatten nested mappings to underscore-delimited Pinecone-safe keys."""
+    """Flatten nested mappings to underscore-delimited scalar keys."""
     flattened: dict[str, Any] = {}
     for raw_key, raw_value in value.items():
         key = normalize_json_key(raw_key)
@@ -175,15 +176,18 @@ def parse_and_flatten_info_specs(
     return {**normalized_info, **normalized_specifications}, features, source
 
 
-def build_flattened_embedding_text(
+def build_flattened_evidence_text(
     flattened: dict[str, Any], title: str, features: list[str]
 ) -> str:
-    """Build semantic text from every useful flattened JSON value.
+    """Build the match-evidence text from every useful flattened JSON value.
 
-    Core trailer fields retain the stable, query-aligned labels produced by
+    Core trailer fields retain the stable labels produced by
     build_embedding_text. Any remaining info/specification keys are appended
-    with human-readable labels so new scraper fields affect similarity without
-    requiring another code change.
+    with human-readable labels so new scraper fields become visible to the
+    feature reranker without requiring another code change.
+
+    This is no longer an embedding input — it is the evidence the feature
+    reranker (gpt-5-nano) and its deterministic fallback quote from.
     """
     base = build_embedding_text(flattened, title, "").strip()
     parts = [base] if base else []
@@ -237,9 +241,10 @@ def build_flattened_embedding_text(
     return "\n".join(parts)
 
 
-def canonical_embedding_hash(
+def canonical_content_hash(
     flattened: dict[str, Any], title: str, features: list[str]
 ) -> str:
+    """Stable fingerprint of a row's meaningful content, for skip-unchanged."""
     canonical_scalars: dict[str, Any] = {}
     for key in sorted(flattened):
         value = flattened[key]
@@ -253,7 +258,6 @@ def canonical_embedding_hash(
         "title": title.strip(),
         "scalars": canonical_scalars,
         "features": sorted({feature.casefold() for feature in features}),
-        "embedding_model": EMBEDDING_MODEL,
         "feature_extraction_version": FEATURE_EXTRACTION_VERSION,
     }
     serialized = json.dumps(
@@ -283,28 +287,6 @@ def retry_call(operation: Callable[[], T], operation_name: str) -> T:
             time.sleep(delay)
     assert last_error is not None
     raise last_error
-
-
-def get_or_create_index(pc: Pinecone):
-    existing = [idx.name for idx in pc.list_indexes()]
-    if INDEX_NAME not in existing:
-        LOGGER.info("Creating Pinecone index | name=%s", INDEX_NAME)
-        pc.create_index(
-            name=INDEX_NAME,
-            dimension=EMBEDDING_DIM,
-            metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-        )
-        while True:
-            status = pc.describe_index(INDEX_NAME).status
-            if status.get("ready", False):
-                break
-            LOGGER.info("Waiting for Pinecone index readiness")
-            time.sleep(2)
-        LOGGER.info("Pinecone index ready")
-    else:
-        LOGGER.info("Using existing Pinecone index | name=%s", INDEX_NAME)
-    return pc.Index(INDEX_NAME)
 
 
 def parse_money(val) -> Optional[float]:
@@ -338,7 +320,12 @@ def _money_from_info(info: dict, *keys: str) -> Optional[float]:
     return None
 
 
-def build_vector_id(row: pd.Series, row_idx: int) -> str:
+def build_listing_id(row: pd.Series, row_idx: int) -> str:
+    """Stable primary key for a workbook row.
+
+    Unchanged from the Pinecone vector id so re-ingest keeps updating the same
+    rows rather than duplicating them.
+    """
     stock_number = str(row.get("stock_number", "")).strip()
     url = str(row.get("url", "")).strip()
     if stock_number:
@@ -390,6 +377,9 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     trim = col("trim") or None
     length = col("length") or None
     width = col("width") or None
+    # Height was read by the search path but never written by the old ingest,
+    # so every height requirement silently scored as a missing dimension.
+    height = col("height") or None
     axles = col("axles") or None
     gvwr = col("gvwr") or None
     gvwr_lbs_num = parse_lbs(gvwr)
@@ -399,10 +389,11 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     floor = col("floor") or None
     length_ft_num = parse_length_ft(length)
     width_ft_num = parse_length_ft(width)
+    height_ft_num = parse_length_ft(height)
 
     # Direct workbook columns are authoritative. Merge them into the same
-    # flattened map used for embedding and canonical change detection.
-    embedding_info = dict(info)
+    # flattened map used for evidence text and canonical change detection.
+    evidence_info = dict(info)
     for key, val in {
         "year": year,
         "make": raw_make,
@@ -415,6 +406,7 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "hitch_type": raw_hitch,
         "length": length,
         "width": width,
+        "height": height,
         "axles": axles,
         "gvwr": gvwr,
         "payload_capacity": payload,
@@ -422,111 +414,109 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "floor": floor,
     }.items():
         if not is_blank(val):
-            embedding_info[key] = val
+            evidence_info[key] = val
 
-    embedding_text = build_flattened_embedding_text(
-        embedding_info, title, features
+    evidence_text = build_flattened_evidence_text(
+        evidence_info, title, features
     )
-    embedding_hash = canonical_embedding_hash(
-        embedding_info, title, features
+    content_hash = canonical_content_hash(
+        evidence_info, title, features
     )
 
-    metadata: dict = {
-        "title": title,
+    sub_norm = normalize_subcategory(raw_subcategory)
+    # A subcategory that merely repeats the category carries no information and
+    # would make the Aluminum subcategory gate match on noise.
+    subcategory = sub_norm if sub_norm and sub_norm.lower() != category.lower() else None
+
+    # One dict per table column. Unlike Pinecone metadata, NULLs are welcome
+    # here, so blanks stay blank instead of being dropped from the payload.
+    return {
+        "listing_id": build_listing_id(row, row_idx),
+        "stock_number": col("stock_number") or None,
+        "title": title or None,
+        "url": url or None,
         "condition": condition,
         "category": category,
+        "subcategory": subcategory,
         "make": make,
         "color": color,
-        "url": url,
+        "hitch_type": hitch,
+        "price": price,
         "price_display": price_display,
-        "match_evidence_text": embedding_text[:MATCH_EVIDENCE_TEXT_MAX_CHARS],
-        "embedding_hash": embedding_hash,
-        "embedding_model": EMBEDDING_MODEL,
-        "feature_extraction_version": FEATURE_EXTRACTION_VERSION,
+        "year": year,
+        "model": model,
+        "trim": trim,
+        "length": length,
+        "width": width,
+        "height": height,
+        "axles": axles,
+        "gvwr": gvwr,
+        "payload_capacity": payload,
+        "length_ft_num": length_ft_num,
+        "width_ft_num": width_ft_num,
+        "height_ft_num": height_ft_num,
+        "gvwr_lbs_num": gvwr_lbs_num,
+        "payload_lbs_num": payload_lbs_num,
+        "trailer_material": material,
+        "floor": floor,
+        "features": features,
+        "match_evidence_text": evidence_text[:MATCH_EVIDENCE_TEXT_MAX_CHARS],
+        "content_hash": content_hash,
         "info_json_source": json_source,
     }
-    if features:
-        metadata["features"] = features
-    sub_norm = normalize_subcategory(raw_subcategory)
-    if sub_norm and sub_norm.lower() != category.lower():
-        metadata["subcategory"] = sub_norm
-    for key, val in [
-        ("price", price),
-        ("hitch_type", hitch),
-        ("year", year),
-        ("model", model),
-        ("trim", trim),
-        ("length", length),
-        ("width", width),
-        ("axles", axles),
-        ("gvwr", gvwr),
-        ("gvwr_lbs_num", gvwr_lbs_num),
-        ("length_ft_num", length_ft_num),
-        ("width_ft_num", width_ft_num),
-        ("payload_capacity", payload),
-        ("payload_lbs_num", payload_lbs_num),
-        ("trailer_material", material),
-        ("floor", floor),
-    ]:
-        if val is not None:
-            metadata[key] = val
-
-    # Pinecone metadata must remain flat and cannot contain null values.
-    metadata = {
-        key: value
-        for key, value in metadata.items()
-        if value is not None and not (isinstance(value, str) and not value.strip())
-    }
-
-    vector_id = build_vector_id(row, row_idx)
-
-    return {
-        "id": vector_id,
-        "stock_number": col("stock_number"),
-        "embedding_text": embedding_text,
-        "embedding_hash": embedding_hash,
-        "metadata": metadata,
-    }
 
 
-def embed_batch(client: OpenAI, texts: list) -> list:
-    response = retry_call(
-        lambda: client.embeddings.create(model=EMBEDDING_MODEL, input=texts),
-        "OpenAI embedding batch",
+def fetch_existing_hashes() -> dict[str, str]:
+    """Current content hash per listing id. One query — the table is small."""
+    with db.get_session_factory()() as session:
+        rows = session.execute(
+            select(TrailerListingRow.listing_id, TrailerListingRow.content_hash)
+        ).all()
+    return {row[0]: row[1] for row in rows if row[1]}
+
+
+# Every column the upsert overwrites on conflict. listing_id is the conflict
+# target and created_at must survive, so both are excluded.
+_UPSERT_COLUMNS = tuple(
+    column.name
+    for column in TrailerListingRow.__table__.columns
+    if column.name not in {"listing_id", "created_at"}
+)
+
+
+def upsert_batch(rows: list[dict[str, Any]]) -> None:
+    """Insert or update one batch of listings by primary key."""
+    statement = pg_insert(TrailerListingRow).values(rows)
+    statement = statement.on_conflict_do_update(
+        index_elements=[TrailerListingRow.listing_id],
+        set_={
+            name: getattr(statement.excluded, name)
+            for name in _UPSERT_COLUMNS
+            if name != "updated_at"
+        }
+        # onupdate= only fires for ORM-level updates, not this INSERT ... ON
+        # CONFLICT, so the timestamp is set explicitly.
+        | {"updated_at": func.now()},
     )
-    embeddings = [item.embedding for item in response.data]
-    if len(embeddings) != len(texts):
-        raise RuntimeError(
-            f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}"
+    with db.get_session_factory()() as session:
+        session.execute(statement)
+        session.commit()
+
+
+def prune_missing(known_ids: set[str]) -> int:
+    """Delete rows whose listing is no longer in the workbook.
+
+    Pinecone never pruned, so retired stock lingered in the index until a
+    --force wipe. A DELETE is cheap here, so retired listings go on every run.
+    """
+    if not known_ids:
+        return 0
+    with db.get_session_factory()() as session:
+        result = session.execute(
+            delete(TrailerListingRow).where(TrailerListingRow.listing_id.notin_(known_ids))
         )
-    return embeddings
-
-
-def _response_vectors(response: Any) -> dict[str, Any]:
-    if isinstance(response, dict):
-        return response.get("vectors", {}) or {}
-    return getattr(response, "vectors", {}) or {}
-
-
-def _vector_metadata(vector: Any) -> dict[str, Any]:
-    if isinstance(vector, dict):
-        return vector.get("metadata", {}) or {}
-    return getattr(vector, "metadata", {}) or {}
-
-
-def fetch_existing_hashes(index: Any, vector_ids: list[str]) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for start in range(0, len(vector_ids), 100):
-        ids = vector_ids[start : start + 100]
-        response = retry_call(
-            lambda ids=ids: index.fetch(ids=ids),
-            "Pinecone fetch existing hashes",
-        )
-        for vector_id, vector in _response_vectors(response).items():
-            value = _vector_metadata(vector).get("embedding_hash")
-            if value:
-                hashes[str(vector_id)] = str(value)
-    return hashes
+        session.commit()
+        return int(result.rowcount or 0)
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -542,14 +532,19 @@ def main(force: bool = False, wipe_on_force: bool = True):
         "input_rows": 0,
         "valid_json_rows": 0,
         "invalid_json_rows": 0,
-        "changed_embedding_hashes": 0,
-        "skipped_unchanged_vectors": 0,
-        "embedding_failures": 0,
-        "vector_upsert_failures": 0,
-        "embedded_vectors": 0,
-        "upserted_vectors": 0,
+        "changed_content_hashes": 0,
+        "skipped_unchanged_rows": 0,
+        "row_upsert_failures": 0,
+        "upserted_rows": 0,
+        "pruned_rows": 0,
     }
     quarantine: list[dict[str, Any]] = []
+
+    if not db.database_enabled():
+        raise RuntimeError(
+            "Database settings are incomplete; set HOST/PORT/DATABASE/PGUSER/PASSWORD "
+            "before running ingest."
+        )
 
     LOGGER.info("Loading data | path=%s", DATA_FILE)
     df = pd.read_excel(DATA_FILE)
@@ -586,98 +581,74 @@ def main(force: bool = False, wipe_on_force: bool = True):
                 }
             )
 
-    pc = Pinecone(api_key=PINECONE_API_KEY)
-    index = get_or_create_index(pc)
-
     if force and wipe_on_force:
-        LOGGER.warning("Force mode: deleting all existing vectors")
-        retry_call(lambda: index.delete(delete_all=True), "Pinecone delete all")
-        time.sleep(2)
+        LOGGER.warning("Force mode: deleting all existing listings")
+        with db.get_session_factory()() as session:
+            session.execute(delete(TrailerListingRow))
+            session.commit()
 
     if force:
         changed_records = records
     else:
-        existing_hashes = fetch_existing_hashes(
-            index, [record["id"] for record in records]
-        )
+        existing_hashes = fetch_existing_hashes()
         changed_records = [
             record
             for record in records
-            if existing_hashes.get(record["id"]) != record["embedding_hash"]
+            if existing_hashes.get(record["listing_id"]) != record["content_hash"]
         ]
-        summary["skipped_unchanged_vectors"] = len(records) - len(changed_records)
-    summary["changed_embedding_hashes"] = len(changed_records)
+        summary["skipped_unchanged_rows"] = len(records) - len(changed_records)
+    summary["changed_content_hashes"] = len(changed_records)
     LOGGER.info(
         "Incremental comparison | valid=%s changed=%s unchanged=%s invalid=%s",
         len(records),
         len(changed_records),
-        summary["skipped_unchanged_vectors"],
+        summary["skipped_unchanged_rows"],
         summary["invalid_json_rows"],
     )
 
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
-    vectors = []
-    for i in range(0, len(changed_records), BATCH_SIZE):
-        batch = changed_records[i : i + BATCH_SIZE]
+    for i in range(0, len(changed_records), UPSERT_BATCH_SIZE):
+        batch = changed_records[i : i + UPSERT_BATCH_SIZE]
         try:
-            embeddings = embed_batch(
-                openai_client, [record["embedding_text"] for record in batch]
-            )
-            for record, embedding in zip(batch, embeddings):
-                vectors.append(
-                    {
-                        "id": record["id"],
-                        "values": embedding,
-                        "metadata": record["metadata"],
-                    }
-                )
-            summary["embedded_vectors"] += len(batch)
+            retry_call(lambda batch=batch: upsert_batch(batch), "Listing upsert batch")
+            summary["upserted_rows"] += len(batch)
         except Exception as exc:  # noqa: BLE001
-            summary["embedding_failures"] += len(batch)
+            summary["row_upsert_failures"] += len(batch)
             LOGGER.error(
-                "Embedding batch permanently failed | rows=%s error=%s",
-                len(batch),
-                exc,
+                "Upsert batch permanently failed | rows=%s error=%s", len(batch), exc
             )
             quarantine.extend(
                 {
-                    "stage": "embedding",
-                    "id": record["id"],
+                    "stage": "upsert",
+                    "listing_id": record["listing_id"],
                     "stock_number": record["stock_number"],
                     "error": str(exc),
                 }
                 for record in batch
             )
         LOGGER.info(
-            "Embedding progress | processed=%s/%s successful=%s",
+            "Upsert progress | attempted=%s/%s successful=%s",
             min(i + len(batch), len(changed_records)),
             len(changed_records),
-            len(vectors),
+            summary["upserted_rows"],
         )
 
-    for i in range(0, len(vectors), 100):
-        batch = vectors[i : i + 100]
-        try:
-            retry_call(
-                lambda batch=batch: index.upsert(vectors=batch),
-                "Pinecone upsert batch",
-            )
-            summary["upserted_vectors"] += len(batch)
-        except Exception as exc:  # noqa: BLE001
-            summary["vector_upsert_failures"] += len(batch)
-            LOGGER.error(
-                "Upsert batch permanently failed | rows=%s error=%s", len(batch), exc
-            )
-            quarantine.extend(
-                {"stage": "upsert", "id": vector["id"], "error": str(exc)}
-                for vector in batch
-            )
-        LOGGER.info(
-            "Upsert progress | attempted=%s/%s successful=%s",
-            min(i + len(batch), len(vectors)),
-            len(vectors),
-            summary["upserted_vectors"],
+    # Only prune when every row parsed. A workbook that failed halfway would
+    # otherwise look like a catalogue that had suddenly shrunk, and we would
+    # delete live listings on the strength of a parse error.
+    if not summary["invalid_json_rows"] and not summary["row_upsert_failures"]:
+        summary["pruned_rows"] = prune_missing(
+            {record["listing_id"] for record in records}
+        )
+    else:
+        LOGGER.warning(
+            "Skipping prune | invalid_json_rows=%s row_upsert_failures=%s",
+            summary["invalid_json_rows"],
+            summary["row_upsert_failures"],
+        )
+
+    with db.get_session_factory()() as session:
+        summary["table_rows"] = int(
+            session.execute(select(func.count()).select_from(TrailerListingRow)).scalar() or 0
         )
 
     summary["elapsed_seconds"] = round(time.perf_counter() - started, 3)
@@ -685,16 +656,15 @@ def main(force: bool = False, wipe_on_force: bool = True):
     write_json(QUARANTINE_FILE, quarantine)
     write_json(INGEST_REPORT_FILE, summary)
     LOGGER.info("Ingestion complete | summary=%s", summary)
-    LOGGER.info("Pinecone stats | stats=%s", index.describe_index_stats())
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--force", action="store_true", help="Re-index even if vectors exist")
+    parser.add_argument("--force", action="store_true", help="Rewrite every row, ignoring hashes")
     parser.add_argument(
         "--no-wipe",
         action="store_true",
-        help="With --force, do not clear existing vectors before upsert",
+        help="With --force, do not delete existing rows before upsert",
     )
     args = parser.parse_args()
     main(force=args.force, wipe_on_force=not args.no_wipe)

@@ -1,8 +1,8 @@
 """Single source of truth for parsing weight/length text into numbers.
 
 Previously two near-duplicate parsers existed: ``ingest.parse_lbs`` /
-``parse_length_ft`` (used to write numeric metadata into the Pinecone index) and
-``pinecone_search._parse_number`` / ``_parse_length_ft`` (used at query time and,
+``parse_length_ft`` (used to write the numeric columns of trailer_listings) and
+``listing_search._parse_number`` / ``_parse_length_ft`` (used at query time and,
 crucially, to re-parse the *same* raw catalog strings during reranking). When the
 two diverge, a filter built at query time can disagree with the rerank's view of
 the same listing.

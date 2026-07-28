@@ -13,7 +13,7 @@ from src.domain.normalizer import normalize_category, normalize_make
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-# The SAME workbook (and env override) the Pinecone ingest reads (src/search/ingest.py):
+# The SAME workbook (and env override) the ingest reads (src/search/ingest.py):
 # the brands/categories the prompts advertise must be the inventory the search can actually
 # return. This used to read listings_final_v5.xlsx while ingest read listings.xlsx, so the
 # prompts promised makes the index had never seen.

@@ -68,7 +68,6 @@ packaging==26.2
 pandas==3.0.3
 parso==0.8.7
 pillow==12.2.0
-pinecone==9.0.0
 platformdirs==4.9.6
 playwright==1.59.0
 pluggy==1.6.0

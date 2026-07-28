@@ -45,7 +45,7 @@ _CONTACT_INTENTS = {"contact_info_provided", "contact_declined"}
 
 
 def should_search(state: dict) -> bool:
-    """Whether this turn earns a Pinecone query.
+    """Whether this turn earns an inventory query.
 
     Search is a tool call, not a turn type: it runs when every question has been asked
     (answered, skipped or waved off) AND there is actually something new to look up —

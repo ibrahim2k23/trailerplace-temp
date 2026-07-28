@@ -2,7 +2,7 @@ import re
 from typing import Optional
 
 # Make/brand aliases are single-sourced in make_aliases.py (consumed here, by the
-# query-time make resolver, and by pinecone rerank display).
+# query-time make resolver, and by rerank display).
 from src.domain.make_aliases import MAKE_ALIASES as MAKE_MAP
 
 # ---------------------------------------------------------------------------

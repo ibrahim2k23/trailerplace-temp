@@ -171,7 +171,7 @@ _SPECS: dict[str, TrailerFieldSpec] = {
             #"package_scope": "Store whether the customer wants only the trailer, only bins, or the full trailer-and-bins package.",
             "bin_size": (
                 "Store the requested bin size, including cubic-yard wording such as 10 yd or 20 yd. "
-                "For Pinecone, map its numeric value directly to trailer length_ft: 15 yd means length_ft='15 ft', "
+                "For search, map its numeric value directly to trailer length_ft: 15 yd means length_ft='15 ft', "
                 "not 45 ft; for a range, use the smallest value."
             ),
             "deck_style": "Store the preferred deck style such as step deck or standard deck.",

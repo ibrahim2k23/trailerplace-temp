@@ -55,13 +55,12 @@ def test_app_py_imports():
 
 def test_settings_loads(monkeypatch):
     monkeypatch.setenv("OPENAI_MODEL", "custom-model")
-    monkeypatch.setenv("SEARCH_TOP_K", "7")
+    monkeypatch.setenv("SEARCH_MAX_RECOMMENDATIONS", "7")
     monkeypatch.setenv("TRAILERPLACE_PERSIST_CHATS", "true")
     settings = Settings.from_env()
     assert settings.openai_model == "custom-model"
-    assert settings.search_top_k == 7
+    assert settings.search_max_recommendations == 7
     assert settings.trailerplace_persist_chats is True
-    assert settings.openai_embedding_model == "text-embedding-3-small"
     assert settings.chatbot_api_port == 8000
 
 

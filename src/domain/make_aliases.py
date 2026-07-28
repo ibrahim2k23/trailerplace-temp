@@ -2,9 +2,9 @@
 
 Previously three near-duplicate maps existed:
 - ``normalizer.MAKE_MAP`` (used at ingest to canonicalize the make written into
-  the Pinecone index),
+  the listings table),
 - ``make_resolver._ALIASES`` (query-time user-text -> canonical make),
-- ``pinecone_search.MAKE_ALIAS_MAP`` (rerank display normalization).
+- ``listing_search.MAKE_ALIAS_MAP`` (rerank display normalization).
 
 They diverged in both membership and target form (e.g. one produced
 "Cargo Craft Trailers", the others "Cargo Craft"), which was only reconciled by
@@ -21,7 +21,7 @@ Keys are given in several normalized variants (spaces, hyphens, ``&``/"and"/"n")
 because each consumer re-normalizes keys differently:
 - ``normalizer.normalize_make`` looks up ``make.strip().lower()`` (hyphens/``&``
   preserved),
-- ``pinecone_search._canonical_make`` looks up ``_norm_key`` (``&`` preserved,
+- ``listing_search._canonical_make`` looks up ``_norm_key`` (``&`` preserved,
   hyphens -> space),
 - ``make_resolver`` re-normalizes every key via its own ``_norm`` (``&`` -> "and").
 Redundant variants keep every consumer correct.

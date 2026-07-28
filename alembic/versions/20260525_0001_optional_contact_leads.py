@@ -21,6 +21,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     if not inspector.has_table("chatbot_leads"):
+        # Fresh database: create the tables outright.
         op.create_table(
             "chatbot_leads",
             sa.Column(
@@ -77,9 +78,16 @@ def upgrade() -> None:
         )
         return
 
-    op.alter_column("chatbot_leads", "name", existing_type=sa.String(length=255), nullable=True)
-    op.alter_column("chatbot_leads", "phone_number", existing_type=sa.String(length=64), nullable=True)
-    lead_columns = {column["name"] for column in inspector.get_columns("chatbot_leads")}
+    # chatbot_leads already exists. Only bring across what is genuinely absent —
+    # a database created by create_all() is already in the target shape, and
+    # re-running the alter/backfill below would rewrite live rows for nothing.
+    lead_columns = {
+        column["name"]: column for column in inspector.get_columns("chatbot_leads")
+    }
+    for name, column_type in (("name", sa.String(length=255)), ("phone_number", sa.String(length=64))):
+        if lead_columns.get(name) is not None and not lead_columns[name]["nullable"]:
+            op.alter_column("chatbot_leads", name, existing_type=column_type, nullable=True)
+
     if "contact_status" not in lead_columns:
         op.add_column(
             "chatbot_leads",
@@ -90,13 +98,15 @@ def upgrade() -> None:
                 server_default="missing_contact",
             ),
         )
-    op.execute(
-        "UPDATE chatbot_leads "
-        "SET contact_status = CASE "
-        "WHEN NULLIF(TRIM(COALESCE(phone_number, '')), '') IS NOT NULL "
-        "OR NULLIF(TRIM(COALESCE(email, '')), '') IS NOT NULL "
-        "THEN 'contact_available' ELSE 'missing_contact' END"
-    )
+        # Backfill ONLY the column this revision just introduced. Running it
+        # unconditionally would overwrite contact_status on every existing lead.
+        op.execute(
+            "UPDATE chatbot_leads "
+            "SET contact_status = CASE "
+            "WHEN NULLIF(TRIM(COALESCE(phone_number, '')), '') IS NOT NULL "
+            "OR NULLIF(TRIM(COALESCE(email, '')), '') IS NOT NULL "
+            "THEN 'contact_available' ELSE 'missing_contact' END"
+        )
     if not inspector.has_table("chatbot_conversations"):
         op.create_table(
             "chatbot_conversations",

@@ -32,10 +32,6 @@ class Settings:
     openai_model: str = "gpt-4o-mini"
     analyze_model: str = "gpt-5-mini"
     analyze_reasoning_effort: str = "minimal"
-    openai_embedding_model: str = "text-embedding-3-small"
-    pinecone_api_key: str = ""
-    pinecone_index_name: str = "trailerplace-listings"
-    search_top_k: int = 50
     search_max_recommendations: int = 5
     feature_llm_rerank_enabled: bool = True
     feature_rerank_model: str = "gpt-5-nano-2025-08-07"
@@ -94,10 +90,6 @@ class Settings:
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             analyze_model=os.getenv("ANALYZE_MODEL", "gpt-5-mini"),
             analyze_reasoning_effort=os.getenv("ANALYZE_REASONING_EFFORT", "minimal"),
-            openai_embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
-            pinecone_api_key=os.getenv("PINECONE_API_KEY", ""),
-            pinecone_index_name=os.getenv("PINECONE_INDEX_NAME", "trailerplace-listings"),
-            search_top_k=_int(os.getenv("SEARCH_TOP_K"), 50),
             search_max_recommendations=_int(os.getenv("SEARCH_MAX_RECOMMENDATIONS"), 5),
             feature_llm_rerank_enabled=_bool(os.getenv("FEATURE_LLM_RERANK_ENABLED"), True),
             feature_rerank_model=os.getenv("FEATURE_RERANK_MODEL", "gpt-5-nano-2025-08-07"),

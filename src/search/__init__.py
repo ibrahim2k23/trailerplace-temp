@@ -1,1 +1,1 @@
-"""Pinecone search, ingestion, and Excel inventory matching for TrailerPlace."""
+"""Listing search, ingestion, and Excel inventory matching for TrailerPlace."""

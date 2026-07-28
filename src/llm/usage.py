@@ -1,12 +1,12 @@
 """Per-turn LLM call/token accounting (M9 §3).
 
 The cost audit asserts 2 LLM calls per normal turn (Analyze + Respond), with one
-additional tagged completion(s) only when batched semantic feature reranking runs. Pinecone
+additional tagged completion(s) only when batched semantic feature reranking runs. Search
 search turns add one embedding; inventory-lookup turns add no extra calls. To
 assert that from local logs we have to count the calls where they happen.
 
 A turn is a contextvar scope: `usage_scope()` installs a fresh `TurnUsage`, the
-OpenAI client records each chat completion into it, and `pinecone_search._embed`
+OpenAI client records each chat completion into it, and the embedding helper
 records each embedding. Nothing outside the scope records anything, so library
 code stays safe to call from tests and scripts.
 

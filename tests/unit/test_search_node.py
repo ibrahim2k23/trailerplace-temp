@@ -7,7 +7,7 @@ from src.graph.state import new_session_state
 
 
 def _fake_search(calls, results_by_call):
-    """FakePinecone: records each search_pinecone_listings call and returns queued results."""
+    """FakePinecone: records each search_listings call and returns queued results."""
 
     def _search(**kwargs):
         calls.append(kwargs)
@@ -49,7 +49,7 @@ def test_gate_refuses_when_qualification_incomplete():
 
 def test_metadata_filters_built_from_slots(monkeypatch):
     calls: list[dict] = []
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[_listing("u1")]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search(calls, [[_listing("u1")]]))
     state = new_session_state("s1")
     state["category"] = "Equipment"
     state["qualification_complete"] = True
@@ -70,7 +70,7 @@ def test_metadata_filters_built_from_slots(monkeypatch):
 
 def test_roll_off_bin_size_maps_to_length_ft(monkeypatch):
     calls: list[dict] = []
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search(calls, [[]]))
     state = new_session_state("s1")
     state["category"] = "Roll Off"
     state["qualification_complete"] = True
@@ -81,7 +81,7 @@ def test_roll_off_bin_size_maps_to_length_ft(monkeypatch):
 
 def test_brand_preference_becomes_make_filter(monkeypatch):
     calls: list[dict] = []
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[_listing("u1")]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search(calls, [[_listing("u1")]]))
     state = new_session_state("s1")
     state["category"] = "Dump"
     state["qualification_complete"] = True
@@ -94,7 +94,7 @@ def test_zero_result_brand_fallback_reruns_without_make(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         search_module,
-        "search_pinecone_listings",
+        "search_listings",
         _fake_search(calls, [[], [_listing("u1"), _listing("u2")]]),
     )
     state = new_session_state("s1")
@@ -113,7 +113,7 @@ def test_feature_search_keeps_requested_make_strict(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         search_module,
-        "search_pinecone_listings",
+        "search_listings",
         _fake_search(calls, [[]]),
     )
     state = new_session_state("s1")
@@ -136,7 +136,7 @@ def test_search_repairs_feature_phrases_saved_by_older_analyzer(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         search_module,
-        "search_pinecone_listings",
+        "search_listings",
         _fake_search(calls, [[]]),
     )
     state = new_session_state("s1")
@@ -152,7 +152,7 @@ def test_search_repairs_feature_phrases_saved_by_older_analyzer(monkeypatch):
 
 def test_already_shown_urls_passed_through_for_dedupe(monkeypatch):
     calls: list[dict] = []
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[_listing("u2")]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search(calls, [[_listing("u2")]]))
     state = new_session_state("s1")
     state["category"] = "Dump"
     state["qualification_complete"] = True
@@ -170,7 +170,7 @@ def test_result_shape_matches_app_listing_parser(monkeypatch):
     search result never silently drops a card."""
     from src.models import TrailerListing
 
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search([], [[_listing("u1")]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search([], [[_listing("u1")]]))
     state = new_session_state("s1")
     state["category"] = "Dump"
     state["qualification_complete"] = True
@@ -204,7 +204,7 @@ def test_result_shape_matches_app_listing_parser(monkeypatch):
 
 
 def test_search_produces_results_shown_system_trigger(monkeypatch):
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search([], [[_listing("u1")]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search([], [[_listing("u1")]]))
     state = new_session_state("s1")
     state["category"] = "Dump"
     state["qualification_complete"] = True
@@ -216,7 +216,7 @@ def test_search_produces_results_shown_system_trigger(monkeypatch):
 
 
 def test_no_results_no_system_trigger(monkeypatch):
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search([], [[]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search([], [[]]))
     state = new_session_state("s1")
     state["category"] = "Dump"
     state["qualification_complete"] = True
@@ -231,7 +231,7 @@ def test_zero_results_relaxes_every_filter_but_the_category(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         search_module,
-        "search_pinecone_listings",
+        "search_listings",
         _fake_search(calls, [[], [_listing("u1"), _listing("u2")]]),
     )
     state = new_session_state("s1")
@@ -257,7 +257,7 @@ def test_the_relaxed_pass_keeps_the_non_metadata_features(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         search_module,
-        "search_pinecone_listings",
+        "search_listings",
         _fake_search(calls, [[], [_listing("u1")]]),
     )
     state = new_session_state("s1")
@@ -278,7 +278,7 @@ def test_nothing_to_relax_means_no_second_search(monkeypatch):
     # Category is the only filter, so a category-only retry would run the identical query and come
     # back just as empty. We are genuinely out of stock for that category.
     calls: list[dict] = []
-    monkeypatch.setattr(search_module, "search_pinecone_listings", _fake_search(calls, [[]]))
+    monkeypatch.setattr(search_module, "search_listings", _fake_search(calls, [[]]))
     state = new_session_state("s1")
     state["category"] = "Dump"
     state["qualification_complete"] = True
