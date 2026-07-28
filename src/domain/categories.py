@@ -94,7 +94,7 @@ def width_excluded_categories_line() -> str:
 def width_eligible_categories_line() -> str:
     """Comma-joined categories that CAN take the injected width question."""
     return ", ".join(
-        category for category in CANONICAL_CATEGORIES if category not in WIDTH_EXCLUDED_CATEGORIES
+        category for category in _advertised_categories() if category not in WIDTH_EXCLUDED_CATEGORIES
     )
 
 
@@ -248,14 +248,27 @@ def resolve_category_clarification_answer(text: str, clarification_key: str | No
     )
 
 
+def _advertised_categories() -> tuple[str, ...]:
+    """The categories the prompts may name: canonical AND currently in stock.
+
+    The vocabulary is hand-written above — the type/cargo terms encode judgment
+    no database column supplies — but availability comes from the catalogue, so
+    we never advertise a category whose search returns nothing. Falls back to
+    every canonical category when the catalogue cannot be read.
+    """
+    from src.domain.brands import stocked_categories
+
+    return stocked_categories()
+
+
 def advertised_categories_line() -> str:
-    """Comma-joined canonical categories for the 'what we carry' catalogue line.
+    """Comma-joined stocked categories for the 'what we carry' catalogue line.
 
     Single source of truth so the customer-facing catalogue can never drift from
     the categories the system actually supports (previously the KNOWLEDGE block
     advertised 10 types while 13 were qualifiable).
     """
-    return ", ".join(CANONICAL_CATEGORIES)
+    return ", ".join(_advertised_categories())
 
 
 def category_prompt_block() -> str:
@@ -265,9 +278,10 @@ def category_prompt_block() -> str:
     the category ("haul a tractor" -> Equipment). Analyze must treat the two very
     differently, so they are labelled separately rather than merged into one list.
     """
+    advertised = _advertised_categories()
     lines = [
         "These are the ONLY trailer categories we carry. There are exactly "
-        f"{len(CANONICAL_CATEGORIES)}: {', '.join(CANONICAL_CATEGORIES)}.",
+        f"{len(advertised)}: {', '.join(advertised)}.",
         "",
         "For each category below:",
         '  TYPE TERMS  = the user NAMED this trailer type ("I want a tilt trailer") -> an EXPLICIT choice.',
@@ -278,7 +292,7 @@ def category_prompt_block() -> str:
         "Do not infer, recommend, or return either one as a category.",
         "",
     ]
-    for category in CANONICAL_CATEGORIES:
+    for category in advertised:
         naming = ", ".join(_NAMING_TERMS.get(category, [])) or "(none)"
         cargo = ", ".join(_CARGO_TERMS.get(category, [])) or "(none)"
         lines.append(f"- {category}")
@@ -302,7 +316,7 @@ def category_reference_block() -> str:
     explain WHY a suggested switch makes sense - without seeing Analyze's tier logic.
     """
     lines = []
-    for category in CANONICAL_CATEGORIES:
+    for category in _advertised_categories():
         cargo = ", ".join(_CARGO_TERMS.get(category, []))
         aliases = ", ".join(_NAMING_TERMS.get(category, []))
         detail = f" (also called: {aliases})" if aliases else ""

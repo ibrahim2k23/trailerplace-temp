@@ -1,12 +1,19 @@
-"""Deterministic Excel inventory matcher (ported from the reference ``inventory_matcher.py``).
+"""Deterministic inventory matcher for direct lookups.
 
 The reference file's three embedded mini-LLMs (query extraction, reply-intro,
 feature-framing) and its regex-fallback extraction stack are NOT ported here —
 identifier extraction is now the Analyze LLM's job (``TurnAnalysis.inventory_lookup``)
 and reply wording is the Respond LLM's job (both already built in M3). This module
 is a pure function of identifiers: given year/make/model_text/stock_number it
-fuzzy-matches against the dealership Excel catalog and returns card dicts shaped
-identically to inventory search results.
+fuzzy-matches the catalogue and returns card dicts shaped identically to
+inventory search results.
+
+Source of truth is the ``trailer_listings`` table — the same rows semantic
+search returns, so a stock-number lookup can never quote a trailer the search
+cannot find. The workbook remains a fallback for when the database is
+unavailable (and is what the unit tests drive). Matching itself is unchanged:
+rows are loaded into the same DataFrame shape and scored by the same fuzzy
+pipeline, whichever source they came from.
 """
 
 from __future__ import annotations
@@ -151,11 +158,58 @@ def prepare_inventory(df: pd.DataFrame) -> pd.DataFrame:
     return prepared
 
 
+# Table column -> the column name prepare_inventory expects. Everything else
+# lines up by name already.
+_DB_COLUMN_ALIASES = {"price_display": "price"}
+
+
+def load_inventory_from_db() -> pd.DataFrame:
+    """Every listing row as a DataFrame in the workbook's column shape.
+
+    Reads through listing_search so there is one definition of "a listing row",
+    and one place that knows the database might be switched off.
+    """
+    from src.search.listing_search import fetch_listings
+
+    rows = fetch_listings([])
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        record = {
+            column.name: getattr(row, column.name)
+            for column in row.__table__.columns
+        }
+        for source, target in _DB_COLUMN_ALIASES.items():
+            record[target] = record.pop(source, None)
+        # Ingest already flattened the spec blob into match_evidence_text, so the
+        # JSON columns the workbook path re-parses per lookup are not needed.
+        record.pop("info_json_source", None)
+        records.append(record)
+    return pd.DataFrame(records)
+
+
 @lru_cache(maxsize=1)
 def prepared_inventory() -> pd.DataFrame:
+    """The catalogue to match against: the table when available, else the workbook.
+
+    Cached for the process, like the workbook path always was — a re-ingest
+    needs a restart to be picked up here.
+    """
+    from src import db
+
+    if db.database_enabled():
+        frame = load_inventory_from_db()
+        if not frame.empty:
+            logger.info("inventory_matcher_source | source=trailer_listings | rows=%s", len(frame))
+            return prepare_inventory(frame)
+        # An empty table is far more likely to be "not ingested yet" than "we
+        # sold everything", so fall through rather than answer every lookup with
+        # nothing.
+        logger.warning("inventory_matcher_empty_table | falling back to workbook")
+
     if not _LISTINGS_FILE.exists():
         logger.warning("inventory_matcher_file_missing | path=%s", _LISTINGS_FILE)
         return prepare_inventory(pd.DataFrame())
+    logger.info("inventory_matcher_source | source=workbook | path=%s", _LISTINGS_FILE)
     return prepare_inventory(load_inventory(_LISTINGS_FILE))
 
 
@@ -191,6 +245,11 @@ def _spec_blob_text(value: Any) -> str:
 
 def _inventory_match_evidence_text(row: pd.Series | dict[str, Any]) -> str:
     get = row.get
+    # DB rows arrive with the evidence already flattened by ingest — the same
+    # text the feature reranker reads, so both paths quote identical evidence.
+    prebuilt = _clean_scalar(get("match_evidence_text"))
+    if prebuilt:
+        return prebuilt[:_INVENTORY_EVIDENCE_MAX_CHARS]
     parts = [
         _clean_scalar(get("title")),
         " ".join(

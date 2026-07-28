@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -11,12 +12,14 @@ from typing import Any
 from src.domain.categories import CANONICAL_CATEGORIES
 from src.domain.normalizer import normalize_category, normalize_make
 
+logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parents[2]
-# The SAME workbook (and env override) the ingest reads (src/search/ingest.py):
-# the brands/categories the prompts advertise must be the inventory the search can actually
-# return. This used to read listings_final_v5.xlsx while ingest read listings.xlsx, so the
-# prompts promised makes the index had never seen.
+# Fallback only. The brands/categories the prompts advertise must be the inventory
+# the search can actually return, so the primary source is the trailer_listings
+# table search itself reads. This module used to read listings_final_v5.xlsx while
+# ingest read listings.xlsx, and the prompts promised makes the index had never
+# seen; reading the same rows as search removes that class of drift entirely.
 _LISTINGS_FILE = Path(os.getenv("LISTINGS_DATA_FILE", str(_ROOT / "listings.xlsx")))
 
 _CATEGORY_ALIASES = {
@@ -45,25 +48,68 @@ def _display_category(value: Any) -> str:
     return _CATEGORY_ALIASES.get(normalized, normalized)
 
 
-@lru_cache(maxsize=1)
-def load_make_inventory() -> MakeInventory:
-    if not _LISTINGS_FILE.exists():
-        return MakeInventory((), {}, {})
+def _make_category_pairs_from_db() -> list[tuple[str, str]]:
+    """(make, category) for every listing, straight from the table.
 
+    Returns an empty list when the database is off or the table is empty, so the
+    caller can fall back to the workbook rather than advertise no brands at all.
+    """
+    from sqlalchemy import select
+
+    from src import db
+    from src.db_models import TrailerListingRow
+
+    if not db.database_enabled():
+        return []
+    try:
+        with db.get_session_factory()() as session:
+            rows = session.execute(
+                select(TrailerListingRow.make, TrailerListingRow.category).distinct()
+            ).all()
+    except Exception:
+        # Brand advertising must never take the chatbot down; the workbook
+        # fallback below still produces a usable prompt block.
+        logger.exception("make_inventory_db_read_failed | falling back to workbook")
+        return []
+    return [(str(make or ""), str(category or "")) for make, category in rows]
+
+
+def _make_category_pairs_from_workbook() -> list[tuple[str, str]]:
+    if not _LISTINGS_FILE.exists():
+        return []
     try:
         import pandas as pd
 
         df = pd.read_excel(_LISTINGS_FILE)
     except ImportError:
-        return MakeInventory((), {}, {})
+        return []
     if "make" not in df.columns or "category" not in df.columns:
+        return []
+    return [
+        (str(row.get("make") or "").strip(), str(row.get("category") or "").strip())
+        for _, row in df.iterrows()
+    ]
+
+
+@lru_cache(maxsize=1)
+def load_make_inventory() -> MakeInventory:
+    """The brands the prompts may advertise, derived from what we actually stock.
+
+    Sourced from trailer_listings so an advertised brand is by construction a
+    brand search can return. The workbook is the fallback for a database that is
+    off or not yet ingested.
+    """
+    pairs = _make_category_pairs_from_db()
+    source = "trailer_listings"
+    if not pairs:
+        pairs = _make_category_pairs_from_workbook()
+        source = "workbook"
+    if not pairs:
         return MakeInventory((), {}, {})
 
     categories: dict[str, set[str]] = {}
     filter_values: dict[str, set[str]] = {}
-    for _, row in df.iterrows():
-        raw_make = str(row.get("make") or "").strip()
-        raw_category = str(row.get("category") or "").strip()
+    for raw_make, raw_category in pairs:
         if not raw_make or not raw_category:
             continue
 
@@ -71,7 +117,7 @@ def load_make_inventory() -> MakeInventory:
         category = _display_category(raw_category)
         if category == "Unknown" or category not in CANONICAL_CATEGORIES:
             # Only categories the rest of the system can actually qualify and search. The
-            # workbook carries a handful of rows outside the canonical 13 (e.g. "Welding")
+            # catalogue carries a handful of rows outside the canonical 13 (e.g. "Welding")
             # — advertised in the makes block, they contradicted the same prompt's "we
             # carry exactly 13 categories" line and could be offered in the brand-category
             # question as a choice nothing downstream could handle.
@@ -83,6 +129,9 @@ def load_make_inventory() -> MakeInventory:
         variants.add(normalize_make(raw_make))
 
     canonical_makes = tuple(sorted(categories))
+    logger.info(
+        "make_inventory_loaded | source=%s | makes=%s", source, len(canonical_makes)
+    )
     return MakeInventory(
         canonical_makes=canonical_makes,
         categories_by_make={make: tuple(sorted(values)) for make, values in categories.items()},
@@ -91,6 +140,26 @@ def load_make_inventory() -> MakeInventory:
             for make, values in filter_values.items()
         },
     )
+
+
+def stocked_categories() -> tuple[str, ...]:
+    """Canonical categories we currently hold stock in, in canonical order.
+
+    The vocabulary stays hand-written in categories.py — the type/cargo terms
+    encode judgment no column can supply — but which of those categories the
+    prompts advertise is decided by the catalogue. Falls back to all canonical
+    categories when nothing is loaded, so an unreachable database can never make
+    the bot claim we sell nothing.
+    """
+    inventory = load_make_inventory()
+    available = {
+        category
+        for categories in inventory.categories_by_make.values()
+        for category in categories
+    }
+    if not available:
+        return tuple(CANONICAL_CATEGORIES)
+    return tuple(c for c in CANONICAL_CATEGORIES if c in available)
 
 
 def known_makes() -> tuple[str, ...]:
