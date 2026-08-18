@@ -3,7 +3,13 @@ from __future__ import annotations
 from tests.conftest import FakeLLM
 
 from src.domain.canned_responses import CANNED_RESPONSES
-from src.llm.respond import build_respond_prompt, respond_turn, respond_with_all_listings
+from src.llm.respond import (
+    _contact_only_turn,
+    _has_recommendation_basis,
+    build_respond_prompt,
+    respond_turn,
+    respond_with_all_listings,
+)
 from src.llm.schemas import ReplyOutput
 from tests.unit.llm_helpers import sample_analysis
 
@@ -225,7 +231,7 @@ def test_no_category_and_nothing_to_go_on_gets_the_we_carry_paragraph():
         slot_answers=[],
         extracted={
             "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
-            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "payload_lbs": None, "axle_capacity_lbs": None, "hitch_type": None, "haul_item": None,
             "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
         },
     )
@@ -259,7 +265,7 @@ def test_asking_the_type_question_again_switches_to_the_full_lineup_list():
         slot_answers=[],
         extracted={
             "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
-            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "payload_lbs": None, "axle_capacity_lbs": None, "hitch_type": None, "haul_item": None,
             "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
         },
         haul_classification={"is_lightweight_utility_load": False, "needs_width_question": False, "haul_item_matched": None},
@@ -438,7 +444,7 @@ def test_contact_only_turn_gets_a_plain_type_question_not_recommendations():
         contact={"name": "Ibrahim", "email": "ibrahim@x.ai", "phone": None},
         extracted={
             "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
-            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "payload_lbs": None, "axle_capacity_lbs": None, "hitch_type": None, "haul_item": None,
             "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
         },
     )
@@ -470,7 +476,7 @@ def test_options_ask_with_nothing_known_gets_paragraph_not_bullets():
         slot_answers=[],
         extracted={
             "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
-            "payload_lbs": None, "hitch_type": None, "haul_item": None,
+            "payload_lbs": None, "axle_capacity_lbs": None, "hitch_type": None, "haul_item": None,
             "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
         },
     )
@@ -615,3 +621,26 @@ def test_no_listings_fabrication_without_a_pending_question_still_strips():
     reply = respond_with_all_listings(client, state, sample_analysis(), {})
     assert "example.test" not in reply.assistant_text
     assert reply.cited_listing_urls == []
+
+
+def test_contact_plus_an_axle_requirement_is_not_a_contact_only_turn():
+    """"I'm Ibrahim, and the trailer should have 7,000 lb axles" states a real requirement.
+
+    Regression guard: an axle rating used to register here only by accident, as the junk
+    feature "10k axles". Once that leak was fixed, the axle number was the ONLY signal left -
+    and it was not checked, so the turn counted as saying nothing about trailers and the
+    customer got the generic we-carry paragraph instead of a tailored recommendation.
+    """
+    analysis = sample_analysis(
+        category_mentioned=None,
+        slot_answers=[],
+        contact={"name": "Ibrahim", "email": "ibrahim@google.com", "phone": None, "declined": False},
+        extracted={
+            "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
+            "payload_lbs": None, "axle_capacity_lbs": 7000.0, "hitch_type": None,
+            "haul_item": None, "brand_preference": None,
+            "non_metadata_features": [], "numeric_no_preference": [],
+        },
+    )
+    assert _contact_only_turn(analysis) is False
+    assert _has_recommendation_basis({"slots": {"axle_capacity_lbs": 7000.0}}, analysis) is True

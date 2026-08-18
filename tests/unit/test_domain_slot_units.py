@@ -2,6 +2,9 @@ import pytest
 
 from src.domain.slot_map import (
     _SLOT_METADATA_FILTER_MAP,
+    can_autofill_slot,
+    equivalent_slots,
+    normalize_slot_targets,
     normalize_answer_for_slot,
     normalize_hitch_answer,
     normalize_slot_value,
@@ -131,3 +134,39 @@ def test_units_listing_string_parsers():
     assert parse_weight_lbs("2 tons") == 4000
     assert parse_weight_lbs("5k") == 5000
     assert parse_weight_lbs("7,000 lbs") == 7000
+
+
+# --- Axle capacity: a weight slot that must never be confused with payload -------------------
+
+
+def test_axle_capacity_answer_normalization():
+    """Requirement: lbs answers, a range keeps the LOWEST value, a vague answer is null."""
+    normalize = lambda value: normalize_answer_for_slot("Utility", "axle_capacity_lbs", value)
+    assert normalize("7000 lbs") == 7000
+    assert normalize("3,500 lbs per axle") == 3500
+    assert normalize("7k") == 7000
+    # A range stores its smallest side, exactly like every other numeric slot.
+    assert normalize("5,000-7,000 lbs") == 5000
+    assert normalize("between 3500 and 7000") == 3500
+    # Vague answers are "asked, no preference" (null), never raw text.
+    assert normalize("not sure") is None
+    assert normalize("whatever works") is None
+    assert normalize("no preference") is None
+
+
+def test_axle_capacity_is_not_in_the_payload_alias_family():
+    """The load weight must never silently auto-answer the axle question.
+
+    Filing axle_capacity_lbs under the "payload_lbs" kind would put it in the payload alias
+    group, so a haul_weight_lbs the customer already gave would fill it and the question
+    would never be asked. It gets a kind of its own precisely to prevent that.
+    """
+    assert equivalent_slots("axle_capacity_lbs") == ()
+    assert can_autofill_slot("axle_capacity_lbs") is False
+    assert "axle_capacity_lbs" not in equivalent_slots("haul_weight_lbs")
+
+
+def test_axle_capacity_reaches_the_search_as_its_own_target():
+    assert normalize_slot_targets("Utility", "axle_capacity_lbs", "7000 lbs") == {"axle_capacity_lbs": 7000.0}
+    # The load weight still targets payload only - the two never cross.
+    assert normalize_slot_targets("Utility", "haul_weight_lbs", "7000 lbs") == {"payload_lbs": 7000.0}

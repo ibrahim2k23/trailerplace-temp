@@ -36,6 +36,11 @@ from src.llm.schemas import HaulClassification, TurnAnalysis
 INJECTED_WIDTH_SLOT = "item_or_trailer_width_ft"
 INJECTED_WIDTH_QUESTION = "About how wide is that item or trailer you need to haul?"
 
+# Facts worth recording in ANY category, even one whose spec never asks for them. Only Utility
+# asks about axle capacity, but a customer who volunteers "I want 7,000 lb axles" while shopping
+# Equipment has stated a real requirement, and the fit rerank can use it in every category.
+_ALWAYS_VALID_NUMERIC_SLOTS = frozenset({"axle_capacity_lbs"})
+
 # Aluminum is the odd one out: it is the inventory category we stock, and the trailer TYPE the
 # customer wants it in ("utility", "enclosed") is a slot underneath it, not a category of its own.
 # So a type word spoken inside the Aluminum flow is an ANSWER, never a category change.
@@ -1082,12 +1087,15 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         "payload_lbs": analysis.extracted.payload_lbs,
         "haul_weight_lbs": analysis.extracted.payload_lbs,
         "payload_need": analysis.extracted.payload_lbs,
+        # Deliberately NOT fanned out from payload_lbs like the two above: an axle rating and
+        # a load weight are different facts, and only the model's own field may fill it.
+        "axle_capacity_lbs": analysis.extracted.axle_capacity_lbs,
     }
     valid_slots = set(required_slots_for_state(state)) | set(get_trailer_fields(category).optional)
     for key, value in numeric_map.items():
         if value is None or _echoes_dropped_carried(state, key, value):
             continue
-        if key in valid_slots or key.startswith("trailer_"):
+        if key in valid_slots or key.startswith("trailer_") or key in _ALWAYS_VALID_NUMERIC_SLOTS:
             _set_slot(state, key, value)
     for answer in analysis.slot_answers:
         # A blank raw_answer is not an answer. Seen live: answering the length question for

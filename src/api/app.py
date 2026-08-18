@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from src import conversation_store, db, tracing
 from src.api import readiness
 from src.api.routes import ensure_graph, router
 from src.config import settings
+from src.domain.brands import load_make_inventory
 from src.log_setup import configure_trailerplace_logging
 
 logger = logging.getLogger(__name__)
@@ -40,9 +42,37 @@ def run_startup() -> None:
             readiness.mark_failed("database unreachable")
             return
         readiness.mark_db_ready()
+
+        _warm_catalogue_vocabulary()
     except Exception as exc:  # noqa: BLE001 - surface the reason through /health
         logger.exception("Startup failed")
         readiness.mark_failed(f"{type(exc).__name__}: {exc}")
+
+
+def _warm_catalogue_vocabulary() -> None:
+    """Load the brand/category vocabulary now instead of on the customer's first message.
+
+    Both prompts need it every turn (the makes block, the "we carry ..." line), and it is
+    lru_cached for the life of the process — but the COLD read is a real round trip to
+    Postgres, measured at ~5 s against the remote instance, and it lands inside the first
+    /chat's own timeout budget. That is the same reason ensure_graph() is called above.
+
+    Best-effort by design: load_make_inventory falls back to the workbook and
+    stocked_categories falls back to every canonical category, so a failure here costs a
+    slow first turn and nothing else. It must never mark the service unhealthy — hence its
+    own except, rather than riding on run_startup's readiness handler.
+    """
+    started = time.perf_counter()
+    try:
+        inventory = load_make_inventory()
+    except Exception:  # noqa: BLE001 - an optimisation, never a gate
+        logger.warning("Catalogue warm-up failed; the first /chat will load it", exc_info=True)
+        return
+    logger.info(
+        "catalogue_warmed | makes=%s | seconds=%.2f",
+        len(inventory.canonical_makes),
+        time.perf_counter() - started,
+    )
 
 
 @asynccontextmanager

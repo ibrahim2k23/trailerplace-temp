@@ -21,6 +21,7 @@ def _listing(
     length: str = "20 ft",
     width: str = "8 ft",
     payload: str = "10000 lbs",
+    axle_capacity: str | None = None,
     score: float = 0.9,
 ) -> dict:
     return {
@@ -30,6 +31,7 @@ def _listing(
         "length": length,
         "width": width,
         "height": None,
+        "axle_capacity": axle_capacity,
         "payload_capacity": payload,
         "gvwr": "14000 lbs",
         "features": features or [],
@@ -287,6 +289,7 @@ def _row(**fields):
         "make": "", "color": None, "hitch_type": None, "price": None, "price_display": None,
         "year": None, "model": None, "trim": None, "stock_number": None,
         "length": None, "width": None, "height": None, "axles": None, "gvwr": None,
+        "axle_capacity": None,
         "payload_capacity": None, "trailer_material": None, "floor": None,
         "features": [], "match_evidence_text": "",
     }
@@ -480,3 +483,61 @@ def test_make_filter_matches_every_workbook_spelling_of_the_brand():
     filters = search._listing_filters("Equipment", {}, {"make": "Diamond C"})
     values = next(value for column, op, value in filters if column == "make")
     assert "Diamond C" in values
+
+
+# --- Axle capacity ranking (a preference, never a gate) --------------------------------------
+
+
+def _fit(listings, **required):
+    kwargs = {
+        "required_length_ft": None, "required_payload_lbs": None,
+        "required_width_ft": None, "required_height_ft": None,
+        "required_axle_capacity_lbs": None,
+    }
+    kwargs.update(required)
+    return search._rerank_listings_by_fit(
+        listings,
+        warn_ratio=search.RERANK_WARN_RATIO,
+        extreme_ratio=search.RERANK_EXTREME_RATIO,
+        length_weight=search.RERANK_LENGTH_WEIGHT,
+        missing_dim_penalty=search.RERANK_MISSING_DIM_PENALTY,
+        **kwargs,
+    )
+
+
+def test_axle_capacity_orders_matching_trailers_first():
+    weak = _listing("weak", axle_capacity="3500 lbs")
+    exact = _listing("exact", axle_capacity="7000 lbs")
+    overkill = _listing("overkill", axle_capacity="15000 lbs")
+
+    ranked, _debug = _fit([weak, overkill, exact], required_axle_capacity_lbs=7000.0)
+
+    # Exact match first, then over-spec, then under-spec.
+    assert [item["url"] for item in ranked] == ["exact", "overkill", "weak"]
+
+
+def test_a_missing_axle_capacity_never_drops_the_listing():
+    """~30% of the catalogue has no axle rating, and Utility is the worst covered.
+
+    A miss must cost ranking position only. If it incremented fail_count the legacy path
+    would cull the row outright whenever any rated row existed - reproducing the empty-screen
+    behaviour a hard SQL gate was rejected for.
+    """
+    rated = _listing("rated", axle_capacity="7000 lbs")
+    unrated = _listing("unrated", axle_capacity=None)
+
+    ranked, debug = _fit([unrated, rated], required_axle_capacity_lbs=7000.0)
+
+    assert debug["retained_candidate_count"] == 2
+    assert {item["url"] for item in ranked} == {"rated", "unrated"}
+    assert ranked[0]["url"] == "rated"
+
+
+def test_axle_capacity_alone_is_enough_to_trigger_the_rerank():
+    """needs_present must count the axle requirement, or an axle-only preference is ignored."""
+    _ranked, debug = _fit(
+        [_listing("a", axle_capacity="3500 lbs"), _listing("b", axle_capacity="7000 lbs")],
+        required_axle_capacity_lbs=7000.0,
+    )
+    assert debug["applied"] is True
+    assert debug["required_axle_capacity_lbs"] == 7000.0

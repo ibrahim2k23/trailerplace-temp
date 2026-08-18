@@ -143,6 +143,8 @@ class TrailerListingRow(Base):
     height: Mapped[str | None] = mapped_column(Text, nullable=True)
     axles: Mapped[str | None] = mapped_column(Text, nullable=True)
     gvwr: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PER-AXLE rating, not a total: a two-axle trailer rated 3500 here has a 7000 lb GVWR.
+    axle_capacity: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload_capacity: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     length_ft_num: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -150,6 +152,8 @@ class TrailerListingRow(Base):
     height_ft_num: Mapped[float | None] = mapped_column(Float, nullable=True)
     gvwr_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
     payload_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # No index: axle capacity is a rerank signal, never a WHERE clause.
+    axle_capacity_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     trailer_material: Mapped[str | None] = mapped_column(String(64), nullable=True)
     floor: Mapped[str | None] = mapped_column(String(64), nullable=True)

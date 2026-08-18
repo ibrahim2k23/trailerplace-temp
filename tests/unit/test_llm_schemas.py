@@ -38,6 +38,7 @@ def test_nested_models_required():
         trailer_width_ft=None,
         trailer_height_ft=None,
         payload_lbs=None,
+        axle_capacity_lbs=None,
         hitch_type=None,
         haul_item=None,
         brand_preference=None,

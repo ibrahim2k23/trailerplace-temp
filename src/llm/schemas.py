@@ -40,6 +40,7 @@ class ExtractedFields(StrictBaseModel):
     trailer_width_ft: float | None = Field(description="Trailer width already converted to feet by the model, or null.")
     trailer_height_ft: float | None = Field(description="Trailer height already converted to feet by the model, or null.")
     payload_lbs: float | None = Field(description="Payload already converted to pounds by the model, or null.")
+    axle_capacity_lbs: float | None = Field(description="PER-AXLE capacity rating in pounds ('7000 lb axles'), never the load weight, or null.")
     hitch_type: list[Literal["Bumper Pull", "Gooseneck"]] | None = Field(description="A single clear hitch preference, or null (including when the customer says either/any/no preference).")
     haul_item: str | None = Field(description="Cargo or item to haul, in the user's words.")
     brand_preference: str | None = Field(description="Canonical known make, or unknown brand verbatim.")
@@ -47,7 +48,7 @@ class ExtractedFields(StrictBaseModel):
         description=(
             "Only newly stated functional/equipment features with no dedicated metadata field; "
             "exclude makes, categories/subcategories, trailer/model words, hitches, dimensions, "
-            "weights, colours, and prices."
+            "weights, axle capacities/ratings, colours, and prices."
         )
     )
     numeric_no_preference: list[str] = Field(description="Slot names where the user gave no numeric preference.")

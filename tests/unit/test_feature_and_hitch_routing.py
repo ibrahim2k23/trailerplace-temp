@@ -138,3 +138,38 @@ def test_weight_slots_store_pounds_not_a_sentence():
     )
     assert state["slots"]["haul_weight_lbs"] == 4000.0
     assert state["slots"]["payload_lbs"] == 4000.0
+
+
+@pytest.mark.parametrize(
+    "feature",
+    [
+        "10k axles",            # seen live: stored axle_capacity_lbs=10000 AND this feature
+        "7000 lb axles",
+        "two 3500 lb axles",
+        "axle capacity",
+        "5200 lb axle",
+        "10k axle rating",
+        "heavy duty axles",
+    ],
+)
+def test_anything_naming_an_axle_never_reaches_the_feature_list(feature):
+    """Axle capacity has its own slot and its own rerank signal.
+
+    Left in the feature list the number is thrown away and the bare noun "axles" matches
+    almost any tandem trailer - and feature_ranker strips the Axle Capacity label from the
+    evidence it shows the model, so the phrase can only ever score 0.
+    """
+    kept, _hitch = sanitize_non_metadata_features([feature])
+    assert kept == []
+
+
+def test_a_hitch_is_still_lifted_out_of_a_phrase_that_also_names_axles():
+    """Dropping the axle phrase must not cost us the hitch filter hiding inside it."""
+    kept, hitch = sanitize_non_metadata_features(["gooseneck with 10k axles"])
+    assert kept == []
+    assert hitch == ["Gooseneck"]
+
+
+def test_real_features_alongside_an_axle_phrase_survive_on_their_own():
+    kept, _hitch = sanitize_non_metadata_features(["10k axles", "electric winch", "side rails"])
+    assert kept == ["electric winch", "side rails"]

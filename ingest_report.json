@@ -8,6 +8,6 @@
   "upserted_rows": 256,
   "pruned_rows": 0,
   "table_rows": 256,
-  "elapsed_seconds": 16.503,
+  "elapsed_seconds": 11.883,
   "quarantined_rows": 0
 }

@@ -75,17 +75,19 @@ _SPECS: dict[str, TrailerFieldSpec] = {
 
     "Utility": TrailerFieldSpec(
         category="Utility",
-        required=["haul_item", "haul_weight_lbs"],
+        required=["haul_item", "haul_weight_lbs", "axle_capacity_lbs"],
         optional=["trailer_size"],
         questions={
             "haul_item":           "What will you be hauling on the utility trailer?",
             "haul_weight_lbs":     "What's the rough total weight of your load?",
+            "axle_capacity_lbs":   "What axle capacity do you prefer (for example 3,500 or 7,000 lbs per axle)?",
             "trailer_size":        "Do you have a size preference (length / width)?",
             #"sides_gate_storage":  "Will you need side rails, a rear gate, or tool storage?",
         },
         answer_guidance={
             "haul_item": "Store the cargo, equipment, or use case the customer says they need the utility trailer for.",
             "haul_weight_lbs": "Store the rough total load weight or payload requirement using weight units only.",
+            "axle_capacity_lbs": "Store the PER-AXLE capacity rating the customer wants, using weight units only. Never the total load weight.",
             "trailer_size": "Store the preferred trailer dimensions. Accept length, width, or combined size notation such as AxB or AxBxC when clearly giving size.",
             #"sides_gate_storage": "Store requested utility-trailer features such as side rails, rear gate, or tool storage.",
         },
@@ -307,6 +309,7 @@ _NUMERIC_OR_MEASUREMENT_SLOTS = {
     "haul_weight_lbs", "haul_length_ft", "vehicle_length_ft",
     "trailer_length_ft", "trailer_size", "cargo_size", "bin_size",
     "tank_capacity", "crew_size", "total_weight", "payload_need",
+    "axle_capacity_lbs",
 }
 _FREE_TEXT_SLOTS = {
     "haul_item", "haul_material", "vehicle_type", "use_case",

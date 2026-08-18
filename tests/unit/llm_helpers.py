@@ -17,6 +17,7 @@ def sample_analysis(**updates) -> TurnAnalysis:
             "trailer_width_ft": 7.0,
             "trailer_height_ft": None,
             "payload_lbs": None,
+            "axle_capacity_lbs": None,
             "hitch_type": None,
             "haul_item": "dirt",
             "brand_preference": None,

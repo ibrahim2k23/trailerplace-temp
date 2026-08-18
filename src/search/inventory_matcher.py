@@ -123,7 +123,7 @@ def prepare_inventory(df: pd.DataFrame) -> pd.DataFrame:
     for column in (
         "title", "url", "year", "make", "model", "trim", "category",
         "subcategory", "stock_number", "price", "condition", "length", "width",
-        "gvwr", "payload_capacity", "hitch_type", "color", "axles",
+        "gvwr", "payload_capacity", "hitch_type", "color", "axles", "axle_capacity",
         "trailer_material", "floor", "dealer_notes", "info_specs_json",
         "info_spec_json",
     ):
@@ -291,6 +291,7 @@ def _row_to_listing(row: pd.Series | dict[str, Any], score: float | None = None)
         "length": _clean_scalar(get("length")),
         "width": _clean_scalar(get("width")),
         "gvwr": _clean_scalar(get("gvwr")),
+        "axle_capacity": _clean_scalar(get("axle_capacity")),
         "payload_capacity": _clean_scalar(get("payload_capacity")),
         "hitch_type": _clean_scalar(get("hitch_type")),
         # Card-shape parity with search results (milestone.md M6 step 6).

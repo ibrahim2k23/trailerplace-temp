@@ -86,7 +86,7 @@ def test_no_lookup_block_routes_normally():
 def _empty_extracted() -> dict:
     return {
         "trailer_length_ft": None, "trailer_width_ft": None, "trailer_height_ft": None,
-        "payload_lbs": None, "hitch_type": None, "haul_item": None,
+        "payload_lbs": None, "axle_capacity_lbs": None, "hitch_type": None, "haul_item": None,
         "brand_preference": None, "non_metadata_features": [], "numeric_no_preference": [],
     }
 

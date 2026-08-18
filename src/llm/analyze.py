@@ -386,6 +386,10 @@ Aluminum. Two rules, and they apply no matter which word came first in the sente
 - AxB = width x length. AxBxC = width x length x height. "16 by 8" = 16 ft length, 8 ft width.
 - Convert ALL lengths/widths/heights to feet and ALL weights to lbs YOURSELF: "83 inches" -> 6.92, 7'6" -> 7.5, "2 tons" -> 4000, "5k lbs" -> 5000.
   Every measurement we store is a number of FEET and every weight a number of POUNDS - never a sentence, never another unit.
+- axle_capacity_lbs vs payload_lbs: a weight tied to the word axle/axles ("7,000 lb axles", "axle
+  capacity of 5200", "5.2k axles") is axle_capacity_lbs; a weight describing the CARGO ("a 7000 lb
+  skid steer", "my load is 2 tons") is payload_lbs. Store the PER-AXLE number, never the total:
+  "two 3500 lb axles" -> 3500. One sentence can give both - take both.
 - Side or wall measurements are HEIGHT details: "3 ft sides" -> trailer_height_ft=3; "3 inch walls" ->
   trailer_height_ft=0.25. Do not misread these as trailer width or leave them only as non-metadata features.
 - A number followed by "footer" is shorthand for trailer LENGTH: "20 footer" or "20-footer" ->
@@ -431,7 +435,8 @@ NEVER include, alone or attached to a real feature:
 - trailer identity nouns ("trailer", model year, stock number, model name), any known make/brand,
   any category or synonym from TRAILER CATEGORIES ("enclosed", "utility", "tilt", "aluminum", ...)
 - a hitch type -> extracted.hitch_type; a length/width/height -> extracted.trailer_*_ft;
-  a weight/payload/GVWR -> extracted.payload_lbs
+  a weight/payload/GVWR -> extracted.payload_lbs; ANY mention of axles ("10k axles", "axle
+  capacity", "7000 lb axle") -> extracted.axle_capacity_lbs and NEVER a feature
 - a colour, price, or budget
 Output "insulated", never "insulated enclosed". Extract only features newly stated in the LATEST USER
 MESSAGE (already-collected ones stay in state). If nothing real remains, return an empty list.
@@ -511,9 +516,11 @@ def normalize_analysis_values(analysis: TurnAnalysis, category: str | None = Non
         if isinstance(value, str):
             parsed = parse_length_ft(value)
             setattr(extracted, field, parsed if parsed is not None else value)
-    if isinstance(extracted.payload_lbs, str):
-        parsed = parse_weight_lbs(extracted.payload_lbs)
-        extracted.payload_lbs = parsed if parsed is not None else extracted.payload_lbs
+    for field in ("payload_lbs", "axle_capacity_lbs"):
+        value = getattr(extracted, field)
+        if isinstance(value, str):
+            parsed = parse_weight_lbs(value)
+            setattr(extracted, field, parsed if parsed is not None else value)
 
     # Pure safety net: rescue stray-string numerics on `extracted` only. Slot answers
     # are left untouched here — mapping each slot to its metadata target(s) happens in

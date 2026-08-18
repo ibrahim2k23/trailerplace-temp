@@ -49,6 +49,12 @@ load_dotenv()
 
 UPSERT_BATCH_SIZE = 100
 MATCH_EVIDENCE_TEXT_MAX_CHARS = 12000
+# axle_capacity is a PER-AXLE rating (GVWR is ~2x it on the two-axle rows that dominate the
+# catalogue). A handful of rows carry the axle COUNT in that column instead ("2 lbs" against a
+# 14,000 lb GVWR); parsed as a capacity it would rank as an absurdly weak trailer and print
+# "Axle capacity: 2 lbs" on the card. Real ratings start at 2000, so anything under this floor
+# is the count, not a capacity, and is dropped.
+MIN_PLAUSIBLE_AXLE_CAPACITY_LBS = 1000
 MAX_RETRIES = int(os.getenv("INGEST_MAX_RETRIES", "4"))
 FEATURE_EXTRACTION_VERSION = os.getenv(
     "FEATURE_EXTRACTION_VERSION", "trailer-features-v2"
@@ -385,6 +391,13 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     gvwr_lbs_num = parse_lbs(gvwr)
     payload = col("payload_capacity", "payload capacity") or None
     payload_lbs_num = parse_lbs(payload)
+    axle_capacity = col("axle_capacity", "axle capacity") or None
+    axle_capacity_lbs_num = parse_lbs(axle_capacity)
+    if axle_capacity_lbs_num is not None and axle_capacity_lbs_num < MIN_PLAUSIBLE_AXLE_CAPACITY_LBS:
+        # The axle COUNT landed in the capacity column. Drop the display string too, so the
+        # number never reaches the fit rerank and "2 lbs" never reaches a listing card.
+        axle_capacity = None
+        axle_capacity_lbs_num = None
     material = col("trailer_material", "trailer material") or None
     floor = col("floor") or None
     length_ft_num = parse_length_ft(length)
@@ -409,6 +422,9 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "height": height,
         "axles": axles,
         "gvwr": gvwr,
+        # Also feeds canonical_content_hash: without it, adding axle capacity to an existing
+        # catalogue leaves every hash unchanged and an incremental re-ingest skips every row.
+        "axle_capacity": axle_capacity,
         "payload_capacity": payload,
         "trailer_material": material,
         "floor": floor,
@@ -451,12 +467,14 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "height": height,
         "axles": axles,
         "gvwr": gvwr,
+        "axle_capacity": axle_capacity,
         "payload_capacity": payload,
         "length_ft_num": length_ft_num,
         "width_ft_num": width_ft_num,
         "height_ft_num": height_ft_num,
         "gvwr_lbs_num": gvwr_lbs_num,
         "payload_lbs_num": payload_lbs_num,
+        "axle_capacity_lbs_num": axle_capacity_lbs_num,
         "trailer_material": material,
         "floor": floor,
         "features": features,

@@ -34,6 +34,7 @@ _LISTING_FIELDS: tuple[tuple[str, str], ...] = (
     ("Length", "length"),
     ("Width", "width"),
     ("Payload", "payload_capacity"),
+    ("Axle capacity", "axle_capacity"),
     ("Hitch type", "hitch_type"),
 )
 
@@ -156,6 +157,12 @@ def _contact_only_turn(analysis: TurnAnalysis) -> bool:
         or extracted.trailer_width_ft is not None
         or extracted.trailer_height_ft is not None
         or extracted.payload_lbs is not None
+        # Easy to forget when a new extracted field is added, and the cost is silent: an axle
+        # rating used to register here only by accident, as the junk feature "10k axles". Once
+        # that leak was fixed, "I'm Ibrahim, and I want 7,000 lb axles" counted as saying
+        # NOTHING about trailers and got the generic we-carry paragraph instead of a
+        # recommendation. Every requirement-bearing field on `extracted` belongs in this list.
+        or extracted.axle_capacity_lbs is not None
         or analysis.slot_answers
         or analysis.user_question_to_answer
     )
@@ -398,7 +405,7 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "Do NOT drop, add, reorder, or judge whether a listing's size, style or features 'fit' - that ranking "
             "already happened and it is not your job. A listing that looks like a different sub-style than the others "
             "(a hay trailer among cattle trailers, a shorter one, a pricier one) STILL gets shown. "
-            "A listing missing an optional field (width, payload, hitch) is normal: show the fields it has and skip the "
+            "A listing missing an optional field (width, payload, axle capacity, hitch) is normal: show the fields it has and skip the "
             "missing lines - never omit the listing itself. Count them before you finish."
         )
     if _outcome_get(turn_outcome, "brand_relaxed"):
@@ -662,13 +669,22 @@ bullets: bold name, em dash, one short line each. Two or more items means bullet
 {reference_block}
 
 === LISTING CARD STRUCTURE (repeat for EVERY listing in the block, numbered in order) ===
-1. [full TITLE, hyperlinked to its exact URL]
-   - Category / Make / Price / Length / Width / Payload / Hitch type: one bullet each, ONLY for
-     the fields that listing's block line actually gives.
-   - Last bullet: one sales-pitch sentence for THAT trailer, written as a plain bullet with NO
-     label in front (never "One-sentence pitch:" or "Description:"), built only from its own
-     fields and what the customer needs - never invent a feature, spec, condition, or price;
-     write a different one per listing.
+EVERY field gets its OWN bullet on its OWN line. NEVER join fields onto one line with slashes
+or commas ("Category: Utility / Make: Diamond C / Price: $4,495" is a FAILED card). Copy this
+shape exactly, keeping this field order:
+
+1. [2026 Iron Bull DTB - 15081](https://...)
+   - Category: Utility
+   - Make: Iron Bull Trailers
+   - Price: $9,995
+   - Length: 14 ft 0 in
+   - Width: 6 ft 11 in
+   - Payload: 4420 lbs
+   - Axle capacity: 3500 lbs
+   - Hitch type: Bumper Pull
+   - One sales-pitch sentence for THAT trailer, as a plain bullet with NO label in front (never
+     "One-sentence pitch:" or "Description:"), built only from its own fields and what the
+     customer needs - never invent a feature, spec, condition, or price; different per listing.
 
 - THE TITLE IS ALWAYS A MARKDOWN HYPERLINK to that listing's exact URL from the block:
   [2026 Iron Bull DTB - 15081](https://...). A bare or merely bold title with no link is a failed

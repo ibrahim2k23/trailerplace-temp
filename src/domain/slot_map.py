@@ -30,6 +30,12 @@ _SLOT_VALUE_KIND = {
     "payload_lbs": "payload_lbs",
     "payload_need": "payload_lbs",
     "total_weight": "payload_lbs",
+    # A kind of its own, NOT "payload_lbs". Kinds define the alias families that let one
+    # slot answer another (see _ALIAS_GROUPS/can_autofill_slot): filed under payload, the
+    # load weight the customer already gave would silently auto-fill the axle rating and
+    # the question would never be asked. A lone kind also falls outside can_autofill_slot's
+    # whitelist, so it never receives a value from anywhere else.
+    "axle_capacity_lbs": "axle_capacity_lbs",
     "bin_size": "length_ft",
     # Combined size questions ("size preference (length / width)?"). Their own value is the
     # LENGTH in feet — the width/height they also carry are stored under their own slots.
@@ -176,6 +182,21 @@ def _clean_feature_only_value(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip(" ,;:-")
 
 
+# Anything naming an axle belongs to axle_capacity_lbs, never to the feature list. The number
+# is the whole point of an axle phrase, and the feature path throws it away: "10k axles" survives
+# _is_only_a_measurement_or_price (the noun "axles" outlives the digits) and reaches the reranker
+# as the bare string "axles", which matches nearly every tandem trailer. Worse, feature_ranker
+# STRIPS the "Axle Capacity" label from the evidence it shows the model, so an axle feature can
+# only ever score 0 and drag the coverage average down. Seen live: "a trailer with 10k axles"
+# correctly stored axle_capacity_lbs=10000 and ALSO kept the feature "10k axles".
+_AXLE_FEATURE_RE = re.compile(r"\baxles?\b", re.IGNORECASE)
+
+
+def mentions_an_axle(value: Any) -> bool:
+    """True when a phrase names an axle in any form ("10k axles", "axle capacity", "7000 lb axle")."""
+    return bool(_AXLE_FEATURE_RE.search(str(value or "")))
+
+
 def _is_only_a_measurement_or_price(feature: str) -> bool:
     """True when the phrase says nothing beyond a size, a weight or a price.
 
@@ -200,7 +221,8 @@ def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
 
     Returns ``(features_to_keep, hitch_value_or_None)``. A hitch stated as a feature
     ("gooseneck hitch only") is a filter we own, not a nice-to-have, so it is lifted out;
-    a bare size/weight/price is dropped (its value is already in its own slot).
+    a bare size/weight/price is dropped (its value is already in its own slot), and so is
+    anything naming an axle, which belongs to axle_capacity_lbs.
     """
     kept: list[str] = []
     hitch: Any = None
@@ -208,11 +230,15 @@ def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
         found = normalize_hitch_answer(feature)
         if found:
             hitch = hitch or found
+        # After the hitch lift, so "gooseneck with 10k axles" still yields the hitch.
+        if mentions_an_axle(feature):
+            continue
         if _is_only_a_measurement_or_price(feature):
             continue
         cleaned = _clean_feature_only_value(feature)
         if (
             cleaned
+            and not mentions_an_axle(cleaned)
             and not _is_only_a_measurement_or_price(cleaned)
             and cleaned.casefold() not in {value.casefold() for value in kept}
         ):
@@ -221,6 +247,7 @@ def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
 
 
 _SLOT_METADATA_FILTER_MAP = {
+    "axle_capacity_lbs": ("axle_capacity_lbs",),
     "base_category": ("subcategory",),
     "bin_size": ("length_ft",),
     "cargo_size": ("length_ft", "width_ft", "height_ft"),
@@ -273,7 +300,10 @@ def normalize_slot_value(category: str, key: str, value: Any) -> Any:
             return {"width_ft": width_ft, "length_ft": length_ft, "height_ft": height_ft}[key]
         return parse_length_ft_loose(value)
 
-    if key == "payload_lbs":
+    if key in {"payload_lbs", "axle_capacity_lbs"}:
+        # Resolves a range to its smallest side ("5,000-7,000 lbs" -> 5000) and returns
+        # None for an answer carrying no usable number, which normalize_answer_for_slot
+        # stores as "asked, no preference".
         return parse_weight_lbs_loose(value)
 
     return value
