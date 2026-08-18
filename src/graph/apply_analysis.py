@@ -21,6 +21,7 @@ from src.domain.slot_map import (
     can_autofill_slot,
     equivalent_slots,
     is_recognized_slot_value,
+    mentions_an_axle,
     normalize_answer_for_slot,
     normalize_hitch_answer,
     normalize_slot_targets,
@@ -1112,6 +1113,13 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
             or answer.slot_name in _SLOT_METADATA_FILTER_MAP
         )
         if not known:
+            continue
+        # An axle rating answers the axle slot and nothing else. Seen live: "a 20ft livestock
+        # with 5k axles" came back as slot_answers haul_weight_lbs='5k axles', which parsed to
+        # 5000 and fanned out to payload_lbs — inventing a 5,000 lb LOAD the customer never
+        # mentioned and filtering the search on it. The axle number is already captured by
+        # extracted.axle_capacity_lbs, so dropping the stray pair loses nothing.
+        if answer.slot_name != "axle_capacity_lbs" and mentions_an_axle(answer.raw_answer):
             continue
         if _echoes_dropped_carried(
             state, answer.slot_name, normalize_answer_for_slot(category, answer.slot_name, answer.raw_answer)

@@ -19,6 +19,9 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     assistant_text: str
+    # One short sales line ("Let me pull up what we have that fits."), set by search_node the
+    # moment the inventory search fires. None on every turn that did not search.
+    search_status_message: str | None = None
     sales_phase: str = "main"
     onboarding_api_messages: list[dict[str, Any]] = Field(default_factory=list)
     listings: list[dict[str, Any]] = Field(default_factory=list)
@@ -27,6 +30,12 @@ class ChatResponse(BaseModel):
     customer_email: str | None = None
     customer_phone: str | None = None
     main_prior_messages: list[dict[str, Any]] | None = None
+
+
+class TurnStatusResponse(BaseModel):
+    """What the assistant is doing RIGHT NOW, polled by the UI while /chat is still running."""
+
+    search_status_message: str | None = None
 
 
 class SessionResponse(BaseModel):

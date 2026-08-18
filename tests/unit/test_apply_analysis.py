@@ -1672,3 +1672,32 @@ def test_business_descriptor_cargo_term_does_not_outvote_the_extracted_haul_item
     )
     assert state["category"] == "Equipment"
     assert state["pending_category_suggestion"] is None
+
+
+def test_an_axle_rating_never_lands_in_the_load_weight_slot():
+    """Seen live: "I would like a 20ft livestock with 5k axles".
+
+    The extractor returned slot_answers haul_weight_lbs='5k axles' alongside the correct
+    axle_capacity_lbs. Stored, it parsed to 5000, fanned out to payload_lbs, and the search
+    then filtered on a 5,000 lb LOAD the customer had never mentioned.
+    """
+    state = new_session_state("s1")
+    state["category"] = "Livestock"
+    state["turn"] = sample_analysis(
+        intent="category_selection",
+        category_mentioned="Livestock",
+        slot_answers=[
+            {"slot_name": "haul_item", "raw_answer": "livestock"},
+            {"slot_name": "haul_weight_lbs", "raw_answer": "5k axles"},
+            {"slot_name": "trailer_length_ft", "raw_answer": "20 ft"},
+        ],
+        extracted={**_empty_extracted(), "trailer_length_ft": 20.0, "axle_capacity_lbs": 5000.0},
+    )
+    apply_analysis_to_state(state)
+    slots = state["slots"]
+
+    assert slots.get("axle_capacity_lbs") == 5000.0
+    assert slots.get("trailer_length_ft") == 20.0
+    # The load weight was never stated, so nothing may claim it was.
+    assert "haul_weight_lbs" not in slots
+    assert "payload_lbs" not in slots

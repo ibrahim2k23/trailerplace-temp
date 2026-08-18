@@ -407,6 +407,8 @@ Aluminum. Two rules, and they apply no matter which word came first in the sente
   If the message answers nothing, slot_answers is an empty list.
   For a measurement or weight slot, raw_answer is just the value with its unit ("18 ft", "7000 lbs", "8x25") -
   not the whole sentence they said it in.
+  An AXLE rating is never a load weight: "5k axles" answers axle_capacity_lbs ONLY. Never emit it
+  as haul_weight_lbs / payload_need / total_weight - that invents a load the customer never stated.
 
 === HITCH TYPE - AND WHY "GOOSENECK" IS THE TRAP IN THIS DOMAIN ===
 Gooseneck is BOTH a hitch type and one of the makes we carry. Read it wrong and we filter on the wrong thing.

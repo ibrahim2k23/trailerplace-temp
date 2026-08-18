@@ -51,9 +51,15 @@ _AUTH_PASS = (os.getenv("TRAILERPLACE_APP_PASSWORD") or "").strip()
 _AUTH_CONFIGURED = bool(_AUTH_USER and _AUTH_PASS)
 _THINKING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_thinking")
 _BACKEND_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tp_backend_ready")
+# Its own pool: the /chat call must never queue behind a thinking job, or the status polling
+# below would sit idle while the turn waits its turn for a worker.
+_CHAT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tp_chat")
 _THINKING_POLL_MS = int((os.getenv("THINKING_AGENT_POLL_MS") or "700").strip())
 _BACKEND_READY_TIMEOUT = float((os.getenv("BACKEND_READY_TIMEOUT_SECONDS") or "180").strip())
-_BACKEND_READY_POLL = float((os.getenv("BACKEND_READY_POLL_SECONDS") or "2").strip())
+# Poll granularity is dead time added on top of the backend's real boot: at 2 s the sign-in
+# screen could sit there for a further two seconds after /health had already gone green. The
+# request is a single readiness-flag read, so asking more often costs nothing.
+_BACKEND_READY_POLL = float((os.getenv("BACKEND_READY_POLL_SECONDS") or "0.4").strip())
 CHATBOT_API_URL = (os.getenv("CHATBOT_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
 _RULES_DOC_PATH = Path(__file__).with_name("langgraph_rules_vs_excel.md")
 # Keep listing data in the chat/API flow for the assistant and session tracking,
@@ -61,6 +67,53 @@ _RULES_DOC_PATH = Path(__file__).with_name("langgraph_rules_vs_excel.md")
 SHOW_LISTING_CARDS = (os.getenv("SHOW_LISTING_CARDS") or "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
+
+# The one waiting indicator, shown from the moment the turn starts until the reply lands.
+TYPING_DOTS_HTML = '<div class="tp-typing"><span></span><span></span><span></span></div>'
+
+# How often the UI asks the backend what it is doing, while /chat is still running.
+# No artificial floor on top: the line cannot appear until the graph has run analyze and
+# routed into the search node, which is several seconds of real work on its own.
+_TURN_STATUS_POLL_SECONDS = 0.35
+
+
+def _fetch_turn_status(session_id: str) -> str | None:
+    """What the backend is doing right now, or None. Never raises: this is decoration."""
+    try:
+        response = requests.get(
+            f"{CHATBOT_API_URL}/session/{session_id}/turn-status", timeout=3
+        )
+        response.raise_for_status()
+        return (response.json().get("search_status_message") or "").strip() or None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _search_note_html(text: str) -> str:
+    return f'<p class="tp-search-note">{html.escape(str(text).strip())}</p>'
+
+
+def _waiting_bubble_html(note: str | None) -> str:
+    """What sits in the assistant bubble while the turn runs.
+
+    Dots on their own until the search fires; once it does, the line it published sits above
+    them, because the dots still have work left to describe (the reply is not written yet).
+    """
+    if not note:
+        return TYPING_DOTS_HTML
+    return f"{_search_note_html(note)}{TYPING_DOTS_HTML}"
+
+
+def _render_search_note(text: str | None) -> None:
+    """The "let me go and look" line, above the results it belongs to.
+
+    The backend sets it inside search_node, so it appears if and only if the inventory search
+    actually ran - it can never tell the customer we went to check stock on a turn that never
+    searched.
+    """
+    if not str(text or "").strip():
+        return
+    st.markdown(_search_note_html(text), unsafe_allow_html=True)
 
 
 def _reset_api_session(session_id: str) -> None:
@@ -456,6 +509,31 @@ components.html("""
       animation: tp-spin .8s linear infinite;
     }
     @keyframes tp-spin { to { transform: rotate(360deg); } }
+
+    /* "Assistant is typing" — three dots that rise in sequence. This is the ONLY waiting
+       indicator: st.spinner's circle was removed so the two do not stack. */
+    .tp-typing { display: flex; align-items: center; gap: 5px; padding: 6px 2px; }
+    .tp-typing span {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--tp-text-muted);
+      animation: tp-bounce 1.2s infinite ease-in-out;
+    }
+    .tp-typing span:nth-child(2) { animation-delay: .18s; }
+    .tp-typing span:nth-child(3) { animation-delay: .36s; }
+    @keyframes tp-bounce {
+      0%, 60%, 100% { transform: translateY(0);     opacity: .35; }
+      30%           { transform: translateY(-5px);  opacity: 1;   }
+    }
+
+    /* The one-line "let me go and look" note shown above a set of results. */
+    /* Reads as an ordinary line of the assistant's reply: same colour, size, weight and
+       style as the text under it. Only the spacing below is ours. */
+    .tp-search-note {
+      color: var(--tp-text);
+      font-size: inherit; font-style: normal; font-weight: inherit; font-family: inherit;
+      line-height: inherit;
+      margin: 0 0 12px; padding: 0;
+    }
 
     /* Remove chat message default background box */
     [data-testid="stChatMessage"] {
@@ -1139,7 +1217,10 @@ if st.session_state.get("backend_ready_status") == "initializing":
         '<span>Loading conversation…</span></div>',
         unsafe_allow_html=True,
     )
-    time.sleep(1)
+    # Second source of dead time after sign-in: the readiness thread can finish moments after
+    # this rerun starts, and nothing notices until the next one. Kept short so the wait tracks
+    # the backend's actual boot rather than this loop's cadence.
+    time.sleep(0.4)
     st.rerun()
 
 if (
@@ -1342,6 +1423,7 @@ if not st.session_state.messages:
 else:
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
+            _render_search_note(msg.get("search_note"))
             st.markdown(msg["content"])
             if SHOW_LISTING_CARDS:
                 for j, listing in enumerate(msg.get("listings") or [], 1):
@@ -1444,109 +1526,133 @@ else:
 def _process_assistant_reply(prompt: str) -> bool:
     """Call the chat API, append the assistant turn, and run optional thinking."""
     with st.chat_message("assistant"):
-        with st.spinner(""):
+        # The whole waiting state lives in here: dots immediately, then the search line above
+        # them once the backend publishes it, then cleared when the reply is rendered.
+        waiting_placeholder = st.empty()
+        waiting_placeholder.markdown(_waiting_bubble_html(None), unsafe_allow_html=True)
+        listings = []
+        thinking_context = None
+        payload = {
+            "session_id": st.session_state.chat_session_id,
+            "turn_id": st.session_state.pending_turn_id,
+            "sales_phase": st.session_state.sales_phase,
+            "message": prompt,
+            "onboarding_api_messages": st.session_state.onboarding_api_messages,
+            "customer_full_name": st.session_state.get("customer_full_name"),
+            "customer_email": st.session_state.get("customer_email"),
+            "customer_phone": st.session_state.get("customer_phone"),
+            "already_shown_listing_urls": (
+                accumulate_shown_urls_from_chat_messages(st.session_state.messages)
+                if st.session_state.sales_phase == "main"
+                else []
+            ),
+        }
+        try:
+            # Run the turn on a worker thread so this one stays free to poll the backend
+            # and update the bubble. A plain blocking post() cannot show anything until
+            # the whole turn is done, which is the entire point of the status line.
+            turn_future = _CHAT_EXECUTOR.submit(
+                requests.post, f"{CHATBOT_API_URL}/chat", json=payload, timeout=180
+            )
+            live_note: str | None = None
+            while not turn_future.done():
+                time.sleep(_TURN_STATUS_POLL_SECONDS)
+                if live_note:
+                    continue
+                live_note = _fetch_turn_status(st.session_state.chat_session_id)
+                if live_note:
+                    waiting_placeholder.markdown(
+                        _waiting_bubble_html(live_note), unsafe_allow_html=True
+                    )
+            r = turn_future.result()
+            r.raise_for_status()
+            data = r.json()
+        except (requests.RequestException, ValueError) as exc:
+            # Stop the dots, or they keep bouncing under the error message.
+            waiting_placeholder.empty()
+            st.error(f"The assistant service is unavailable ({exc!s}). Retry when it is ready.")
+            return False
+            response_text = (
+                f"Sorry — the assistant service is unavailable ({exc!s}). "
+                f"Start the API with `python main.py` (default {CHATBOT_API_URL})."
+            )
+        else:
+            response_text = (data.get("assistant_text") or "").strip() or " "
+            # Set by search_node only when the inventory search actually fired.
+            search_note = (data.get("search_status_message") or "").strip() or None
+            st.session_state.onboarding_api_messages = data.get(
+                "onboarding_api_messages"
+            ) or st.session_state.onboarding_api_messages
+            sp = data.get("sales_phase")
+            if sp in ("onboarding", "main"):
+                st.session_state.sales_phase = sp
+            if data.get("customer_full_name"):
+                st.session_state.customer_full_name = data["customer_full_name"]
+            if "customer_email" in data:
+                st.session_state.customer_email = data.get("customer_email") or ""
+            if data.get("customer_phone"):
+                st.session_state.customer_phone = data["customer_phone"]
+            if data.get("main_prior_messages") is not None:
+                st.session_state.main_prior_messages = data["main_prior_messages"]
+            thinking_context = data.get("thinking_context")
+            st.session_state.pending_turn_id = None
+
             listings = []
-            thinking_context = None
-            payload = {
-                "session_id": st.session_state.chat_session_id,
-                "turn_id": st.session_state.pending_turn_id,
-                "sales_phase": st.session_state.sales_phase,
-                "message": prompt,
-                "onboarding_api_messages": st.session_state.onboarding_api_messages,
-                "customer_full_name": st.session_state.get("customer_full_name"),
-                "customer_email": st.session_state.get("customer_email"),
-                "customer_phone": st.session_state.get("customer_phone"),
-                "already_shown_listing_urls": (
-                    accumulate_shown_urls_from_chat_messages(st.session_state.messages)
-                    if st.session_state.sales_phase == "main"
-                    else []
-                ),
-            }
-            try:
-                r = requests.post(
-                    f"{CHATBOT_API_URL}/chat",
-                    json=payload,
-                    timeout=180,
-                )
-                r.raise_for_status()
-                data = r.json()
-            except (requests.RequestException, ValueError) as exc:
-                st.error(f"The assistant service is unavailable ({exc!s}). Retry when it is ready.")
-                return False
-                response_text = (
-                    f"Sorry — the assistant service is unavailable ({exc!s}). "
-                    f"Start the API with `python main.py` (default {CHATBOT_API_URL})."
-                )
-            else:
-                response_text = (data.get("assistant_text") or "").strip() or " "
-                st.session_state.onboarding_api_messages = data.get(
-                    "onboarding_api_messages"
-                ) or st.session_state.onboarding_api_messages
-                sp = data.get("sales_phase")
-                if sp in ("onboarding", "main"):
-                    st.session_state.sales_phase = sp
-                if data.get("customer_full_name"):
-                    st.session_state.customer_full_name = data["customer_full_name"]
-                if "customer_email" in data:
-                    st.session_state.customer_email = data.get("customer_email") or ""
-                if data.get("customer_phone"):
-                    st.session_state.customer_phone = data["customer_phone"]
-                if data.get("main_prior_messages") is not None:
-                    st.session_state.main_prior_messages = data["main_prior_messages"]
-                thinking_context = data.get("thinking_context")
-                st.session_state.pending_turn_id = None
-
-                listings = []
-                for d in (data.get("listings") or []):
-                    if not isinstance(d, dict):
-                        continue
-                    try:
-                        listings.append(
-                            TrailerListing(
-                                listing_id=str(d.get("url") or d.get("title") or ""),
-                                title=str(d.get("title") or ""),
-                                condition=str(d.get("condition") or "New"),
-                                price=float(
-                                    d["price"].replace("$", "").replace(",", "")
-                                )
-                                if isinstance(d.get("price"), str)
-                                and d.get("price")
-                                not in ("Call for price", None, "")
-                                else d.get("price"),
-                                price_display=str(d.get("price") or "") or None,
-                                payments_from=None,
-                                category_subcategory=str(d.get("category") or ""),
-                                make=str(d.get("make") or ""),
-                                color=str(d.get("color") or ""),
-                                hitch_type=d.get("hitch_type"),
-                                year=d.get("year"),
-                                length=d.get("length"),
-                                width=d.get("width"),
-                                axles=d.get("axles"),
-                                gvwr=d.get("gvwr"),
-                                payload_capacity=d.get("payload_capacity"),
-                                trailer_material=d.get("material"),
-                                floor=d.get("floor"),
-                                url=str(d.get("url") or ""),
-                                score=d.get("relevance_score"),
+            for d in (data.get("listings") or []):
+                if not isinstance(d, dict):
+                    continue
+                try:
+                    listings.append(
+                        TrailerListing(
+                            listing_id=str(d.get("url") or d.get("title") or ""),
+                            title=str(d.get("title") or ""),
+                            condition=str(d.get("condition") or "New"),
+                            price=float(
+                                d["price"].replace("$", "").replace(",", "")
                             )
+                            if isinstance(d.get("price"), str)
+                            and d.get("price")
+                            not in ("Call for price", None, "")
+                            else d.get("price"),
+                            price_display=str(d.get("price") or "") or None,
+                            payments_from=None,
+                            category_subcategory=str(d.get("category") or ""),
+                            make=str(d.get("make") or ""),
+                            color=str(d.get("color") or ""),
+                            hitch_type=d.get("hitch_type"),
+                            year=d.get("year"),
+                            length=d.get("length"),
+                            width=d.get("width"),
+                            axles=d.get("axles"),
+                            gvwr=d.get("gvwr"),
+                            payload_capacity=d.get("payload_capacity"),
+                            trailer_material=d.get("material"),
+                            floor=d.get("floor"),
+                            url=str(d.get("url") or ""),
+                            score=d.get("relevance_score"),
                         )
-                    except Exception:
-                        pass
+                    )
+                except Exception:
+                    pass
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response_text,
-                "listings": listings or None,
-                "user_feedback": None,
-                "thinking_payload": (
-                    thinking_context
-                    if thinking_agent_enabled() and thinking_context is not None
-                    else None
-                ),
-                "thinking_result": None,
-            })
-            assistant_message_index = len(st.session_state.messages) - 1
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": response_text,
+            "search_note": search_note,
+            "listings": listings or None,
+            "user_feedback": None,
+            "thinking_payload": (
+                thinking_context
+                if thinking_agent_enabled() and thinking_context is not None
+                else None
+            ),
+            "thinking_result": None,
+        })
+        assistant_message_index = len(st.session_state.messages) - 1
+        # Dots (and the live copy of the note) go; the note is re-rendered below as part of
+        # the finished message so it stays in the transcript instead of vanishing with them.
+        waiting_placeholder.empty()
+        _render_search_note(search_note)
         st.markdown(response_text)
         if SHOW_LISTING_CARDS:
             for i, listing in enumerate(listings or [], 1):

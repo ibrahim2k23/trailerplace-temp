@@ -12,9 +12,16 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 
-from src import conversation_log, conversation_store, tracing, turn_log
+from src import conversation_log, conversation_store, tracing, turn_log, turn_status
 from src.api import readiness
-from src.api.schemas import ChatRequest, ChatResponse, DebugStateResponse, ResetRequest, SessionResponse
+from src.api.schemas import (
+    ChatRequest,
+    ChatResponse,
+    DebugStateResponse,
+    ResetRequest,
+    SessionResponse,
+    TurnStatusResponse,
+)
 from src.config import settings
 from src.db_models import ChatbotConversation, ChatbotTurn
 from src.graph.build import build_graph
@@ -110,6 +117,8 @@ def chat(request: ChatRequest) -> ChatResponse:
         request = request.model_copy(update={"message": request.message[: settings.chat_max_message_chars]})
 
     started = time.perf_counter()
+    # Nothing from a previous turn may be visible to a poller for this one.
+    turn_status.clear(request.session_id)
     # One usage scope + one trace per turn (M9 §2/§3). The scope must wrap the graph
     # run, so it sits outside the session lock's critical section but inside the request.
     with llm_usage.usage_scope() as usage, tracing.trace_turn(request.session_id, turn_id=turn_id):
@@ -127,6 +136,11 @@ def chat(request: ChatRequest) -> ChatResponse:
             logger.exception("Chat turn failed for session %s", request.session_id)
             _log_turn(request.session_id, turn_id, started, usage, request.message, error=str(exc))
             return ChatResponse(**_error_response(request.session_id))
+        finally:
+            # The turn is over either way: the line now travels on the response itself, and
+            # leaving it here would both leak an entry per session and let the next turn's
+            # first poll read this turn's line.
+            turn_status.clear(request.session_id)
         _log_turn(request.session_id, turn_id, started, usage, request.message, response=response)
         return response
 
@@ -237,6 +251,17 @@ def _run_turn(request: ChatRequest, turn_id: str) -> ChatResponse:
     # deliver_pending_outbox_async's docstring for the incident that prompted this).
     conversation_store.deliver_pending_outbox_async()
     return ChatResponse(**body)
+
+
+@router.get("/session/{session_id}/turn-status", response_model=TurnStatusResponse)
+def get_turn_status(session_id: str) -> TurnStatusResponse:
+    """Live progress for the turn currently running, for the UI to poll while it waits.
+
+    Deliberately does NOT take the session lock: /chat holds that lock for the whole turn, so
+    waiting on it here would block until the very turn we are reporting on had finished. Reads
+    a plain dict instead, which is why turn_status guards itself with its own lock.
+    """
+    return TurnStatusResponse(search_status_message=turn_status.peek(session_id))
 
 
 @router.get("/session/{session_id}", response_model=SessionResponse)
@@ -362,6 +387,9 @@ def _handle_chat_in_memory(request: ChatRequest) -> dict[str, Any]:
         listings = [item for item in listings if item.get("url") in cited_urls]
     return {
         "assistant_text": assistant_text,
+        # Present only on turns where the inventory search actually fired, so the UI can never
+        # tell the customer we went to look on a turn that never searched.
+        "search_status_message": result.get("turn_outcome", {}).get("search_status_message"),
         "listings": listings,
         "sales_phase": "main",
         "onboarding_api_messages": [],

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any
 
+from src import turn_status
 from src.config import settings
 from src.domain.slot_map import normalize_slot_targets, sanitize_non_metadata_features
 from src.search.listing_search import narrowing_filters_present, search_listings
@@ -19,6 +21,25 @@ _HARD_FILTER_LABELS = {
     "subcategory": "trailer type",
     "length_ft": "length",
 }
+
+
+# Said the moment the inventory search actually fires, so the customer knows we have gone to
+# look rather than staring at a silent pause. Hardcoded on purpose: it costs no tokens and no
+# latency, and it can never claim we checked stock on a turn where no search ran - this list is
+# only ever read from inside search_node.
+SEARCH_STATUS_LINES: tuple[str, ...] = (
+    "Let me pull up what we have that fits.",
+    "Give me a moment - I'll check what matches your requirements.",
+    "Let me see what we have on the lot for you.",
+    "I'll take a look through our current inventory.",
+    "Let me find the ones that suit what you need.",
+    "One moment while I check what we have in stock.",
+    "Let me see what we've got that would work for you.",
+)
+
+
+def pick_search_status_line() -> str:
+    return random.choice(SEARCH_STATUS_LINES)
 
 
 def _relaxed_filter_labels(state: dict, metadata_filters: dict[str, Any]) -> list[str]:
@@ -76,6 +97,12 @@ def search_node(state: dict) -> dict:
         "TOOL search: session=%s category=%s filters=%s features=%s already_shown=%d",
         state.get("session_id"), category, metadata_filters, requested_features, len(shown_urls),
     )
+    # Set here, beside the tool-call log line, so it exists if and only if a search really ran.
+    # Published to turn_status as well as the outcome: the outcome reaches the client when the
+    # turn ends, but the UI is waiting NOW and polls turn_status to show this during the search.
+    status_line = pick_search_status_line()
+    outcome["search_status_message"] = status_line
+    turn_status.publish(state.get("session_id"), status_line)
 
     results = search_listings(
         category=category,
