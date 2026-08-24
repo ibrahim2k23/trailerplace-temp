@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import json
 import logging
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import StreamingResponse
 
 from src import conversation_log, conversation_store, tracing, turn_log, turn_status
 from src.api import readiness
@@ -24,6 +27,7 @@ from src.api.schemas import (
 )
 from src.config import settings
 from src.db_models import ChatbotConversation, ChatbotTurn
+from src.domain.reply_chunks import split_reply_into_chunks
 from src.graph.build import build_graph
 from src.graph.state import _get_session, _sessions, clear_session, from_snapshot, session_lock, to_snapshot
 from src.llm import usage as llm_usage
@@ -36,6 +40,12 @@ _GRAPH = None
 
 # Bounds every graph run below app.py's 180 s client timeout (M8 §4).
 _GRAPH_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat_graph")
+# Its own pool, never _GRAPH_EXECUTOR: a streamed turn occupies a worker for its whole run
+# and then submits the graph run itself, so sharing one pool would let N streams deadlock by
+# holding every worker while waiting for a worker.
+_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat_stream")
+# How often the streaming turn checks what the graph is doing, to forward the search line.
+_STREAM_STATUS_POLL_SECONDS = 0.2
 
 ERROR_ASSISTANT_TEXT = (
     "Sorry — something went wrong on our end and I couldn't finish that thought. "
@@ -143,6 +153,115 @@ def chat(request: ChatRequest) -> ChatResponse:
             turn_status.clear(request.session_id)
         _log_turn(request.session_id, turn_id, started, usage, request.message, response=response)
         return response
+
+
+# ---------------------------------------------------------------------------
+# Streaming turn (SSE)
+# ---------------------------------------------------------------------------
+# What this does and does NOT do, because the distinction matters:
+#
+# It does NOT stream tokens out of the model. The reply is a STRUCTURED output that the
+# respond node validates and repairs before it is allowed out - a draft that cites a trailer
+# we never showed, or drops one we did, is rejected and rewritten. Emitting tokens as they
+# arrive would mean publishing drafts we are about to reject, and would throw away
+# cited_listing_urls, which is what decides the cards.
+#
+# What it DOES stream is the finished reply: the search line the moment the graph publishes
+# it (so the UI no longer polls for it), then the reply typed out message by message - the
+# intro, then ONE MESSAGE PER TRAILER, then the closing question. See reply_chunks.py.
+#
+# Events: status | chunk_start | delta | chunk_end | done | error. `done` carries the exact
+# body POST /chat returns, plus `chunks`, so a client can ignore the typing entirely.
+
+_WORD_RE = re.compile(r"\S+\s*")
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """One SSE frame: an event name, a single-line JSON payload, and the blank-line terminator."""
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _typing_deltas(chunk: str, words_per_delta: int) -> list[str]:
+    """The chunk cut into keystroke-sized pieces, joinable back into it exactly."""
+    words = _WORD_RE.findall(chunk)
+    if not words:
+        return [chunk] if chunk else []
+    step = max(1, words_per_delta)
+    return ["".join(words[i : i + step]) for i in range(0, len(words), step)]
+
+
+def _chat_event_stream(request: ChatRequest):
+    """Run the turn on a worker while forwarding progress, then type the reply out."""
+    # ThreadPoolExecutor does not propagate contextvars, and the turn's usage scope and trace
+    # are installed inside chat() on the worker - the copy keeps request-scoped state (M9 §3).
+    context = contextvars.copy_context()
+    future = _STREAM_EXECUTOR.submit(context.run, chat, request)
+    last_note: str | None = None
+    while not future.done():
+        time.sleep(_STREAM_STATUS_POLL_SECONDS)
+        note = turn_status.peek(request.session_id)
+        if note and note != last_note:
+            last_note = note
+            yield _sse("status", {"search_status_message": note})
+    try:
+        response = future.result()
+    except HTTPException as exc:
+        # The response has already begun, so the status code is spent: the client reads the
+        # failure off the event instead.
+        yield _sse("error", {"status_code": exc.status_code, "detail": str(exc.detail)})
+        return
+    except Exception as exc:  # noqa: BLE001 - a stream must end with an event, never a traceback
+        logger.exception("Streaming chat turn failed for session %s", request.session_id)
+        yield _sse("error", {"status_code": 500, "detail": str(exc)})
+        return
+
+    body = response.model_dump()
+    note = (body.get("search_status_message") or "").strip()
+    # chat() clears the live status on its way out, so a search that finished between two
+    # polls was never forwarded above. The response still carries it.
+    if note and note != last_note:
+        yield _sse("status", {"search_status_message": note})
+
+    chunks = split_reply_into_chunks(body.get("assistant_text") or "")
+    body["chunks"] = chunks
+    delta_delay = max(0.0, settings.chat_stream_delta_seconds)
+    chunk_pause = max(0.0, settings.chat_stream_chunk_pause_seconds)
+    for index, chunk in enumerate(chunks):
+        yield _sse("chunk_start", {"index": index, "total": len(chunks)})
+        for delta in _typing_deltas(chunk, settings.chat_stream_words_per_delta):
+            yield _sse("delta", {"index": index, "text": delta})
+            if delta_delay:
+                time.sleep(delta_delay)
+        yield _sse("chunk_end", {"index": index, "text": chunk})
+        if chunk_pause and index < len(chunks) - 1:
+            time.sleep(chunk_pause)
+    yield _sse("done", body)
+
+
+@router.post("/chat/stream")
+def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """POST /chat, delivered as Server-Sent Events. Same request body, same turn."""
+    if not settings.chat_stream_enabled:
+        raise HTTPException(status_code=404, detail="Streaming is disabled")
+    # Both ids are validated HERE rather than inside the generator: once the first byte is
+    # written the status code can no longer be changed, so a malformed id must still 422.
+    _require_uuid(request.session_id, "session_id")
+    turn_id = request.turn_id or str(uuid.uuid4())
+    _require_uuid(turn_id, "turn_id")
+    request = request.model_copy(update={"turn_id": turn_id})
+    return StreamingResponse(
+        _chat_event_stream(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Without this an nginx in front of the API buffers the whole stream and the
+            # customer sees nothing until the last event - the one failure mode that makes
+            # streaming strictly worse than not streaming.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _log_turn(

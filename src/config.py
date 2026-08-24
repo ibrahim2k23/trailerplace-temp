@@ -79,6 +79,14 @@ class Settings:
     # Must stay below app.py's 180 s client timeout on POST /chat.
     chat_timeout_seconds: float = 150.0
     chat_max_message_chars: int = 4000
+    # Streaming (POST /chat/stream). The turn itself is unchanged - the reply is validated
+    # and repaired in full before a single word leaves - so these only pace the delivery of
+    # the finished text: how big a step the typing takes, how long between steps, and how
+    # long the UI holds between one message bubble and the next.
+    chat_stream_enabled: bool = True
+    chat_stream_words_per_delta: int = 3
+    chat_stream_delta_seconds: float = 0.035
+    chat_stream_chunk_pause_seconds: float = 0.45
     # Append-only JSONL of per-turn records; scripts/cost_report.py reads it (M9).
     turn_log_path: str = ""
 
@@ -136,6 +144,10 @@ class Settings:
             inventory_lookup_limit=_int(os.getenv("INVENTORY_LOOKUP_LIMIT"), 5),
             chat_timeout_seconds=_float(os.getenv("CHAT_TIMEOUT_SECONDS"), 150.0),
             chat_max_message_chars=_int(os.getenv("CHAT_MAX_MESSAGE_CHARS"), 4000),
+            chat_stream_enabled=_bool(os.getenv("CHAT_STREAM_ENABLED"), True),
+            chat_stream_words_per_delta=_int(os.getenv("CHAT_STREAM_WORDS_PER_DELTA"), 3),
+            chat_stream_delta_seconds=_float(os.getenv("CHAT_STREAM_DELTA_SECONDS"), 0.035),
+            chat_stream_chunk_pause_seconds=_float(os.getenv("CHAT_STREAM_CHUNK_PAUSE_SECONDS"), 0.45),
             turn_log_path=os.getenv("TURN_LOG_PATH", ""),
         )
 

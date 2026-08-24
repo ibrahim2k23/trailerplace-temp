@@ -6,6 +6,7 @@ from src.domain.brands import make_prompt_block
 from src.domain.categories import (
     category_clarification_question,
     category_prompt_block,
+    unstocked_categories_block,
     width_eligible_categories_line,
     width_excluded_categories_line,
 )
@@ -122,6 +123,20 @@ schema. You never write customer-facing text; you only classify and extract.
 
 === TRAILER CATEGORIES ===
 {category_prompt_block()}
+
+=== TYPES WE RECOGNISE BUT DO NOT CURRENTLY STOCK ===
+{unstocked_categories_block()}
+These are NOT in the list above and must never be returned as category_mentioned - we cannot
+qualify or search for something we do not have. They are here so you can TELL that the customer
+asked for one. WHEN THEY ASK FOR ONE OF THESE, ALL THREE OF THESE ARE TRUE ON THIS TURN:
+  - category_mentioned stays null (it is not a category we can put them into), and
+  - email_triggers MUST contain one entry, kind=team_request, whose description names the type
+    they asked for and what they said they need it for ("wants a food/concession trailer for a
+    BBQ business"), and
+  - that trigger is required even when the message is phrased as a QUESTION ("do you have any
+    food trailers?"). A customer asking for something we do not sell is the single lead most
+    likely to be lost, and the reply can only tell them no - the team hearing about it is the
+    only way it turns into a sale.
 
 === KNOWN MAKES/BRANDS ===
 {make_prompt_block()}
@@ -245,6 +260,21 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   An inventory lookup ("I am looking for Iron Bull DTB", "do you have the fmax?") is NOT a team_request or
   escalation either - the system records shown results itself. Emit an email trigger for a lookup turn ONLY
   when the message separately asks for a human, a call, a quote, or one of the faq topics.
+- ANYTHING WE CANNOT DO FOR THEM ALWAYS RAISES A TRIGGER - never leave the team unaware that we came up
+  short. If the message asks for something only a person can settle, an email trigger is REQUIRED on this
+  turn, because the reply can only hand them a phone number and someone has to know to pick it up:
+    * a price, a discount, or any haggling ("what's your best price", "can you beat 8k") -> team_request
+    * delivery scheduling, paperwork/titling, or seeing a unit in person                  -> team_request
+    * a quote, a call back, or a meeting                                                  -> team_request
+    * financing -> faq/financing; trade-in -> faq/trade_in; service or parts -> faq/service_parts;
+      asking for a person -> faq/contact_human
+    * a complaint, an urgent problem, or demanding a manager/human NOW                    -> escalation
+    * they ask for a trailer TYPE we do not stock (see the categories block) and they have said what
+      they need it for                                                                    -> team_request
+  Put what they actually asked for in `description` ("wants best price on a dump trailer, asked us to
+  beat $8k") so the team can act without reading the transcript. The kind rules above still hold: keep
+  escalation for complaints and urgency, so it stays the signal that something is going wrong rather
+  than the label for every routine price question.
 - If intent is faq/team_request_escalation/listing_interest, that request must also appear in email_triggers.
 - If mid-qualification and the message is an interruption: answered_current_question=false and put the interruption verbatim in user_question_to_answer.
 

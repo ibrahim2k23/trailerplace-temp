@@ -75,23 +75,23 @@ _SPECS: dict[str, TrailerFieldSpec] = {
 
     "Utility": TrailerFieldSpec(
         category="Utility",
-        required=["haul_item", "haul_weight_lbs", "axle_capacity_lbs"],
+        required=["haul_item", "haul_weight_lbs"],
         optional=["trailer_size"],
         questions={
             "haul_item":           "What will you be hauling on the utility trailer?",
             "haul_weight_lbs":     "What's the rough total weight of your load?",
-            "axle_capacity_lbs":   "What axle capacity do you prefer (for example 3,500 or 7,000 lbs per axle)?",
             "trailer_size":        "Do you have a size preference (length / width)?",
             #"sides_gate_storage":  "Will you need side rails, a rear gate, or tool storage?",
         },
         answer_guidance={
             "haul_item": "Store the cargo, equipment, or use case the customer says they need the utility trailer for.",
             "haul_weight_lbs": "Store the rough total load weight or payload requirement using weight units only.",
-            "axle_capacity_lbs": "Store the PER-AXLE capacity rating the customer wants, using weight units only. Never the total load weight.",
             "trailer_size": "Store the preferred trailer dimensions. Accept length, width, or combined size notation such as AxB or AxBxC when clearly giving size.",
             #"sides_gate_storage": "Store requested utility-trailer features such as side rails, rear gate, or tool storage.",
         },
-        notes="Utility-only: lightweight haul handling is decided by the assistant agent (not used for other categories).",
+        notes="Utility-only: lightweight haul handling is decided by the assistant agent (not used for other categories). "
+              "Never ask the customer for an axle capacity here - it is not a qualification question for utility "
+              "trailers; if they volunteer one it is still stored and used for ranking.",
     ),
 
     "Dump": TrailerFieldSpec(
@@ -142,6 +142,31 @@ _SPECS: dict[str, TrailerFieldSpec] = {
             "ac_windows_cabinets": "Store whether the customer wants interior amenities like AC, windows, cabinets, or similar.",
             "finished_interior": "Store whether the customer wants a finished interior such as lined walls or finished flooring.",
         },
+    ),
+
+    # Not currently stocked (see categories.CANONICAL_CATEGORIES), so in practice the reply
+    # tells the customer we do not have one yet rather than working through these. The spec
+    # exists so the category behaves like any other the day stock is tagged for it - without
+    # one it would silently fall back to _DEFAULT_SPEC and ask "what will you be hauling?"
+    # of someone opening a food business. Slot NAMES are reused from Enclosed on purpose:
+    # they already have normalizers and metadata-filter targets behind them.
+    "Concession": TrailerFieldSpec(
+        category="Concession",
+        required=["use_case", "cargo_size"],
+        optional=["ac_windows_cabinets", "finished_interior"],
+        questions={
+            "use_case":            "What will you be serving or using the concession trailer for (food service, coffee, retail, etc.)?",
+            "cargo_size":          "What size trailer are you after (length × width)?",
+            "ac_windows_cabinets": "Will you need a serving window, AC, or cabinets fitted?",
+            "finished_interior":   "Does the interior need to be finished out (lined walls, flooring, counters)?",
+        },
+        answer_guidance={
+            "use_case": "Store the concession or vending use case, such as food service, coffee, BBQ, or retail.",
+            "cargo_size": "Store the preferred trailer dimensions. Accept length, width, height, or size shorthand such as AxB or AxBxC.",
+            "ac_windows_cabinets": "Store requested fit-out items such as a serving window, AC, or cabinets.",
+            "finished_interior": "Store whether the customer wants a finished interior such as lined walls, flooring, or counters.",
+        },
+        notes="Concession trailers are an Enclosed body fitted out for vending.",
     ),
 
     "Livestock": TrailerFieldSpec(

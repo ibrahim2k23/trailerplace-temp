@@ -10,6 +10,7 @@ If you see imports using another project's .venv, deactivate it first
 (PowerShell: Remove-Item Env:\\VIRTUAL_ENV) or use run_streamlit.ps1.
 """
 import html
+import json
 import logging
 import os
 import secrets
@@ -38,6 +39,7 @@ from src.shown_listings_store import (
     add_shown_keys_and_urls,
     add_shown_urls,
 )
+from src.domain.reply_chunks import split_reply_into_chunks, urls_in_chunk
 from src.models import TrailerListing
 from src.thinking_agent import (
     generate_thinking_flow,
@@ -67,6 +69,15 @@ _RULES_DOC_PATH = Path(__file__).with_name("langgraph_rules_vs_excel.md")
 SHOW_LISTING_CARDS = (os.getenv("SHOW_LISTING_CARDS") or "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
+
+# Streaming: the reply is typed out over POST /chat/stream and arrives as several messages -
+# the intro, one per trailer, then the closing question - instead of one wall of text. Off
+# falls back to the blocking POST /chat and a single bubble.
+CHAT_STREAMING = (os.getenv("CHAT_STREAM_ENABLED") or "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+# The block cursor shown at the end of the text still being typed.
+_TYPING_CARET = "▌"
 
 # The one waiting indicator, shown from the moment the turn starts until the reply lands.
 TYPING_DOTS_HTML = '<div class="tp-typing"><span></span><span></span><span></span></div>'
@@ -114,6 +125,87 @@ def _render_search_note(text: str | None) -> None:
     if not str(text or "").strip():
         return
     st.markdown(_search_note_html(text), unsafe_allow_html=True)
+
+
+def _iter_sse_events(response: requests.Response):
+    """Yield (event_name, payload_dict) for each frame of a text/event-stream response.
+
+    Small on purpose: the backend only ever sends single-line JSON `data:` fields, so there is
+    no multi-line data to reassemble. A frame we cannot parse is skipped rather than raised -
+    a decoration event must never take the reply down with it.
+    """
+    event = "message"
+    for raw in response.iter_lines(decode_unicode=True):
+        if raw is None:
+            continue
+        line = raw.strip()
+        if not line:
+            event = "message"
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event = line[len("event:") :].strip()
+            continue
+        if line.startswith("data:"):
+            try:
+                yield event, json.loads(line[len("data:") :].strip())
+            except ValueError:
+                continue
+
+
+def _listings_for_chunk(chunk: str, listings: list, claimed: set[int]) -> list[tuple[int, object]]:
+    """The listings this chunk links to, so a trailer's card sits under its own message.
+
+    `claimed` is carried across the chunks of one reply: a listing belongs to the first chunk
+    that links it, and whatever no chunk links falls through to the caller's leftovers.
+    """
+    linked = {str(url or "").rstrip("/").lower() for url in urls_in_chunk(chunk)}
+    if not linked:
+        return []
+    matched = []
+    for index, listing in enumerate(listings):
+        if index in claimed:
+            continue
+        url = str(getattr(listing, "url", "") or "").rstrip("/").lower()
+        if url and url in linked:
+            claimed.add(index)
+            matched.append((index + 1, listing))
+    return matched
+
+
+def _render_message_bubbles(msg: dict):
+    """Render one stored turn as the bubbles it was sent in; return the LAST bubble.
+
+    An assistant reply is re-split here rather than stored pre-split, so a session reloaded
+    from the API (which returns only the text) shows the same bubbles as the live turn did.
+    The caller keeps writing into the returned container - the feedback control and the
+    insights note belong under the last bubble, not repeated under every one.
+    """
+    role = msg.get("role", "assistant")
+    content = str(msg.get("content") or "")
+    listings = list(msg.get("listings") or [])
+    chunks = split_reply_into_chunks(content) if role == "assistant" else []
+    if not chunks:
+        chunks = [content]
+    claimed: set[int] = set()
+    bubble = None
+    for index, chunk in enumerate(chunks):
+        bubble = st.chat_message(role)
+        with bubble:
+            if index == 0:
+                _render_search_note(msg.get("search_note"))
+            st.markdown(chunk)
+            if SHOW_LISTING_CARDS:
+                for rank, listing in _listings_for_chunk(chunk, listings, claimed):
+                    render_card(listing, rank)
+    if SHOW_LISTING_CARDS and bubble is not None:
+        # Anything the reply did not link (or every card, when the text has no cards at all).
+        with bubble:
+            for rank, listing in enumerate(listings, 1):
+                if rank - 1 not in claimed:
+                    render_card(listing, rank)
+    return bubble
 
 
 def _reset_api_session(session_id: str) -> None:
@@ -1422,12 +1514,9 @@ if not st.session_state.messages:
     )
 else:
     for i, msg in enumerate(st.session_state.messages):
-        with st.chat_message(msg["role"]):
-            _render_search_note(msg.get("search_note"))
-            st.markdown(msg["content"])
-            if SHOW_LISTING_CARDS:
-                for j, listing in enumerate(msg.get("listings") or [], 1):
-                    render_card(listing, j)
+        # The search note, the text (as its per-trailer bubbles) and the cards are all drawn
+        # by this call; what follows hangs off the LAST bubble it made.
+        with _render_message_bubbles(msg):
             if msg.get("role") == "assistant":
                 prev_fb = msg.get("user_feedback")
                 if isinstance(prev_fb, dict):
@@ -1523,140 +1612,227 @@ else:
 # ─────────────────────────────────────────────────────────────
 # CHAT INPUT
 # ─────────────────────────────────────────────────────────────
+def _show_waiting_bubble(slot, note: str | None) -> None:
+    """Draw (or redraw) the whole waiting bubble inside `slot`.
+
+    The bubble is redrawn rather than patched in place because `slot.empty()` has to be able
+    to take the CHAT BUBBLE away too, not just its contents - once the reply starts arriving
+    in bubbles of its own, an empty avatar left hanging above them is a visible artefact.
+    """
+    with slot.container():
+        with st.chat_message("assistant"):
+            st.markdown(_waiting_bubble_html(note), unsafe_allow_html=True)
+
+
+def _run_blocking_turn(payload: dict, slot) -> dict:
+    """POST /chat and wait. The fallback when streaming is off or unavailable.
+
+    The turn runs on a worker thread so this one stays free to poll the backend and update
+    the bubble; a plain blocking post() cannot show anything until the whole turn is done,
+    which is the entire point of the status line.
+    """
+    turn_future = _CHAT_EXECUTOR.submit(
+        requests.post, f"{CHATBOT_API_URL}/chat", json=payload, timeout=180
+    )
+    live_note: str | None = None
+    while not turn_future.done():
+        time.sleep(_TURN_STATUS_POLL_SECONDS)
+        if live_note:
+            continue
+        live_note = _fetch_turn_status(payload["session_id"])
+        if live_note:
+            _show_waiting_bubble(slot, live_note)
+    response = turn_future.result()
+    response.raise_for_status()
+    return response.json()
+
+
+class _StreamingUnavailable(Exception):
+    """The backend does not serve /chat/stream. Run the turn the blocking way instead."""
+
+
+def _run_streaming_turn(payload: dict, slot) -> dict:
+    """POST /chat/stream and type the reply out as it arrives, one bubble per chunk.
+
+    The rendering happens HERE rather than after the call, which is the whole point: the
+    customer watches the intro land, then each trailer, then the closing question, instead of
+    staring at dots and then a wall of text. Every bubble drawn here is thrown away by the
+    st.rerun() that follows the turn and redrawn from history by _render_message_bubbles -
+    same splitter, same bubbles - so none of it needs storing.
+
+    Raises the same exceptions the blocking path does, so the caller handles failure once.
+    """
+    note: str | None = None
+    typing = None
+    text = ""
+    data: dict | None = None
+    started = False
+    with requests.post(
+        f"{CHATBOT_API_URL}/chat/stream",
+        json=payload,
+        stream=True,
+        timeout=180,
+        headers={"Accept": "text/event-stream"},
+    ) as response:
+        if response.status_code in (404, 405, 501):
+            # Streaming turned off on the backend, or an older API behind this UI. Nothing
+            # has been rendered yet, so the caller can still run the turn the blocking way.
+            raise _StreamingUnavailable(f"/chat/stream returned {response.status_code}")
+        response.raise_for_status()
+        for event, body in _iter_sse_events(response):
+            if event == "status":
+                note = (body.get("search_status_message") or "").strip() or note
+                if note and not started:
+                    _show_waiting_bubble(slot, note)
+            elif event == "chunk_start":
+                if not started:
+                    # The dots have said all they can; the note moves into the reply itself.
+                    slot.empty()
+                    started = True
+                text = ""
+                with st.chat_message("assistant"):
+                    if not body.get("index"):
+                        _render_search_note(note)
+                    typing = st.empty()
+            elif event == "delta":
+                if typing is None:
+                    continue
+                text += str(body.get("text") or "")
+                typing.markdown(text + _TYPING_CARET)
+            elif event == "chunk_end":
+                if typing is None:
+                    continue
+                # The caret goes, and the chunk is re-rendered whole so any markdown that was
+                # still half-typed (a listing hyperlink, mid-URL) resolves.
+                typing.markdown(str(body.get("text") or text))
+                typing = None
+            elif event == "error":
+                raise requests.RequestException(str(body.get("detail") or "the streamed turn failed"))
+            elif event == "done":
+                data = body
+    if data is None:
+        raise ValueError("the reply stream ended without a result")
+    return data
+
+
 def _process_assistant_reply(prompt: str) -> bool:
     """Call the chat API, append the assistant turn, and run optional thinking."""
-    with st.chat_message("assistant"):
-        # The whole waiting state lives in here: dots immediately, then the search line above
-        # them once the backend publishes it, then cleared when the reply is rendered.
-        waiting_placeholder = st.empty()
-        waiting_placeholder.markdown(_waiting_bubble_html(None), unsafe_allow_html=True)
-        listings = []
-        thinking_context = None
-        payload = {
-            "session_id": st.session_state.chat_session_id,
-            "turn_id": st.session_state.pending_turn_id,
-            "sales_phase": st.session_state.sales_phase,
-            "message": prompt,
-            "onboarding_api_messages": st.session_state.onboarding_api_messages,
-            "customer_full_name": st.session_state.get("customer_full_name"),
-            "customer_email": st.session_state.get("customer_email"),
-            "customer_phone": st.session_state.get("customer_phone"),
-            "already_shown_listing_urls": (
-                accumulate_shown_urls_from_chat_messages(st.session_state.messages)
-                if st.session_state.sales_phase == "main"
-                else []
-            ),
-        }
+    listings = []
+    thinking_context = None
+    search_note = None
+    payload = {
+        "session_id": st.session_state.chat_session_id,
+        "turn_id": st.session_state.pending_turn_id,
+        "sales_phase": st.session_state.sales_phase,
+        "message": prompt,
+        "onboarding_api_messages": st.session_state.onboarding_api_messages,
+        "customer_full_name": st.session_state.get("customer_full_name"),
+        "customer_email": st.session_state.get("customer_email"),
+        "customer_phone": st.session_state.get("customer_phone"),
+        "already_shown_listing_urls": (
+            accumulate_shown_urls_from_chat_messages(st.session_state.messages)
+            if st.session_state.sales_phase == "main"
+            else []
+        ),
+    }
+    # The whole waiting state lives in this slot: dots immediately, then the search line above
+    # them once the backend publishes it, then gone the moment the reply starts arriving.
+    waiting_slot = st.empty()
+    _show_waiting_bubble(waiting_slot, None)
+    streamed = False
+    try:
         try:
-            # Run the turn on a worker thread so this one stays free to poll the backend
-            # and update the bubble. A plain blocking post() cannot show anything until
-            # the whole turn is done, which is the entire point of the status line.
-            turn_future = _CHAT_EXECUTOR.submit(
-                requests.post, f"{CHATBOT_API_URL}/chat", json=payload, timeout=180
-            )
-            live_note: str | None = None
-            while not turn_future.done():
-                time.sleep(_TURN_STATUS_POLL_SECONDS)
-                if live_note:
-                    continue
-                live_note = _fetch_turn_status(st.session_state.chat_session_id)
-                if live_note:
-                    waiting_placeholder.markdown(
-                        _waiting_bubble_html(live_note), unsafe_allow_html=True
-                    )
-            r = turn_future.result()
-            r.raise_for_status()
-            data = r.json()
-        except (requests.RequestException, ValueError) as exc:
-            # Stop the dots, or they keep bouncing under the error message.
-            waiting_placeholder.empty()
-            st.error(f"The assistant service is unavailable ({exc!s}). Retry when it is ready.")
-            return False
-            response_text = (
-                f"Sorry — the assistant service is unavailable ({exc!s}). "
-                f"Start the API with `python main.py` (default {CHATBOT_API_URL})."
-            )
-        else:
-            response_text = (data.get("assistant_text") or "").strip() or " "
-            # Set by search_node only when the inventory search actually fired.
-            search_note = (data.get("search_status_message") or "").strip() or None
-            st.session_state.onboarding_api_messages = data.get(
-                "onboarding_api_messages"
-            ) or st.session_state.onboarding_api_messages
-            sp = data.get("sales_phase")
-            if sp in ("onboarding", "main"):
-                st.session_state.sales_phase = sp
-            if data.get("customer_full_name"):
-                st.session_state.customer_full_name = data["customer_full_name"]
-            if "customer_email" in data:
-                st.session_state.customer_email = data.get("customer_email") or ""
-            if data.get("customer_phone"):
-                st.session_state.customer_phone = data["customer_phone"]
-            if data.get("main_prior_messages") is not None:
-                st.session_state.main_prior_messages = data["main_prior_messages"]
-            thinking_context = data.get("thinking_context")
-            st.session_state.pending_turn_id = None
+            if not CHAT_STREAMING:
+                raise _StreamingUnavailable("streaming disabled in this UI")
+            data = _run_streaming_turn(payload, waiting_slot)
+            streamed = True
+        except _StreamingUnavailable:
+            data = _run_blocking_turn(payload, waiting_slot)
+    except (requests.RequestException, ValueError) as exc:
+        # Stop the dots, or they keep bouncing under the error message.
+        waiting_slot.empty()
+        st.error(f"The assistant service is unavailable ({exc!s}). Retry when it is ready.")
+        return False
 
-            listings = []
-            for d in (data.get("listings") or []):
-                if not isinstance(d, dict):
-                    continue
-                try:
-                    listings.append(
-                        TrailerListing(
-                            listing_id=str(d.get("url") or d.get("title") or ""),
-                            title=str(d.get("title") or ""),
-                            condition=str(d.get("condition") or "New"),
-                            price=float(
-                                d["price"].replace("$", "").replace(",", "")
-                            )
-                            if isinstance(d.get("price"), str)
-                            and d.get("price")
-                            not in ("Call for price", None, "")
-                            else d.get("price"),
-                            price_display=str(d.get("price") or "") or None,
-                            payments_from=None,
-                            category_subcategory=str(d.get("category") or ""),
-                            make=str(d.get("make") or ""),
-                            color=str(d.get("color") or ""),
-                            hitch_type=d.get("hitch_type"),
-                            year=d.get("year"),
-                            length=d.get("length"),
-                            width=d.get("width"),
-                            axles=d.get("axles"),
-                            gvwr=d.get("gvwr"),
-                            payload_capacity=d.get("payload_capacity"),
-                            trailer_material=d.get("material"),
-                            floor=d.get("floor"),
-                            url=str(d.get("url") or ""),
-                            score=d.get("relevance_score"),
-                        )
-                    )
-                except Exception:
-                    pass
+    response_text = (data.get("assistant_text") or "").strip() or " "
+    # Set by search_node only when the inventory search actually fired.
+    search_note = (data.get("search_status_message") or "").strip() or None
+    st.session_state.onboarding_api_messages = data.get(
+        "onboarding_api_messages"
+    ) or st.session_state.onboarding_api_messages
+    sp = data.get("sales_phase")
+    if sp in ("onboarding", "main"):
+        st.session_state.sales_phase = sp
+    if data.get("customer_full_name"):
+        st.session_state.customer_full_name = data["customer_full_name"]
+    if "customer_email" in data:
+        st.session_state.customer_email = data.get("customer_email") or ""
+    if data.get("customer_phone"):
+        st.session_state.customer_phone = data["customer_phone"]
+    if data.get("main_prior_messages") is not None:
+        st.session_state.main_prior_messages = data["main_prior_messages"]
+    thinking_context = data.get("thinking_context")
+    st.session_state.pending_turn_id = None
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response_text,
-            "search_note": search_note,
-            "listings": listings or None,
-            "user_feedback": None,
-            "thinking_payload": (
-                thinking_context
-                if thinking_agent_enabled() and thinking_context is not None
-                else None
-            ),
-            "thinking_result": None,
-        })
-        assistant_message_index = len(st.session_state.messages) - 1
-        # Dots (and the live copy of the note) go; the note is re-rendered below as part of
-        # the finished message so it stays in the transcript instead of vanishing with them.
-        waiting_placeholder.empty()
-        _render_search_note(search_note)
-        st.markdown(response_text)
-        if SHOW_LISTING_CARDS:
-            for i, listing in enumerate(listings or [], 1):
-                render_card(listing, i)
+    listings = []
+    for d in (data.get("listings") or []):
+        if not isinstance(d, dict):
+            continue
+        try:
+            listings.append(
+                TrailerListing(
+                    listing_id=str(d.get("url") or d.get("title") or ""),
+                    title=str(d.get("title") or ""),
+                    condition=str(d.get("condition") or "New"),
+                    price=float(
+                        d["price"].replace("$", "").replace(",", "")
+                    )
+                    if isinstance(d.get("price"), str)
+                    and d.get("price")
+                    not in ("Call for price", None, "")
+                    else d.get("price"),
+                    price_display=str(d.get("price") or "") or None,
+                    payments_from=None,
+                    category_subcategory=str(d.get("category") or ""),
+                    make=str(d.get("make") or ""),
+                    color=str(d.get("color") or ""),
+                    hitch_type=d.get("hitch_type"),
+                    year=d.get("year"),
+                    length=d.get("length"),
+                    width=d.get("width"),
+                    axles=d.get("axles"),
+                    gvwr=d.get("gvwr"),
+                    payload_capacity=d.get("payload_capacity"),
+                    trailer_material=d.get("material"),
+                    floor=d.get("floor"),
+                    url=str(d.get("url") or ""),
+                    score=d.get("relevance_score"),
+                )
+            )
+        except Exception:
+            pass
+
+    message = {
+        "role": "assistant",
+        "content": response_text,
+        "search_note": search_note,
+        "listings": listings or None,
+        "user_feedback": None,
+        "thinking_payload": (
+            thinking_context
+            if thinking_agent_enabled() and thinking_context is not None
+            else None
+        ),
+        "thinking_result": None,
+    }
+    st.session_state.messages.append(message)
+    assistant_message_index = len(st.session_state.messages) - 1
+    # Dots (and the live copy of the note) go; the note is re-rendered below as part of the
+    # finished message so it stays in the transcript instead of vanishing with them.
+    waiting_slot.empty()
+    if not streamed:
+        # Streaming already drew the reply, bubble by bubble, as it came in.
+        _render_message_bubbles(message)
 
     if thinking_agent_enabled() and thinking_context is not None:
         st.session_state.last_thinking_payload = thinking_context

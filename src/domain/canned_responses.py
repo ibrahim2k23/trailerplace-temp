@@ -6,12 +6,18 @@ FAQ_CANNED_RESPONSES = {
     "store_info": "We're located in Wharton, TX. Call 979-532-1486 or visit https://trailerplace.com. We also offer financing and delivery.",
 }
 
+# Every one of these fires on a turn we could NOT settle ourselves, so every one of them names
+# the number. Leaving it out made the phone line a coin flip exactly where it matters most: the
+# canned text arrives as an order, the model treats it as the answer, and the sales-rep line it
+# would otherwise have written gets displaced - so the customer we just failed to help was told
+# only that "the team" had been notified, with no way to reach anyone. The FAQ responses above
+# always carried the number; these did not.
 NON_FAQ_CANNED_RESPONSES = {
-    "generic_team_request": "Thanks, I shared that request with the team so they can help you with it.",
-    "escalation": "I've passed your query to our team. In the meantime, I can keep helping you narrow down the right trailer.",
+    "generic_team_request": "Thanks, I shared that request with the team so they can help you with it. If you'd rather not wait, our sales team is on 979-532-1486.",
+    "escalation": "I've passed your query to our team, and you can reach them directly on 979-532-1486. In the meantime, I can keep helping you narrow down the right trailer.",
     "listing_interest_selected": "Your interest in the selected trailer has been logged. Our team can follow up. In the meantime, feel free to visit https://trailerplace.com or call 979-532-1486.",
     "listing_interest_unselected": "Your interest has been logged. Our team can follow up. In the meantime, feel free to visit https://trailerplace.com or call 979-532-1486.",
-    "listing_interest_fallback": "Great, I shared your interest in that trailer with the team. They can follow up with you.",
+    "listing_interest_fallback": "Great, I shared your interest in that trailer with the team. They can follow up with you, or you can reach them on 979-532-1486.",
 }
 
 CANNED_RESPONSES = {**FAQ_CANNED_RESPONSES, **NON_FAQ_CANNED_RESPONSES}

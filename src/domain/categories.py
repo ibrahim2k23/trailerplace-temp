@@ -18,6 +18,13 @@ CANONICAL_CATEGORIES = [
     "Dump",
     "Tilt",
     "Livestock",
+    # Canonical, but the catalogue currently holds NO listing with this category, so
+    # stocked_categories() drops it and the prompts never advertise it. That is deliberate:
+    # naming it here is what lets us RECOGNISE "food trailer" instead of mishearing it, and
+    # unstocked_categories_line() is what lets the reply say we do not stock it yet.
+    # (Three units titled "Concession" do exist, filed under Enclosed — re-tagging them in
+    # the source workbook is what would turn this into a stocked category.)
+    "Concession",
 ]
 
 # Synonym terms are split into two salience tiers so that an explicitly *named*
@@ -42,6 +49,11 @@ _NAMING_TERMS: dict[str, list[str]] = {
     "Dump": ["dump", "dump trailer"],
     "Tilt": ["tilt", "full tilt", "gravity dampened tilt", "hydraulic dampened tilt"],
     "Livestock": ["livestock", "live stock"],
+    # "food trailers" is listed alongside the singular because terms match on a hard word
+    # boundary ((?!\w) in _ranked_category_matches), so "food trailer" does NOT match "food
+    # trailers" - and the plural is how customers actually ask. "concession" needs no plural:
+    # the bare word already matches inside "concession trailers".
+    "Concession": ["concession", "concession trailer", "food trailer", "food trailers"],
 }
 
 _CARGO_TERMS: dict[str, list[str]] = {
@@ -74,6 +86,9 @@ _SYNONYMS: dict[str, list[str]] = {
 # the code would refuse to ask about anyway.
 WIDTH_EXCLUDED_CATEGORIES = frozenset({
     "Aluminum",
+    # Like Enclosed, which it is built on: the box comes as it comes, and the spec asks for
+    # the build size its own way.
+    "Concession",
     "Diesel Tank",
     "Dump",
     "Enclosed",
@@ -259,6 +274,44 @@ def _advertised_categories() -> tuple[str, ...]:
     from src.domain.brands import stocked_categories
 
     return stocked_categories()
+
+
+def unstocked_categories() -> tuple[str, ...]:
+    """Canonical categories we recognise but currently hold NO stock in.
+
+    The complement of _advertised_categories(). It exists so the reply can say "we do not
+    have those right now" as a FACT it was given, rather than by noticing a category is
+    absent from a list - an inference small models make unreliably, and one that fails
+    silently in the direction that matters (claiming stock we do not have).
+    """
+    stocked = set(_advertised_categories())
+    return tuple(category for category in CANONICAL_CATEGORIES if category not in stocked)
+
+
+def unstocked_categories_line() -> str:
+    """Comma-joined not-in-stock categories, or "" when we stock everything we recognise."""
+    return ", ".join(unstocked_categories())
+
+
+def category_terms_line(category: str) -> str:
+    """Every term that names one category, for quoting back what the customer called it."""
+    return ", ".join(_NAMING_TERMS.get(category, ()))
+
+
+def unstocked_categories_block() -> str:
+    """The not-in-stock categories WITH their terms, for the Respond prompt.
+
+    The terms matter as much as the names: a customer asks for a "food trailer", never for a
+    "Concession". Without the terms the model has to know they are the same thing.
+    """
+    missing = unstocked_categories()
+    if not missing:
+        return "None - we currently hold stock in every category we recognise."
+    lines = []
+    for category in missing:
+        terms = category_terms_line(category)
+        lines.append(f"- {category}" + (f" (they may call it: {terms})" if terms else ""))
+    return "\n".join(lines)
 
 
 def advertised_categories_line() -> str:

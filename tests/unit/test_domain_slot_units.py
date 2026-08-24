@@ -117,7 +117,10 @@ def test_slot_map_keys_exist_or_are_runtime_injected():
     # trailer_height_ft: never itself an asked slot name - populated by direct LLM
     # extraction or a WxLxH answer - but still needs a metadata-filter target so height
     # reaches the fit rerank.
-    assert missing == {"item_or_trailer_width_ft", "trailer_height_ft"}
+    # axle_capacity_lbs: no category asks for it any more (it was Utility's third question
+    # and was dropped), but a customer who volunteers "7,000 lb axles" must still have it
+    # stored and filtered on.
+    assert missing == {"item_or_trailer_width_ft", "trailer_height_ft", "axle_capacity_lbs"}
 
 
 def test_slot_normalization():

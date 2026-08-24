@@ -18,18 +18,22 @@ def test_question_order_skips_answered_and_skipped():
 def test_completion_flag_when_no_questions_left():
     state = new_session_state("s1")
     state["category"] = "Utility"
-    state["slots"] = {"haul_item": "golf cart", "haul_weight_lbs": 1000, "axle_capacity_lbs": 3500}
+    state["slots"] = {"haul_item": "golf cart", "haul_weight_lbs": 1000}
     qualification_node(state)
     assert state["qualification_complete"] is True
 
 
-def test_utility_asks_axle_capacity_after_the_weight_question():
+def test_utility_never_asks_for_axle_capacity():
+    """Axle capacity is a ranking signal we accept, never a question we put to the customer."""
     state = new_session_state("s1")
     state["category"] = "Utility"
-    state["slots"] = {"haul_item": "golf cart", "haul_weight_lbs": 1000}
+    state["slots"] = {"haul_item": "golf cart"}
     qualification_node(state)
-    assert state["pending_question_slot"] == "axle_capacity_lbs"
-    assert "axle capacity" in state["turn_outcome"]["next_question"].lower()
+    assert state["pending_question_slot"] == "haul_weight_lbs"
+    state["slots"]["haul_weight_lbs"] = 1000
+    qualification_node(state)
+    assert state["pending_question_slot"] != "axle_capacity_lbs"
+    assert "axle" not in (state["turn_outcome"].get("next_question") or "").lower()
 
 
 def test_injected_width_question_sequences_like_required_slot():

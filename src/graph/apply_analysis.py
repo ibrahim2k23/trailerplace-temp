@@ -37,9 +37,10 @@ from src.llm.schemas import HaulClassification, TurnAnalysis
 INJECTED_WIDTH_SLOT = "item_or_trailer_width_ft"
 INJECTED_WIDTH_QUESTION = "About how wide is that item or trailer you need to haul?"
 
-# Facts worth recording in ANY category, even one whose spec never asks for them. Only Utility
-# asks about axle capacity, but a customer who volunteers "I want 7,000 lb axles" while shopping
-# Equipment has stated a real requirement, and the fit rerank can use it in every category.
+# Facts worth recording in ANY category, even one whose spec never asks for them. NO category
+# asks about axle capacity any more (it was Utility's third question and was dropped), so this
+# set is now the ONLY thing keeping the slot alive: a customer who volunteers "I want 7,000 lb
+# axles" has stated a real requirement, and the fit rerank uses it in every category.
 _ALWAYS_VALID_NUMERIC_SLOTS = frozenset({"axle_capacity_lbs"})
 
 # Aluminum is the odd one out: it is the inventory category we stock, and the trailer TYPE the

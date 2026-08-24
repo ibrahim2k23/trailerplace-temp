@@ -171,6 +171,32 @@ non-search turn.
 | `TURN_LOG_PATH` | — | JSONL of per-turn records; the cost report's input. |
 | `CHAT_TIMEOUT_SECONDS` | `150` | Server-side graph budget. Must stay under app.py's 180 s. |
 | `CHAT_MAX_MESSAGE_CHARS` | `4000` | Oversized messages are truncated. |
+| `CHAT_STREAM_ENABLED` | `1` | Serves `POST /chat/stream` and makes the UI use it. `0` falls back to blocking `POST /chat` and one bubble per turn. |
+| `CHAT_STREAM_WORDS_PER_DELTA` | `3` | Words per typing step. |
+| `CHAT_STREAM_DELTA_SECONDS` | `0.035` | Pause between typing steps. |
+| `CHAT_STREAM_CHUNK_PAUSE_SECONDS` | `0.45` | Pause between one message bubble and the next. |
+
+---
+
+## Streaming replies (`POST /chat/stream`)
+
+Same request body as `POST /chat`, same turn, delivered as Server-Sent Events. A reply is
+**not** streamed token-by-token out of the model: the respond node returns a *structured*
+output that is validated and repaired first (a draft citing a trailer we never showed is
+rejected and rewritten), so streaming raw tokens would publish drafts we are about to throw
+away and would lose `cited_listing_urls`, which decides the cards.
+
+What is streamed is the finished reply — and it arrives as **several messages**, not one
+wall of text: the intro, then **one message per trailer**, then the closing question. The
+split lives in `src/domain/reply_chunks.py` and keys off the listing-card shape the respond
+prompt dictates, so each trailer's hyperlinked title heads its own bubble. The search line
+(“Let me pull up what we have that fits.”) rides the same stream, which is why the streaming
+UI no longer polls `GET /session/{id}/turn-status`.
+
+Events: `status`, `chunk_start`, `delta`, `chunk_end`, `done`, `error`. `done` carries the
+exact `POST /chat` body plus `chunks`, so a client that ignores the typing can render the
+same bubbles in one pass. Errors after the first byte arrive as an `error` event — the status
+code is already spent by then.
 
 ---
 
