@@ -144,3 +144,59 @@ def test_a_single_axle_total_equals_its_per_axle_rating():
 def test_a_tri_axle_total_multiplies_by_three():
     record = build_record(_row(axle_count=3, axle_capacity="7000 lbs"), 0)
     assert record["total_axle_capacity_lbs_num"] == 21000.0
+
+
+# ----- the axles field is not always a bare number -------------------------
+#
+# Every string below is a real value from the catalogue. Reading the first
+# number in them takes 10,400 as a count on the second one; the range guard then
+# discards it, so nothing wrong was stored, but three listings silently lost a
+# count they had plainly stated.
+
+import pytest  # noqa: E402
+
+from src.search.ingest import parse_axle_count  # noqa: E402
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2 x 7,000 lb", 2),
+    ("Tandem | 10,400 lbs", 2),                    # 10,400 is the total, not a count
+    ("Single | Total: 3,500 lbs", 1),
+    ("Tandem | Total: 7,000 lbs", 2),
+    ("Type: Spring | Count: 2 | Rating: 7,000# (Dexter)", 2),
+])
+def test_a_described_axle_field_still_yields_its_count(value, expected):
+    assert parse_axle_count(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "2000# Rubber torsion axle - No brakes - Easy lube hubs",
+    "3500# Rubber torsion axle (Rated at 2990#) - No brakes - Easy lube hub",
+])
+def test_a_rating_with_no_stated_count_yields_nothing(value):
+    """One fact about the axles, and it is not how many there are."""
+    assert parse_axle_count(value) is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    (2, 2), (2.0, 2), ("2", 2), ("2.0", 2), ("  3 ", 3),
+    ("2 Axles", 2), ("Tri-Axle", 3), ("2-7,000# Straight Axles", 2),
+    ("SA", 1), ("TA", 2),
+])
+def test_the_ordinary_forms_all_read_as_numbers(value, expected):
+    assert parse_axle_count(value) == expected
+
+
+@pytest.mark.parametrize("value", ["8000", 11, 0, "", None, "two", "no axle data"])
+def test_anything_that_is_not_a_count_yields_nothing(value):
+    assert parse_axle_count(value) is None
+
+
+def test_a_described_axle_field_reaches_the_stored_row_as_a_number():
+    """End to end: the column is an integer, so text could never land in it -
+    the risk was a real count being dropped, not text being stored."""
+    record = build_record(_row(axles="Tandem | 10,400 lbs", axle_capacity="5200 lbs"), 0)
+    assert record["axle_count"] == 2
+    assert record["total_axle_capacity_lbs_num"] == 10400.0, (
+        "and the total now agrees with the 10,400 the field stated all along"
+    )

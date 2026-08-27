@@ -323,31 +323,71 @@ def parse_money(val) -> Optional[float]:
         return None
 
 
-def parse_axle_count(val) -> Optional[int]:
-    """Whole number of axles, or None.
+# The `axles` field is not always a bare number. Real values from the catalogue:
+#   "2 x 7,000 lb"                                  -> 2 axles
+#   "Tandem | 10,400 lbs"                           -> 2 axles (10,400 is the TOTAL)
+#   "Single | Total: 3,500 lbs"                     -> 1 axle
+#   "Type: Spring | Count: 2 | Rating: 7,000#"      -> 2 axles
+#   "2000# Rubber torsion axle - No brakes"         -> a RATING, no count stated
+# Taking the first number in the string reads 10,400 as a count on the second of
+# those. The out-of-range guard then discards it, so nothing wrong was ever
+# stored - but three listings silently lost a count they had plainly stated.
+_AXLE_WORDS = {
+    "single": 1, "tandem": 2, "tri": 3, "triple": 3, "quad": 4, "quadruple": 4,
+}
+# The short forms the spec lists, matched only as whole tokens.
+_AXLE_CODES = {"SA": 1, "TA": 2, "TRI": 3, "3A": 3, "QA": 4, "4A": 4, "SPA": 2}
+_BARE_NUMBER_RE = re.compile(r"^\d+(?:\.0+)?$")
+_COUNT_LABEL_RE = re.compile(r"\b(?:count|qty|quantity|number)\s*[:=]?\s*(\d+)", re.I)
+_N_AXLES_RE = re.compile(r"\b(\d+)\s*axles?\b", re.I)
+_LEADING_N_RE = re.compile(r"^\s*(\d+)\s*[x\-]\s*[\d$]", re.I)
+_WORD_RE = re.compile(
+    r"(?<![A-Za-z])(" + "|".join(_AXLE_WORDS) + r")(?![A-Za-z])", re.I
+)
+_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(" + "|".join(_AXLE_CODES) + r")(?![A-Za-z0-9])"
+)
 
-    The workbook writes a bare integer, but Excel round-trips a column with any
-    gap in it as float, so "2.0" arrives as often as "2". Anything past
-    MAX_PLAUSIBLE_AXLE_COUNT is a capacity that landed in the count column and is
-    dropped rather than published as a trailer with 8000 axles.
+
+def parse_axle_count(val) -> Optional[int]:
+    """How many axles, or None when the field does not actually say.
+
+    Reads the count rather than the first digits it can find, because the field
+    carries ratings and totals too and those are far larger numbers. A value that
+    states only a rating yields None: "2000# Rubber torsion axle" is one fact
+    about the axles and it is not how many there are.
     """
     if val is None:
         return None
     if isinstance(val, float) and pd.isna(val):
         return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return _in_range(int(val)) if float(val).is_integer() else None
+
     text = str(val).strip()
     if not text:
         return None
-    match = re.search(r"\d+(?:\.\d+)?", text.replace(",", ""))
-    if not match:
-        return None
-    try:
-        count = float(match.group(0))
-    except (TypeError, ValueError):
-        return None
-    if count != int(count):
-        return None
-    count = int(count)
+    # Excel round-trips a column with any gap in it as float, so "2.0" arrives as
+    # often as "2"; a bare number is the count and nothing else.
+    if _BARE_NUMBER_RE.match(text.replace(",", "")):
+        return _in_range(int(float(text.replace(",", ""))))
+
+    for pattern in (_COUNT_LABEL_RE, _N_AXLES_RE, _LEADING_N_RE):
+        match = pattern.search(text)
+        if match:
+            return _in_range(int(match.group(1)))
+
+    match = _WORD_RE.search(text)
+    if match:
+        return _AXLE_WORDS[match.group(1).casefold()]
+    match = _CODE_RE.search(text)
+    if match:
+        return _AXLE_CODES[match.group(1).upper()]
+    return None
+
+
+def _in_range(count: int) -> Optional[int]:
+    """A number outside this range is a rating that reached the count field."""
     return count if 1 <= count <= MAX_PLAUSIBLE_AXLE_COUNT else None
 
 
