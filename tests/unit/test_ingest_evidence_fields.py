@@ -109,3 +109,38 @@ def test_axle_count_participates_in_the_content_hash():
     with_count = build_record(_row(axle_count=2), 0)
     without = build_record(_row(), 0)
     assert with_count["content_hash"] != without["content_hash"]
+
+
+def test_total_axle_capacity_is_the_count_times_the_per_axle_rating():
+    """Two 7,500 lb axles carry 15,000 lb between them."""
+    record = build_record(_row(axle_count=2, axle_capacity="7500 lbs"), 0)
+    assert record["total_axle_capacity_lbs_num"] == 15000.0
+    assert record["axle_capacity_lbs_num"] == 7500.0, "the per-axle rating is unchanged"
+
+
+def test_total_axle_capacity_needs_both_parts():
+    """A capacity with no count must not silently assume two axles."""
+    capacity_only = build_record(_row(axle_capacity="5200 lbs"), 0)
+    assert capacity_only["axle_capacity_lbs_num"] == 5200.0
+    assert capacity_only["total_axle_capacity_lbs_num"] is None
+
+    count_only = build_record(_row(axle_count=2), 0)
+    assert count_only["axle_count"] == 2
+    assert count_only["total_axle_capacity_lbs_num"] is None
+
+
+def test_a_dropped_corrupt_capacity_leaves_no_total():
+    """The "2 lbs" rows: the capacity is refused, so the total cannot be built."""
+    record = build_record(_row(axle_count=2, axle_capacity="2 lbs", gvwr="14000 lbs"), 0)
+    assert record["axle_capacity_lbs_num"] is None
+    assert record["total_axle_capacity_lbs_num"] is None
+
+
+def test_a_single_axle_total_equals_its_per_axle_rating():
+    record = build_record(_row(axle_count=1, axle_capacity="3500 lbs"), 0)
+    assert record["total_axle_capacity_lbs_num"] == 3500.0
+
+
+def test_a_tri_axle_total_multiplies_by_three():
+    record = build_record(_row(axle_count=3, axle_capacity="7000 lbs"), 0)
+    assert record["total_axle_capacity_lbs_num"] == 21000.0

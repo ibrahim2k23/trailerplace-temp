@@ -158,6 +158,9 @@ class TrailerListingRow(Base):
     payload_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
     # No index: axle capacity is a rerank signal, never a WHERE clause.
     axle_capacity_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # count x per-axle rating: two 7,500 lb axles carry 15,000 lb between them.
+    # Derived, and only when both parts are known - see ingest.build_record.
+    total_axle_capacity_lbs_num: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     trailer_material: Mapped[str | None] = mapped_column(String(64), nullable=True)
     floor: Mapped[str | None] = mapped_column(String(64), nullable=True)

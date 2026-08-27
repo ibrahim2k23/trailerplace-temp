@@ -434,6 +434,15 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         # number never reaches the fit rerank and "2 lbs" never reaches a listing card.
         axle_capacity = None
         axle_capacity_lbs_num = None
+    # What the axles carry between them. Arithmetic on two known facts, not an
+    # inference: it is computed only when both parts are present, so a listing
+    # that states a capacity but no count yields nothing here rather than a total
+    # that quietly assumes two axles.
+    total_axle_capacity_lbs_num = (
+        float(axle_count) * axle_capacity_lbs_num
+        if axle_count is not None and axle_capacity_lbs_num is not None
+        else None
+    )
     material = col("trailer_material", "trailer material") or None
     floor = col("floor") or None
     length_ft_num = parse_length_ft(length)
@@ -517,6 +526,7 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "gvwr_lbs_num": gvwr_lbs_num,
         "payload_lbs_num": payload_lbs_num,
         "axle_capacity_lbs_num": axle_capacity_lbs_num,
+        "total_axle_capacity_lbs_num": total_axle_capacity_lbs_num,
         "trailer_material": material,
         "floor": floor,
         "features": features,
