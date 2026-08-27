@@ -145,6 +145,10 @@ class TrailerListingRow(Base):
     gvwr: Mapped[str | None] = mapped_column(Text, nullable=True)
     # PER-AXLE rating, not a total: a two-axle trailer rated 3500 here has a 7000 lb GVWR.
     axle_capacity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How many axles. One column, not the raw/parsed pair the dimensions use:
+    # "2" and 2 carry identical information, so a display string would only be a
+    # second copy to keep in step. The raw text already lives in `axles`.
+    axle_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload_capacity: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     length_ft_num: Mapped[float | None] = mapped_column(Float, nullable=True)

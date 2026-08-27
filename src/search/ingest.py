@@ -55,6 +55,10 @@ MATCH_EVIDENCE_TEXT_MAX_CHARS = 12000
 # "Axle capacity: 2 lbs" on the card. Real ratings start at 2000, so anything under this floor
 # is the count, not a capacity, and is dropped.
 MIN_PLAUSIBLE_AXLE_CAPACITY_LBS = 1000
+# The mirror of the floor above: a handful of rows carry the axle CAPACITY in the
+# count column ("axles": "8000"). Nothing on the lot has more than a handful of
+# axles, so anything past this is the capacity, not a count, and is dropped.
+MAX_PLAUSIBLE_AXLE_COUNT = 10
 MAX_RETRIES = int(os.getenv("INGEST_MAX_RETRIES", "4"))
 FEATURE_EXTRACTION_VERSION = os.getenv(
     "FEATURE_EXTRACTION_VERSION", "trailer-features-v2"
@@ -214,6 +218,7 @@ def build_flattened_evidence_text(
         "gvwr",
         "axles",
         "axle_capacity",
+        "axle_count",
         "payload_capacity",
         "dry_weight",
         "trailer_material",
@@ -318,6 +323,34 @@ def parse_money(val) -> Optional[float]:
         return None
 
 
+def parse_axle_count(val) -> Optional[int]:
+    """Whole number of axles, or None.
+
+    The workbook writes a bare integer, but Excel round-trips a column with any
+    gap in it as float, so "2.0" arrives as often as "2". Anything past
+    MAX_PLAUSIBLE_AXLE_COUNT is a capacity that landed in the count column and is
+    dropped rather than published as a trailer with 8000 axles.
+    """
+    if val is None:
+        return None
+    if isinstance(val, float) and pd.isna(val):
+        return None
+    text = str(val).strip()
+    if not text:
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", text.replace(",", ""))
+    if not match:
+        return None
+    try:
+        count = float(match.group(0))
+    except (TypeError, ValueError):
+        return None
+    if count != int(count):
+        return None
+    count = int(count)
+    return count if 1 <= count <= MAX_PLAUSIBLE_AXLE_COUNT else None
+
+
 def _money_from_info(info: dict, *keys: str) -> Optional[float]:
     for k in keys:
         p = parse_money(info.get(normalize_json_key(k)))
@@ -391,6 +424,9 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     gvwr_lbs_num = parse_lbs(gvwr)
     payload = col("payload_capacity", "payload capacity") or None
     payload_lbs_num = parse_lbs(payload)
+    # The scraper extracts this; older workbooks predate the column and fall back
+    # to the raw `axles` text, which is a bare number on the rows that have it.
+    axle_count = parse_axle_count(col("axle_count", "axle count") or axles)
     axle_capacity = col("axle_capacity", "axle capacity") or None
     axle_capacity_lbs_num = parse_lbs(axle_capacity)
     if axle_capacity_lbs_num is not None and axle_capacity_lbs_num < MIN_PLAUSIBLE_AXLE_CAPACITY_LBS:
@@ -425,6 +461,11 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         # Also feeds canonical_content_hash: without it, adding axle capacity to an existing
         # catalogue leaves every hash unchanged and an incremental re-ingest skips every row.
         "axle_capacity": axle_capacity,
+        # Same again for the count, and it bites harder: the capacity only changes
+        # on the handful of corrupt rows, so without the count in the hash the
+        # other 240 listings would keep their old hash, be skipped as unchanged,
+        # and never receive the count at all.
+        "axle_count": axle_count,
         "payload_capacity": payload,
         "trailer_material": material,
         "floor": floor,
@@ -468,6 +509,7 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "axles": axles,
         "gvwr": gvwr,
         "axle_capacity": axle_capacity,
+        "axle_count": axle_count,
         "payload_capacity": payload,
         "length_ft_num": length_ft_num,
         "width_ft_num": width_ft_num,
