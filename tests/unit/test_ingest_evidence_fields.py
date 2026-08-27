@@ -200,3 +200,14 @@ def test_a_described_axle_field_reaches_the_stored_row_as_a_number():
     assert record["total_axle_capacity_lbs_num"] == 10400.0, (
         "and the total now agrees with the 10,400 the field stated all along"
     )
+
+
+def test_the_scrapers_total_is_used_when_the_workbook_carries_one():
+    record = build_record(_row(axle_count=2, axle_capacity="7500 lbs",
+                               total_axle_capacity=15000), 0)
+    assert record["total_axle_capacity_lbs_num"] == 15000.0
+
+
+def test_an_older_workbook_without_the_column_still_gets_a_total():
+    record = build_record(_row(axle_count=2, axle_capacity="7500 lbs"), 0)
+    assert record["total_axle_capacity_lbs_num"] == 15000.0

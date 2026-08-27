@@ -478,7 +478,11 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     # inference: it is computed only when both parts are present, so a listing
     # that states a capacity but no count yields nothing here rather than a total
     # that quietly assumes two axles.
-    total_axle_capacity_lbs_num = (
+    # The scraper works this out and writes it; recomputing here would mean
+    # teaching the same arithmetic twice, so its value wins when the workbook
+    # carries one. Older workbooks predate the column and fall back to the
+    # multiplication.
+    total_axle_capacity_lbs_num = parse_lbs(col("total_axle_capacity", "total axle capacity")) or (
         float(axle_count) * axle_capacity_lbs_num
         if axle_count is not None and axle_capacity_lbs_num is not None
         else None
