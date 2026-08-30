@@ -56,7 +56,8 @@ def test_concession_has_its_own_qualification_spec():
     """Without one it silently falls back to _DEFAULT_SPEC's "what will you be hauling?"."""
     spec = get_trailer_fields("Concession")
     assert spec.category == "Concession"
-    assert spec.required == ["use_case", "cargo_size"]
+    # Length rather than cargo_size: concession trailers are bought by length.
+    assert spec.required == ["use_case", "trailer_length_ft"]
     assert "serving" in spec.questions["use_case"]
 
 

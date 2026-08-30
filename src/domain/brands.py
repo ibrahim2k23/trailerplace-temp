@@ -22,9 +22,14 @@ _ROOT = Path(__file__).resolve().parents[2]
 # seen; reading the same rows as search removes that class of drift entirely.
 _LISTINGS_FILE = Path(os.getenv("LISTINGS_DATA_FILE", str(_ROOT / "listings.xlsx")))
 
+# Non-canonical labels the catalogue uses, folded onto the canonical category they mean.
+# "Concession" was here too, back when concession units were filed under Enclosed in the
+# workbook. They now carry their own category, so folding them lost the two we actually
+# stock: the bot reported no concession trailers while holding two, and would have told a
+# customer to look elsewhere. Only ever map a NON-canonical label - mapping one canonical
+# category onto another hides real inventory.
 _CATEGORY_ALIASES = {
     "Atv Trailer": "Utility",
-    "Concession": "Enclosed",
     "Landscape": "Utility",
     "Tank": "Diesel Tank",
 }

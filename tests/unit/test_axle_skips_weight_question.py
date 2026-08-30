@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.domain.categories import CANONICAL_CATEGORIES
+from src.domain.categories import CANONICAL_CATEGORIES, unstocked_categories
 from src.domain.slot_map import slot_value_kind
 from src.domain.trailer_fields import get_trailer_fields
 from src.graph.nodes.qualification import qualification_node
@@ -24,7 +24,12 @@ def _weight_slot(category: str) -> str | None:
 
 
 WEIGHT_CATEGORIES = [c for c in CANONICAL_CATEGORIES if _weight_slot(c)]
-NO_WEIGHT_CATEGORIES = [c for c in CANONICAL_CATEGORIES if not _weight_slot(c)]
+# Unstocked categories are excluded throughout: qualification stops before asking anything
+# at all for those, so they say nothing either way about the weight question.
+NO_WEIGHT_CATEGORIES = [
+    c for c in CANONICAL_CATEGORIES
+    if not _weight_slot(c) and c not in unstocked_categories()
+]
 
 
 def _state(category: str, *, axle: float | None, answered_others: bool = True) -> dict:

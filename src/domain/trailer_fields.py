@@ -152,17 +152,20 @@ _SPECS: dict[str, TrailerFieldSpec] = {
     # they already have normalizers and metadata-filter targets behind them.
     "Concession": TrailerFieldSpec(
         category="Concession",
-        required=["use_case", "cargo_size"],
+        # Length, not cargo_size: a concession trailer is bought by its length - an 8.5x14
+        # and an 8.5x22 are the same width and a different business. cargo_size asked for
+        # length x width and stored the length anyway, so this asks the question we mean.
+        required=["use_case", "trailer_length_ft"],
         optional=["ac_windows_cabinets", "finished_interior"],
         questions={
             "use_case":            "What will you be serving or using the concession trailer for (food service, coffee, retail, etc.)?",
-            "cargo_size":          "What size trailer are you after (length × width)?",
+            "trailer_length_ft":   "What length of concession trailer are you looking for?",
             "ac_windows_cabinets": "Will you need a serving window, AC, or cabinets fitted?",
             "finished_interior":   "Does the interior need to be finished out (lined walls, flooring, counters)?",
         },
         answer_guidance={
             "use_case": "Store the concession or vending use case, such as food service, coffee, BBQ, or retail.",
-            "cargo_size": "Store the preferred trailer dimensions. Accept length, width, height, or size shorthand such as AxB or AxBxC.",
+            "trailer_length_ft": "Store the trailer length in feet. Accept a range or a size shorthand such as 8.5x14 and take the LENGTH from it.",
             "ac_windows_cabinets": "Store requested fit-out items such as a serving window, AC, or cabinets.",
             "finished_interior": "Store whether the customer wants a finished interior such as lined walls, flooring, or counters.",
         },

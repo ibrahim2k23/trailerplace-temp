@@ -290,6 +290,19 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "blame them (a typo is the likely story) - and offer them the way out: a real figure, or skip "
             "the question and move on. Then ask the question below."
         )
+    if _outcome_get(turn_outcome, "unstocked_category"):
+        # Named here as a fact about THIS turn, not left to the model to notice from a list.
+        # The ordered wording lives in the CATEGORY & QUALIFICATION RULES section.
+        category = _outcome_get(turn_outcome, "unstocked_category")
+        lines.append(
+            f"- WE DO NOT STOCK {category} AT ALL right now. In ONE reply: say so plainly, name "
+            "the two or three closest types we DO carry, and then END with this line, which is "
+            "how they get one ordered - it is NOT optional and the number must appear: "
+            '"If you would like one, give our sales team a call at 979-532-1486 - they can look '
+            'into ordering it for you." Ask them NOTHING about this trailer - no size, no '
+            "weight, no capacity - and never imply we might have one in stock."
+        )
+        return lines
     if _outcome_get(turn_outcome, "clarification_question"):
         lines.append(f'- Clarification question to ask: "{_outcome_get(turn_outcome, "clarification_question")}"')
     if _outcome_get(turn_outcome, "next_question"):

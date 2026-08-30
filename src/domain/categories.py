@@ -18,12 +18,11 @@ CANONICAL_CATEGORIES = [
     "Dump",
     "Tilt",
     "Livestock",
-    # Canonical, but the catalogue currently holds NO listing with this category, so
-    # stocked_categories() drops it and the prompts never advertise it. That is deliberate:
-    # naming it here is what lets us RECOGNISE "food trailer" instead of mishearing it, and
-    # unstocked_categories_line() is what lets the reply say we do not stock it yet.
-    # (Three units titled "Concession" do exist, filed under Enclosed — re-tagging them in
-    # the source workbook is what would turn this into a stocked category.)
+    # Now stocked. The units were once filed under Enclosed, and a _CATEGORY_ALIASES entry
+    # folded them there; the workbook re-tagged them in August 2026, which is exactly the
+    # condition that turns this into a stocked category, so the alias was dropped.
+    # Whether it is advertised is decided by the catalogue, never by this list - if the last
+    # concession trailer sells, stocked_categories() drops it again on its own.
     "Concession",
 ]
 

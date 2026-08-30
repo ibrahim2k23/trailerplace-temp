@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from src.domain.categories import unstocked_categories
 from src.domain.slot_map import slot_value_kind
 from src.domain.trailer_fields import get_trailer_fields
 from src.graph.apply_analysis import INJECTED_WIDTH_QUESTION, INJECTED_WIDTH_SLOT, required_slots_for_state
@@ -48,6 +49,20 @@ def qualification_node(state: dict) -> dict:
         # here is already stored and waits for us - the category still has to be settled.
         state["qualification_complete"] = False
         outcome["next_question"] = "What type of trailer are you looking for?"
+        return state
+    if state["category"] in unstocked_categories():
+        # Nothing to qualify FOR. The respond prompt already forbids qualifying for a type we
+        # do not stock, and the model ignored it - it had a concrete question in front of it,
+        # and a concrete instruction beats a general rule every time. Live, a Diesel Tank
+        # request was asked its fuel type and tank capacity before reaching a search that
+        # could only ever return nothing. Withholding the question is what makes the rule
+        # stick; qualification_complete stays False so no empty search runs either.
+        logger.info(
+            "qualification | %s is not stocked: no questions, no search",
+            state["category"],
+        )
+        outcome["unstocked_category"] = state["category"]
+        state["qualification_complete"] = False
         return state
     if outcome.get("clarification_question"):
         # One question per turn. A clarification is already outstanding - which axle capacity
