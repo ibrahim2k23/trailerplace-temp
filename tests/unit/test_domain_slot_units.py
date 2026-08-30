@@ -120,7 +120,16 @@ def test_slot_map_keys_exist_or_are_runtime_injected():
     # axle_capacity_lbs: no category asks for it any more (it was Utility's third question
     # and was dropped), but a customer who volunteers "7,000 lb axles" must still have it
     # stored and filtered on.
-    assert missing == {"item_or_trailer_width_ft", "trailer_height_ft", "axle_capacity_lbs"}
+    # total_axle_capacity_lbs / axle_count: volunteer-only for the same reason, and they must
+    # STAY that way - the tests that assert qualification completes on an axle rating alone
+    # would break the moment either became a question a category requires.
+    assert missing == {
+        "item_or_trailer_width_ft",
+        "trailer_height_ft",
+        "axle_capacity_lbs",
+        "total_axle_capacity_lbs",
+        "axle_count",
+    }
 
 
 def test_slot_normalization():

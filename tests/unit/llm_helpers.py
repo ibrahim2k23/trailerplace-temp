@@ -18,6 +18,9 @@ def sample_analysis(**updates) -> TurnAnalysis:
             "trailer_height_ft": None,
             "payload_lbs": None,
             "axle_capacity_lbs": None,
+            "total_axle_capacity_lbs": None,
+            "axle_count": None,
+            "axle_capacity_basis": None,
             "hitch_type": None,
             "haul_item": "dirt",
             "brand_preference": None,
@@ -34,7 +37,14 @@ def sample_analysis(**updates) -> TurnAnalysis:
         "answered_current_question": True,
         "user_question_to_answer": None,
     }
+    # `extracted` MERGES rather than replaces. The schema is strict - every field is
+    # required, since structured outputs must emit them all - so a test that overrides one
+    # extracted field would otherwise have to restate the other dozen, and every new field
+    # would break every such test rather than just the ones that care about it.
+    extracted_updates = updates.pop("extracted", None)
     data.update(updates)
+    if extracted_updates is not None:
+        data["extracted"] = {**data["extracted"], **extracted_updates}
     return TurnAnalysis.model_validate(data)
 
 

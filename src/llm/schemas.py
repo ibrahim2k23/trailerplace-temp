@@ -41,6 +41,16 @@ class ExtractedFields(StrictBaseModel):
     trailer_height_ft: float | None = Field(description="Trailer height already converted to feet by the model, or null.")
     payload_lbs: float | None = Field(description="Payload already converted to pounds by the model, or null.")
     axle_capacity_lbs: float | None = Field(description="PER-AXLE capacity rating in pounds ('7000 lb axles'), never the load weight, or null.")
+    total_axle_capacity_lbs: float | None = Field(description="Capacity across ALL axles together in pounds ('14,000 lbs total across the axles'), never the load weight, or null.")
+    axle_count: int | None = Field(description="How many axles the customer wants ('tandem'=2, 'single'=1, 'tri'=3), or null. Never a capacity.")
+    axle_capacity_basis: Literal["per_axle", "total", "unclear"] | None = Field(
+        description=(
+            "Which of the two capacities the customer meant. 'per_axle' when the wording ties "
+            "the number to each axle ('7,000 lb axles'); 'total' when it ties it to all of them "
+            "together ('14,000 total', 'combined'); 'unclear' when a bare 'axle capacity' number "
+            "could honestly be either. Null when no capacity was stated."
+        )
+    )
     hitch_type: list[Literal["Bumper Pull", "Gooseneck"]] | None = Field(description="A single clear hitch preference, or null (including when the customer says either/any/no preference).")
     haul_item: str | None = Field(description="Cargo or item to haul, in the user's words.")
     brand_preference: str | None = Field(description="Canonical known make, or unknown brand verbatim.")

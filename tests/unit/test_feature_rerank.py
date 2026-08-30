@@ -22,6 +22,8 @@ def _listing(
     width: str = "8 ft",
     payload: str = "10000 lbs",
     axle_capacity: str | None = None,
+    axle_count: int | None = None,
+    total_axle_capacity: float | None = None,
     score: float = 0.9,
 ) -> dict:
     return {
@@ -32,6 +34,8 @@ def _listing(
         "width": width,
         "height": None,
         "axle_capacity": axle_capacity,
+        "axle_count": axle_count,
+        "total_axle_capacity": total_axle_capacity,
         "payload_capacity": payload,
         "gvwr": "14000 lbs",
         "features": features or [],
@@ -289,7 +293,7 @@ def _row(**fields):
         "make": "", "color": None, "hitch_type": None, "price": None, "price_display": None,
         "year": None, "model": None, "trim": None, "stock_number": None,
         "length": None, "width": None, "height": None, "axles": None, "gvwr": None,
-        "axle_capacity": None,
+        "axle_capacity": None, "axle_count": None, "total_axle_capacity_lbs_num": None,
         "payload_capacity": None, "trailer_material": None, "floor": None,
         "features": [], "match_evidence_text": "",
     }
@@ -493,6 +497,8 @@ def _fit(listings, **required):
         "required_length_ft": None, "required_payload_lbs": None,
         "required_width_ft": None, "required_height_ft": None,
         "required_axle_capacity_lbs": None,
+        "required_total_axle_capacity_lbs": None,
+        "required_axle_count": None,
     }
     kwargs.update(required)
     return search._rerank_listings_by_fit(
@@ -541,3 +547,98 @@ def test_axle_capacity_alone_is_enough_to_trigger_the_rerank():
     )
     assert debug["applied"] is True
     assert debug["required_axle_capacity_lbs"] == 7000.0
+
+
+# --- Total axle capacity and axle count (preferences, never gates) --------------------------
+
+
+def test_total_axle_capacity_orders_by_what_the_axles_carry_together():
+    weak = _listing("weak", total_axle_capacity=7000.0)
+    exact = _listing("exact", total_axle_capacity=14000.0)
+    overkill = _listing("overkill", total_axle_capacity=30000.0)
+
+    ranked, _debug = _fit(
+        [weak, overkill, exact], required_total_axle_capacity_lbs=14000.0
+    )
+
+    assert [item["url"] for item in ranked] == ["exact", "overkill", "weak"]
+
+
+def test_a_missing_total_never_drops_the_listing():
+    """69 of 259 listings carry no total. A gate would delete a quarter of the catalogue."""
+    known = _listing("known", total_axle_capacity=14000.0)
+    unknown = _listing("unknown", total_axle_capacity=None)
+
+    ranked, debug = _fit([unknown, known], required_total_axle_capacity_lbs=14000.0)
+
+    assert debug["retained_candidate_count"] == 2
+    assert {item["url"] for item in ranked} == {"known", "unknown"}
+    assert ranked[0]["url"] == "known"
+
+
+def test_axle_count_prefers_the_exact_number():
+    single = _listing("single", axle_count=1)
+    tandem = _listing("tandem", axle_count=2)
+    tri = _listing("tri", axle_count=3)
+
+    ranked, _debug = _fit([single, tri, tandem], required_axle_count=2)
+
+    # Exact first. Then the tri-axle, which still carries the load; the single does not.
+    assert [item["url"] for item in ranked] == ["tandem", "tri", "single"]
+
+
+def test_axle_count_is_not_scored_as_a_ratio():
+    """A quad is a different trailer from a tandem, not a mild over-spec of one.
+
+    Under a ratio this would rank 4-vs-2 the same way it ranks a 2x over-long trailer -
+    barely penalised. The flat per-axle step is what keeps a quad below a tri when two
+    axles were asked for.
+    """
+    tri = _listing("tri", axle_count=3)
+    quad = _listing("quad", axle_count=4)
+
+    ranked, _debug = _fit([quad, tri], required_axle_count=2)
+
+    assert [item["url"] for item in ranked] == ["tri", "quad"]
+
+
+def test_a_missing_axle_count_never_drops_the_listing():
+    known = _listing("known", axle_count=2)
+    unknown = _listing("unknown", axle_count=None)
+
+    ranked, debug = _fit([unknown, known], required_axle_count=2)
+
+    assert debug["retained_candidate_count"] == 2
+    assert {item["url"] for item in ranked} == {"known", "unknown"}
+    assert ranked[0]["url"] == "known"
+
+
+def test_either_new_requirement_alone_triggers_the_rerank():
+    """needs_present must count both, or the preference is silently ignored."""
+    listings = [_listing("a", axle_count=1), _listing("b", axle_count=2)]
+
+    _ranked, by_count = _fit(listings, required_axle_count=2)
+    assert by_count["applied"] is True
+    assert by_count["required_axle_count"] == 2
+
+    _ranked, by_total = _fit(listings, required_total_axle_capacity_lbs=14000.0)
+    assert by_total["applied"] is True
+    assert by_total["required_total_axle_capacity_lbs"] == 14000.0
+
+
+def test_the_total_is_derived_when_only_the_parts_were_given():
+    """Two 7,000 lb axles is a 14,000 lb requirement, without the customer saying so."""
+    slots = {"axle_capacity_lbs": 7000.0, "axle_count": 2}
+    assert search._required_total_axle_capacity_lbs_from_filters(slots, {}) == 14000.0
+
+
+def test_a_total_alone_never_invents_a_count():
+    """The arithmetic runs one way only: a total says nothing about how many axles carry it."""
+    slots = {"total_axle_capacity_lbs": 14000.0}
+    assert search._required_axle_count_from_filters(slots, {}) is None
+    assert search._required_axle_capacity_lbs_from_filters(slots, {}) is None
+
+
+def test_a_stated_total_beats_the_derived_one():
+    slots = {"axle_capacity_lbs": 7000.0, "axle_count": 2, "total_axle_capacity_lbs": 12000.0}
+    assert search._required_total_axle_capacity_lbs_from_filters(slots, {}) == 12000.0

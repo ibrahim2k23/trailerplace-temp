@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -20,6 +21,9 @@ from src.domain.slot_map import (
     brand_is_actually_a_hitch,
     can_autofill_slot,
     equivalent_slots,
+    axle_count_out_of_range,
+    is_impossible_measurement,
+    parse_axle_count_answer,
     is_recognized_slot_value,
     mentions_an_axle,
     normalize_answer_for_slot,
@@ -30,9 +34,11 @@ from src.domain.slot_map import (
     slots_of_kind,
 )
 from src.domain.trailer_fields import feature_like_optional_slots, get_trailer_fields
-from src.domain.units import parse_dimensions
+from src.domain.units import parse_dimensions, parse_weight_lbs
 from src.graph.contact_gate import contact_ask_outstanding, update_contact_gate
 from src.llm.schemas import HaulClassification, TurnAnalysis
+
+logger = logging.getLogger(__name__)
 
 INJECTED_WIDTH_SLOT = "item_or_trailer_width_ft"
 INJECTED_WIDTH_QUESTION = "About how wide is that item or trailer you need to haul?"
@@ -41,7 +47,9 @@ INJECTED_WIDTH_QUESTION = "About how wide is that item or trailer you need to ha
 # asks about axle capacity any more (it was Utility's third question and was dropped), so this
 # set is now the ONLY thing keeping the slot alive: a customer who volunteers "I want 7,000 lb
 # axles" has stated a real requirement, and the fit rerank uses it in every category.
-_ALWAYS_VALID_NUMERIC_SLOTS = frozenset({"axle_capacity_lbs"})
+_ALWAYS_VALID_NUMERIC_SLOTS = frozenset(
+    {"axle_capacity_lbs", "total_axle_capacity_lbs", "axle_count"}
+)
 
 # Aluminum is the odd one out: it is the inventory category we stock, and the trailer TYPE the
 # customer wants it in ("utility", "enclosed") is a slot underneath it, not a category of its own.
@@ -116,6 +124,230 @@ def _set_slot(state: dict[str, Any], key: str, value: Any, source: str = "user")
     state.setdefault("slot_sources", {})[key] = source
     if key in state.setdefault("skipped_slots", []):
         state["skipped_slots"].remove(key)
+
+
+# A minus is a SIGN only when no digit precedes it; between digits it is the range dash, and
+# ranges are legitimate answers everywhere ("5,000-7,000 lbs" is 5000, not -7000).
+_NEGATIVE_NUMBER_RE = re.compile(r"(?<![\d.])-\s*\d")
+
+
+def _states_a_negative_measurement(text: str) -> bool:
+    """True when the customer's own words carry a negative number."""
+    return bool(_NEGATIVE_NUMBER_RE.search(str(text or "").replace(",", "")))
+
+
+def _reject_impossible_answer(
+    state: dict[str, Any], slot: str, raw_answer: Any, reason: str = "negative_measurement"
+) -> None:
+    """Refuse a negative measurement: store nothing, and leave the question open.
+
+    The slot is deliberately NOT written (not even as None): a null here reads as "asked, no
+    preference" everywhere downstream and would close the question for good. The rejection is
+    put on turn_outcome so the respond prompt can name the value back to them and offer the
+    way out - a real number, or skipping the question - instead of silently asking again as
+    though they had said nothing.
+    """
+    rejected = state.setdefault("turn_outcome", {}).setdefault("rejected_answers", [])
+    rejected.append(
+        {"slot": slot, "raw_answer": str(raw_answer or "").strip(), "reason": reason}
+    )
+    # It never became an answer, so it cannot count as one.
+    state.setdefault("slots", {}).pop(slot, None)
+    state.setdefault("slot_sources", {}).pop(slot, None)
+    logger.info(
+        "apply_analysis | refused answer for %s (%s): %r", slot, reason, raw_answer
+    )
+
+
+AXLE_BASIS_QUESTION = (
+    "Just so I match the right trailers - is that per axle, or the total across all the axles?"
+)
+AXLE_COUNT_QUESTION = (
+    "And how many axles should the trailer have - single, tandem, or triple?"
+)
+
+# What the customer says when we ask "per axle, or total?". Deliberately narrow: anything
+# that is not clearly one side leaves the question open rather than guessing again.
+_PER_AXLE_REPLY_RE = re.compile(
+    r"\b(per|each|every|apiece|a piece)\b|\beach axle\b|\bper axle\b", re.I
+)
+_TOTAL_REPLY_RE = re.compile(
+    r"\b(total|combined|altogether|all together|overall|between them|across)\b", re.I
+)
+
+
+# "7,000 lb axles" / "2-7,000# axles" - the rating is attached to the axles themselves, which
+# by convention means EACH of them. This wording is not ambiguous and must not be questioned.
+_PER_AXLE_WORDING_RE = re.compile(
+    r"\d[\d,.]*\s*(?:#|k\b|lbs?\b|pounds?\b)?[\s-]*axles?\b", re.I
+)
+# "14,000 lbs of axle capacity" - a quantity of capacity, with nothing saying whether it is
+# each axle's or all of them together. This is the wording that has to be asked about.
+_BARE_CAPACITY_WORDING_RE = re.compile(r"axle\s+capacity|capacity\s+of\s+the\s+axles", re.I)
+
+
+def infer_axle_basis_from_text(text: str, model_basis: str | None) -> str | None:
+    """Second opinion on per-axle vs total, from the customer's own wording.
+
+    The model is asked to say when it cannot tell, and does not reliably do so. Live, it read
+    "14,000 lbs of axle capacity" as a confident TOTAL - a different guess from the one the
+    old prompt made, and still a guess. Its confidence is not evidence, so a phrase carrying
+    no marker either way is treated as unclear whatever the model decided.
+
+    Only ever promotes to "unclear". Wording that genuinely says which is left alone.
+    """
+    words = str(text or "")
+    if _PER_AXLE_REPLY_RE.search(words) or _TOTAL_REPLY_RE.search(words):
+        return model_basis          # they said which; believe it
+    if _PER_AXLE_WORDING_RE.search(words):
+        return model_basis          # "7,000 lb axles" - conventional, not ambiguous
+    if _BARE_CAPACITY_WORDING_RE.search(words):
+        return "unclear"
+    return model_basis
+
+
+def _park_ambiguous_axle_capacity(state: dict[str, Any], analysis: TurnAnalysis) -> None:
+    """Park an ambiguous capacity once per turn, whichever route carried it.
+
+    The number arrives as extracted.axle_capacity_lbs, or as extracted.total_axle_capacity_lbs,
+    or only as a slot answer - the model varies run to run. Deciding per route meant the hold
+    fired on some runs and not others, so the wording is judged once and the value is taken
+    from wherever it turned up.
+    """
+    if state.get("pending_axle_basis"):
+        return
+    text = _current_user_text(state)
+    if infer_axle_basis_from_text(text, analysis.extracted.axle_capacity_basis) != "unclear":
+        return
+    # Their own words first. Asked about "14,000 lbs of axle capacity" the model returns BOTH
+    # a halved per-axle guess (7,000) and the real total, and taking whichever field came
+    # first parked the halved one - so the number they actually said is what gets held.
+    value = parse_weight_lbs(text)
+    if value is None:
+        value = analysis.extracted.axle_capacity_lbs or analysis.extracted.total_axle_capacity_lbs
+    if value is None:
+        for answer in analysis.slot_answers:
+            if answer.slot_name in {"axle_capacity_lbs", "total_axle_capacity_lbs"}:
+                value = parse_weight_lbs(answer.raw_answer)
+                break
+    if _is_number(value) and value > 0:
+        _hold_axle_capacity_for_basis(state, float(value))
+
+
+def _hold_axle_capacity_for_basis(state: dict[str, Any], value: float) -> None:
+    """Park a capacity we cannot place, and ask which one it is.
+
+    Stored nowhere else on purpose. Filed under axle_capacity_lbs it would rank as a
+    per-axle rating - "14,000 lbs of axle capacity" would fetch trailers with 14,000 lb
+    axles, roughly double what a customer saying that usually wants.
+    """
+    # just_asked keeps the question alive for one turn. Without it the resolver, running
+    # later in this same pass, would settle the hold from the model's basis - the guess we
+    # just refused - and the question would be asked and answered in the same breath.
+    state["pending_axle_basis"] = {"value": float(value), "just_asked": True}
+    state.setdefault("turn_outcome", {})["clarification_question"] = AXLE_BASIS_QUESTION
+    logger.info("apply_analysis | holding axle capacity %s pending per-axle/total", value)
+
+
+def _resolve_pending_axle_basis(state: dict[str, Any], analysis: TurnAnalysis) -> None:
+    """File a held capacity once they say which they meant.
+
+    Their reply is read first and the extractor's opinion second: this turn's message is an
+    answer to OUR question ("per axle"), which on its own carries no number for the model to
+    reason about, so its basis field is usually null here.
+    """
+    pending = state.get("pending_axle_basis")
+    if not pending or pending.get("just_asked"):
+        return
+    value = pending.get("value")
+    text = _current_user_text(state)
+    basis = analysis.extracted.axle_capacity_basis
+    if _PER_AXLE_REPLY_RE.search(text):
+        resolved = "per_axle"
+    elif _TOTAL_REPLY_RE.search(text):
+        resolved = "total"
+    elif basis in {"per_axle", "total"}:
+        resolved = basis
+    else:
+        # Still not settled. Leave it parked and ask once more rather than guess.
+        state.setdefault("turn_outcome", {})["clarification_question"] = AXLE_BASIS_QUESTION
+        return
+    state["pending_axle_basis"] = None
+    slot = "axle_capacity_lbs" if resolved == "per_axle" else "total_axle_capacity_lbs"
+    if value is not None:
+        _set_slot(state, slot, float(value))
+    logger.info("apply_analysis | axle capacity %s resolved as %s", value, resolved)
+
+
+def _clear_axle_slots_while_parked(state: dict[str, Any]) -> None:
+    """While a capacity is parked, neither capacity slot may hold a value.
+
+    The number reaches the state by several routes - the extracted field, a slot answer, the
+    metadata filter targets - and it only takes one of them to file it under the guess we
+    stopped to question. Rather than police every route, this sweeps once, at the end.
+    """
+    if not state.get("pending_axle_basis"):
+        return
+    for slot in ("axle_capacity_lbs", "total_axle_capacity_lbs"):
+        state.get("slots", {}).pop(slot, None)
+        state.get("slot_sources", {}).pop(slot, None)
+    # The turn that asked is over; their next message is the answer.
+    state["pending_axle_basis"].pop("just_asked", None)
+
+
+def _ask_axle_count_if_needed(state: dict[str, Any]) -> None:
+    """After a per-axle rating, how many of them - but only when we do not already know.
+
+    A count already given ("2-7,000# axles" carries both) means the question is answered
+    before it is asked, which is the whole point of reading the count out of their wording.
+    """
+    slots = state.get("slots", {})
+    if slots.get("axle_capacity_lbs") is None or "axle_count" in slots:
+        return
+    if "axle_count" in (state.get("skipped_slots") or []):
+        return
+    outcome = state.setdefault("turn_outcome", {})
+    if outcome.get("clarification_question") or outcome.get("rejected_answers"):
+        return
+    outcome["clarification_question"] = AXLE_COUNT_QUESTION
+    # Remembered so the NEXT turn can tell an answer from a shrug. Without it the guard above
+    # ("axle_count" in slots) is never satisfied by "I don't know", and the question comes
+    # back every single turn for the rest of the conversation.
+    state["pending_axle_count_question"] = True
+
+
+def _close_axle_count_question(state: dict[str, Any]) -> None:
+    """Settle the count question on the turn after it was asked.
+
+    Three ways it ends. A usable number was stored - done. A number outside 1-4 was refused -
+    leave it open, they are being asked again with the range spelled out. Anything else -
+    "not sure", "whatever you recommend", or simply moving on - is no preference: stored as
+    null, which is how every other unanswered question is recorded, and never raised again.
+    """
+    if not state.get("pending_axle_count_question"):
+        return
+    if state.get("turn_outcome", {}).get("rejected_answers"):
+        return                                   # refused; the re-ask stands
+    if "axle_count" in state.get("slots", {}):
+        state["pending_axle_count_question"] = False
+        return                                   # they answered
+    # The model does not always turn a bare "Single." into a number - it answers a question
+    # it was not really asked. The words are read here instead, with the same vocabulary the
+    # question offered them, before anything is written off as no preference.
+    spoken = parse_axle_count_answer(_current_user_text(state))
+    if spoken is not None:
+        if axle_count_out_of_range(spoken):
+            _reject_impossible_answer(
+                state, "axle_count", _current_user_text(state), reason="axle_count_range"
+            )
+            return                               # still open; they get another go
+        state["pending_axle_count_question"] = False
+        _set_slot(state, "axle_count", spoken)
+        logger.info("apply_analysis | axle count %s read from their reply", spoken)
+        return
+    state["pending_axle_count_question"] = False
+    _set_slot(state, "axle_count", None)
+    logger.info("apply_analysis | axle count left as no preference")
 
 
 def required_slots_for_state(state: dict[str, Any]) -> list[str]:
@@ -1092,13 +1324,43 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         # Deliberately NOT fanned out from payload_lbs like the two above: an axle rating and
         # a load weight are different facts, and only the model's own field may fill it.
         "axle_capacity_lbs": analysis.extracted.axle_capacity_lbs,
+        # Same again, and for the same reason: nothing but the model's own field fills these.
+        "total_axle_capacity_lbs": analysis.extracted.total_axle_capacity_lbs,
+        "axle_count": analysis.extracted.axle_count,
     }
+    _park_ambiguous_axle_capacity(state, analysis)
     valid_slots = set(required_slots_for_state(state)) | set(get_trailer_fields(category).optional)
+    # Measurements mostly arrive HERE, already parsed by the analyzer, not as slot_answers -
+    # and the analyzer hands back the magnitude with the sign gone ("about -500 lbs" came back
+    # as payload_lbs=500.0, seen live). By the time we see the number there is nothing left to
+    # object to, so the customer's own words are what we check.
+    message_states_a_negative = _states_a_negative_measurement(_current_user_text(state))
     for key, value in numeric_map.items():
         if value is None or _echoes_dropped_carried(state, key, value):
             continue
-        if key in valid_slots or key.startswith("trailer_") or key in _ALWAYS_VALID_NUMERIC_SLOTS:
-            _set_slot(state, key, value)
+        if not (key in valid_slots or key.startswith("trailer_") or key in _ALWAYS_VALID_NUMERIC_SLOTS):
+            continue
+        if message_states_a_negative:
+            _reject_impossible_answer(state, key, _current_user_text(state))
+            continue
+        # BEFORE the zero rule below, deliberately. A zero axle count is not "no preference",
+        # it is an answer that cannot be true, and the zero rule would swallow it silently.
+        # Parked above, and must not be filed under a guess while it is.
+        if key in {"axle_capacity_lbs", "total_axle_capacity_lbs"} and state.get(
+            "pending_axle_basis"
+        ):
+            continue
+        if key == "axle_count" and axle_count_out_of_range(value):
+            _reject_impossible_answer(
+                state, key, _current_user_text(state), reason="axle_count_range"
+            )
+            continue
+        # A stated zero is no preference, not a measurement: storing it would filter the
+        # search on a trailer that cannot exist. Left unstored, the answered-the-pending-
+        # question fallback below records it as null, which is exactly "no preference".
+        if _is_number(value) and value == 0:
+            continue
+        _set_slot(state, key, value)
     for answer in analysis.slot_answers:
         # A blank raw_answer is not an answer. Seen live: answering the length question for
         # Livestock, the extractor ALSO emitted haul_item='', haul_weight_lbs='' and
@@ -1130,6 +1392,27 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
         # same history echo as extracted.haul_item — it must not answer a question never asked.
         if _echoes_cleared_on_change(state, "haul_item", answer.raw_answer):
             continue
+        # A NEGATIVE measurement is refused rather than stored: the parsers drop the sign, so
+        # "-500 lbs" would be recorded as 500 - the opposite of what they said - and the search
+        # would filter on it. Record the refusal so the reply can say so and ask again. (A zero
+        # is NOT refused: it means no preference, like any vague answer.)
+        if is_impossible_measurement(category, answer.slot_name, answer.raw_answer):
+            _reject_impossible_answer(state, answer.slot_name, answer.raw_answer)
+            continue
+        # A capacity parked for disambiguation must not be filed by the back door. The model
+        # emits the same number as a slot answer as well as an extracted field, and storing
+        # that one lands it under the very guess we stopped to question.
+        if (
+            state.get("pending_axle_basis")
+            and answer.slot_name in {"axle_capacity_lbs", "total_axle_capacity_lbs"}
+        ):
+            continue
+        # Checked on the RAW answer, before normalize_answer_for_slot turns a 0 into None.
+        if answer.slot_name == "axle_count" and axle_count_out_of_range(answer.raw_answer):
+            _reject_impossible_answer(
+                state, answer.slot_name, answer.raw_answer, reason="axle_count_range"
+            )
+            continue
         _store_slot_answer(state, category, answer.slot_name, answer.raw_answer)
         _mirror_optional_answer_as_feature(state, category, answer.slot_name, answer.raw_answer)
     # A question the LLM marked answered must advance even if it was vague/partial and
@@ -1140,7 +1423,16 @@ def _apply_extraction(state: dict[str, Any], analysis: TurnAnalysis) -> None:
     # fallback nulled haul_item, closing a question that was never asked and unlocking the
     # search. An answer that filled only OTHER, non-equivalent slots leaves the pending
     # question open to be asked again.
+    # AFTER both extraction loops, deliberately. Asked "per axle or total?" about 14,000, the
+    # model answers the follow-up by re-reading the conversation and quietly halving it to
+    # 7,000 - a per-axle rating it invented by assuming two axles. The value the customer
+    # actually said is the one we parked, so it is filed last and wins.
+    _resolve_pending_axle_basis(state, analysis)
     pending = state.get("pending_question_slot")
+    # A refused measurement must NOT fall through to this: nulling the slot here records
+    # "asked, no preference" and closes the question for good - the opposite of asking again.
+    if state.get("turn_outcome", {}).get("rejected_answers"):
+        pending = None
     if pending and analysis.answered_current_question and pending not in state.get("slots", {}):
         answered_slots = {
             answer.slot_name for answer in analysis.slot_answers if str(answer.raw_answer or "").strip()
@@ -1317,6 +1609,12 @@ def apply_analysis_to_state(state: dict[str, Any]) -> dict[str, Any]:
     _skip_weight_for_lightweight(state, haul)
     _apply_requirement_changes(state, state["turn"])
     _apply_skips_and_repeats(state, state["turn"])
+    # Last, so it can see the skips: asking "how many axles?" of someone who has just
+    # declined the question would be the opposite of listening.
+    _clear_axle_slots_while_parked(state)
+    # Settle last turn's question BEFORE deciding whether to ask again.
+    _close_axle_count_question(state)
+    _ask_axle_count_if_needed(state)
     if _search_inputs(state) != search_inputs_before:
         # Something a search is built from moved, so the results on screen are stale. This
         # stays set until a search actually runs (the change may land several turns before

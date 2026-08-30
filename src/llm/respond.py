@@ -270,6 +270,26 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
     if _outcome_get(turn_outcome, "contact_gate_missing"):
         return _contact_gate_lines(state, turn_outcome)
     lines: list[str] = []
+    for rejected in _outcome_get(turn_outcome, "rejected_answers", None) or []:
+        # The value was refused, not stored: a trailer cannot be 0 or -5 of anything. Say so
+        # before the question is put again, or asking the same thing twice looks like we were
+        # not listening. Their words are quoted back so a typo is obvious to them.
+        answer = str(rejected.get("raw_answer") or "").strip()
+        if rejected.get("reason") == "axle_count_range":
+            lines.append(
+                f'- THEIR ANSWER "{answer}" IS NOT A NUMBER OF AXLES WE STOCK - we carry 1 to 4. '
+                "It was NOT recorded. Before you ask again, say in ONE short, unbothered line "
+                "what the range is - no lecture, no apology - and offer them the way out: a "
+                "number from 1 to 4, or skip the question and move on. Then ask again."
+            )
+            continue
+        lines.append(
+            f'- THEIR ANSWER "{answer}" IS A NEGATIVE MEASUREMENT, and nothing on a trailer can be '
+            "negative. It was NOT recorded. Before you ask the question again, say in "
+            "ONE short, unbothered line that that figure cannot be right - no lecture, no apology, do not "
+            "blame them (a typo is the likely story) - and offer them the way out: a real figure, or skip "
+            "the question and move on. Then ask the question below."
+        )
     if _outcome_get(turn_outcome, "clarification_question"):
         lines.append(f'- Clarification question to ask: "{_outcome_get(turn_outcome, "clarification_question")}"')
     if _outcome_get(turn_outcome, "next_question"):

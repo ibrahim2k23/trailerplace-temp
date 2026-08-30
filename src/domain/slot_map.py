@@ -36,6 +36,13 @@ _SLOT_VALUE_KIND = {
     # the question would never be asked. A lone kind also falls outside can_autofill_slot's
     # whitelist, so it never receives a value from anywhere else.
     "axle_capacity_lbs": "axle_capacity_lbs",
+    # Two more lone kinds, for the same reason and one more besides: per-axle and total are
+    # the SAME question asked two ways, so sharing a kind would let one auto-fill the other
+    # and quietly answer the very ambiguity we now stop to ask about. "7,000 lb axles" and
+    # "7,000 lbs across the axles" are different trailers.
+    "total_axle_capacity_lbs": "total_axle_capacity_lbs",
+    # Not a weight at all - a plain count, so it parses differently from every kind above.
+    "axle_count": "axle_count",
     "bin_size": "length_ft",
     # Combined size questions ("size preference (length / width)?"). Their own value is the
     # LENGTH in feet — the width/height they also carry are stored under their own slots.
@@ -248,6 +255,8 @@ def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
 
 _SLOT_METADATA_FILTER_MAP = {
     "axle_capacity_lbs": ("axle_capacity_lbs",),
+    "total_axle_capacity_lbs": ("total_axle_capacity_lbs",),
+    "axle_count": ("axle_count",),
     "base_category": ("subcategory",),
     "bin_size": ("length_ft",),
     "cargo_size": ("length_ft", "width_ft", "height_ft"),
@@ -300,7 +309,12 @@ def normalize_slot_value(category: str, key: str, value: Any) -> Any:
             return {"width_ft": width_ft, "length_ft": length_ft, "height_ft": height_ft}[key]
         return parse_length_ft_loose(value)
 
-    if key in {"payload_lbs", "axle_capacity_lbs"}:
+    if key == "axle_count":
+        # A count, not a measurement: no units to convert and no range to collapse. Parsed
+        # here rather than with the weights so "2" never picks up a "lbs" reading.
+        return parse_axle_count_answer(value)
+
+    if key in {"payload_lbs", "axle_capacity_lbs", "total_axle_capacity_lbs"}:
         # Resolves a range to its smallest side ("5,000-7,000 lbs" -> 5000) and returns
         # None for an answer carrying no usable number, which normalize_answer_for_slot
         # stores as "asked, no preference".
@@ -419,6 +433,78 @@ def is_recognized_slot_value(slot_name: str, value: Any) -> bool:
     return _is_number(value)
 
 
+MIN_AXLE_COUNT = 1
+MAX_AXLE_COUNT = 4
+
+_AXLE_COUNT_WORDS = {
+    "single": 1, "one": 1, "1": 1,
+    "tandem": 2, "dual": 2, "double": 2, "two": 2, "2": 2,
+    "tri": 3, "triple": 3, "three": 3, "3": 3,
+    "quad": 4, "quadruple": 4, "four": 4, "4": 4,
+    # Above the range on purpose: spelled out, these must PARSE so the range check can
+    # refuse them. Left out, "seven axles" would return None and be filed as "no
+    # preference" - the customer's answer silently discarded instead of questioned.
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_AXLE_COUNT_NUMBER_RE = re.compile(r"(?<![\d.])(\d+)")
+
+
+def parse_axle_count_answer(value: Any) -> Any:
+    """How many axles the customer asked for, as a whole number.
+
+    Words as well as digits: "tandem" and "2" are the same answer, and customers say both.
+    A number outside the stocked range is returned AS IS rather than as None - the range
+    check is a separate decision (see axle_count_out_of_range), because a 0 must be refused
+    and re-asked, while a None would be filed as "asked, no preference" and never raised
+    again.
+    """
+    if _is_number(value):
+        return int(round(float(value)))
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    for word, count in _AXLE_COUNT_WORDS.items():
+        if re.search(r"\b{}\b".format(re.escape(word)), text):
+            return count
+    match = _AXLE_COUNT_NUMBER_RE.search(text.replace(",", ""))
+    return int(match.group(1)) if match else None
+
+
+def axle_count_out_of_range(value: Any) -> bool:
+    """True for a stated count we do not stock: zero, negative, or above four."""
+    if value is None:
+        return False
+    count = parse_axle_count_answer(value)
+    if count is None:
+        return False
+    return not (MIN_AXLE_COUNT <= count <= MAX_AXLE_COUNT)
+
+
+def is_impossible_measurement(category: str, slot_name: str, value: Any) -> bool:
+    """True when a measurement answer states a NEGATIVE number.
+
+    Negative only. A zero is handled as no preference (see normalize_answer_for_slot) and a
+    vague answer keeps its existing meaning - neither is re-asked. A negative is different in
+    kind: the parsers silently DROP the sign, so "-500 lbs" is recorded as 500 lbs, the
+    opposite of what the customer said, and the search then filters on it. That is worth one
+    short re-ask.
+
+    Only measurement kinds can be negative in a way that matters. Free text, hitch and
+    subcategory have no ordering, so nothing about them is out of range.
+    """
+    kind = _SLOT_VALUE_KIND.get(slot_name)
+    if kind not in {
+        "length_ft", "width_ft", "height_ft", "payload_lbs",
+        "axle_capacity_lbs", "total_axle_capacity_lbs",
+    }:
+        return False
+    # The RAW text, not the parsed value: by the time it is parsed the sign is already gone.
+    text = str(value or "").replace(",", "")
+    # A minus is a SIGN only when no digit precedes it. Between digits it is the range dash,
+    # and ranges are supported everywhere ("5000-7000 lbs" is a legitimate answer, not -7000).
+    return bool(re.search(r"(?<![\d.])-\s*\d", text))
+
+
 def normalize_answer_for_slot(category: str, slot_name: str, value: Any) -> Any:
     """The value to STORE under ``slot_name`` itself.
 
@@ -438,4 +524,10 @@ def normalize_answer_for_slot(category: str, slot_name: str, value: Any) -> Any:
     if kind == "subcategory":
         return normalize_subcategory_answer(value)
     normalized = normalize_slot_value(category, kind, value)
-    return normalized if _is_number(normalized) else None
+    if not _is_number(normalized):
+        return None
+    # A stated zero means no preference, exactly like a vague answer: stored as null, never
+    # re-asked. Keeping the 0 itself would be worse than useless - length_ft=0 filters the
+    # whole catalogue out - and most parsers already collapse "0 lbs" to None anyway, so this
+    # only makes the odd one out ("0" for a length, which parses to 0.0) behave the same.
+    return None if normalized == 0 else normalized

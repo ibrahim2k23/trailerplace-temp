@@ -1,13 +1,13 @@
 {
-  "input_rows": 256,
-  "valid_json_rows": 256,
+  "input_rows": 259,
+  "valid_json_rows": 259,
   "invalid_json_rows": 0,
-  "changed_content_hashes": 256,
+  "changed_content_hashes": 259,
   "skipped_unchanged_rows": 0,
   "row_upsert_failures": 0,
-  "upserted_rows": 256,
-  "pruned_rows": 0,
-  "table_rows": 256,
-  "elapsed_seconds": 11.883,
+  "upserted_rows": 259,
+  "pruned_rows": 125,
+  "table_rows": 259,
+  "elapsed_seconds": 8.816,
   "quarantined_rows": 0
 }

@@ -416,10 +416,22 @@ Aluminum. Two rules, and they apply no matter which word came first in the sente
 - AxB = width x length. AxBxC = width x length x height. "16 by 8" = 16 ft length, 8 ft width.
 - Convert ALL lengths/widths/heights to feet and ALL weights to lbs YOURSELF: "83 inches" -> 6.92, 7'6" -> 7.5, "2 tons" -> 4000, "5k lbs" -> 5000.
   Every measurement we store is a number of FEET and every weight a number of POUNDS - never a sentence, never another unit.
-- axle_capacity_lbs vs payload_lbs: a weight tied to the word axle/axles ("7,000 lb axles", "axle
-  capacity of 5200", "5.2k axles") is axle_capacity_lbs; a weight describing the CARGO ("a 7000 lb
-  skid steer", "my load is 2 tons") is payload_lbs. Store the PER-AXLE number, never the total:
-  "two 3500 lb axles" -> 3500. One sentence can give both - take both.
+- AXLE vs CARGO: a weight tied to the word axle/axles ("7,000 lb axles", "axle capacity of 5200",
+  "5.2k axles") is an axle capacity; a weight describing the CARGO ("a 7000 lb skid steer", "my load
+  is 2 tons") is payload_lbs. One sentence can give both - take both.
+- PER-AXLE vs TOTAL. These are different trailers, so decide which they meant and say so in
+  axle_capacity_basis. Put the number in axle_capacity_lbs for per_axle, total_axle_capacity_lbs
+  for total, and for "unclear" put it in axle_capacity_lbs and let us ask.
+    "7,000 lb axles", "5.2k axles", "axles rated 3500"   -> per_axle
+    "2-7,000# axles", "two 3500 lb axles", "2-8K axles"  -> per_axle + axle_count (2)
+    "tandem 5200# axles"                                 -> per_axle 5200 + axle_count 2
+    "14,000 lbs total", "14k combined/across the axles"  -> total
+    "needs to carry 14,000 lbs on the axles"             -> total
+    "14,000 lbs of axle capacity"                        -> unclear (could honestly be either)
+- axle_count on its own: "tandem"/"TA" -> 2, "single"/"SA" -> 1, "tri"/"3A" -> 3, "quad"/"4A" -> 4.
+  Only when the word describes the AXLES. "single bin" is one bin and "super singles" are tyres -
+  neither sets a count. A bare plural "axles" with no number sets no count either.
+  Never infer a count from the trailer type, the category or a GVWR.
 - Side or wall measurements are HEIGHT details: "3 ft sides" -> trailer_height_ft=3; "3 inch walls" ->
   trailer_height_ft=0.25. Do not misread these as trailer width or leave them only as non-metadata features.
 - A number followed by "footer" is shorthand for trailer LENGTH: "20 footer" or "20-footer" ->
@@ -548,7 +560,7 @@ def normalize_analysis_values(analysis: TurnAnalysis, category: str | None = Non
         if isinstance(value, str):
             parsed = parse_length_ft(value)
             setattr(extracted, field, parsed if parsed is not None else value)
-    for field in ("payload_lbs", "axle_capacity_lbs"):
+    for field in ("payload_lbs", "axle_capacity_lbs", "total_axle_capacity_lbs"):
         value = getattr(extracted, field)
         if isinstance(value, str):
             parsed = parse_weight_lbs(value)

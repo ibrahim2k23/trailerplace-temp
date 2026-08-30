@@ -136,6 +136,21 @@ def test_a_dropped_corrupt_capacity_leaves_no_total():
     assert record["total_axle_capacity_lbs_num"] is None
 
 
+def test_a_workbook_total_alone_changes_the_content_hash():
+    """A row whose ONLY change is the scraper's total must not be skipped as unchanged.
+
+    The count and the per-axle rating usually move together with the total, so the total
+    rides along on their hash change. Not always: the workbook's own value wins over the
+    multiplication, so a corrected total on unchanged parts is a real, hashable change.
+    """
+    parts = {"axle_count": 2, "axle_capacity": "7500 lbs"}
+    derived = build_record(_row(**parts), 0)
+    corrected = build_record(_row(**parts, total_axle_capacity="15500 lbs"), 0)
+    assert derived["total_axle_capacity_lbs_num"] == 15000.0
+    assert corrected["total_axle_capacity_lbs_num"] == 15500.0
+    assert corrected["content_hash"] != derived["content_hash"]
+
+
 def test_a_single_axle_total_equals_its_per_axle_rating():
     record = build_record(_row(axle_count=1, axle_capacity="3500 lbs"), 0)
     assert record["total_axle_capacity_lbs_num"] == 3500.0

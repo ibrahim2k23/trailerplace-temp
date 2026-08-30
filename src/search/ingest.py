@@ -519,6 +519,11 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         # other 240 listings would keep their old hash, be skipped as unchanged,
         # and never receive the count at all.
         "axle_count": axle_count,
+        # And the total, for the same reason once more. It is usually derived from the two
+        # above and so rides along on their changes - but the workbook's own value wins when
+        # it carries one, and a row where ONLY that changed would otherwise keep its old
+        # hash and be skipped as unchanged.
+        "total_axle_capacity": total_axle_capacity_lbs_num,
         "payload_capacity": payload,
         "trailer_material": material,
         "floor": floor,

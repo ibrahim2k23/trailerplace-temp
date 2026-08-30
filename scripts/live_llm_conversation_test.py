@@ -60,7 +60,19 @@ SLOT_ANSWERS: dict[str, str] = {
     "fuel_type": "mainly diesel, possibly gasoline occasionally",
     "tank_capacity": "approximately 450 to 650 gallons",
     "fiber_use_case": "mostly field splicing, with some office work",
+    # Volunteer-only slots: no category asks these, so they never appear as a generated
+    # question. They are here so a scenario that names one gets sensible wording.
+    "axle_capacity_lbs": "7,000 lb axles would suit me",
+    "total_axle_capacity_lbs": "about 14,000 pounds across the axles in total",
+    "axle_count": "two axles",
 }
+
+# Volunteered in EVERY category's stage-1 and stage-2 flow, right before results are asked
+# for. Axle capacity is never a scripted question, so without this the axle path would be
+# exercised in the one hand-written stage-3 conversation and nowhere else.
+AXLE_VOLUNTEER_MESSAGE = (
+    "One more thing - I want 7,000 lb axles, two of them."
+)
 
 VAGUE_FOLLOWUPS = (
     "I am flexible on the exact details; something fairly standard should work.",
@@ -116,6 +128,9 @@ def stage_one_messages(category: str, name: str, email: str) -> list[str]:
     """Natural one-answer-per-turn qualification for one category."""
     return [
         f"{_contact_intro(name, email)} I am looking for a {category} trailer.",
+        # Second, not last: stage 1 stops at the first results, and several categories
+        # qualify in three turns - an axle turn at the end simply never ran.
+        AXLE_VOLUNTEER_MESSAGE,
         *_required_answers(category),
         "I have no other strict preferences. Please show me the best matching results.",
     ]
@@ -125,7 +140,10 @@ def stage_two_messages(category: str, name: str, email: str) -> list[str]:
     """Dense first turn, vague follow-ups, results, interest, FAQ, exploration."""
     all_info = " ".join(_required_answers(category))
     return [
-        f"{_contact_intro(name, email)} I need a {category} trailer. {all_info}",
+        # Stage 2 puts everything in the first turn, axles included: the count and the rating
+        # arrive in one phrase, which must fill both facts and ask nothing back.
+        f"{_contact_intro(name, email)} I need a {category} trailer. {all_info} "
+        "It should have 2-7,000# axles.",
         *VAGUE_FOLLOWUPS,
         "Please use what I have given you and show me the matching results now.",
         *POST_RESULTS_MESSAGES,
@@ -161,6 +179,13 @@ def stage_three_messages(name: str, email: str) -> list[str]:
         "Switch me to Equipment: skid steer, about 8,000 pounds, about 18 feet, either hitch.",
         "I do not know the width; use a normal suitable width and show results.",
         "Is the first result available, and can you log my interest in it too?",
+        # Ambiguous on purpose: this must be QUESTIONED (per axle or total?), not guessed.
+        "Also it needs 14,000 lbs of axle capacity.",
+        "Per axle, please.",
+        # Outside the 1-4 we stock: must be refused, with a way out offered.
+        "Make it seven axles.",
+        # The recovery - and the count question must not be asked again afterwards.
+        "Sorry, two axles.",
         "Finally, what are your store hours and service or parts options? Please notify the team.",
     ]
 

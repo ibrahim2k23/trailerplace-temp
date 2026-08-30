@@ -266,6 +266,12 @@ def _row_to_listing(row: TrailerListingRow) -> dict[str, Any]:
         "axles": row.axles,
         "gvwr": row.gvwr,
         "axle_capacity": row.axle_capacity,
+        # The two below are numbers already, not display strings, and are the only
+        # ranking inputs read straight off the column rather than re-parsed from text:
+        # `axle_count` has no display twin by design (see db_models) and the total is
+        # derived, so there is no raw string to parse in the first place.
+        "axle_count": row.axle_count,
+        "total_axle_capacity": row.total_axle_capacity_lbs_num,
         "payload_capacity": row.payload_capacity,
         "material": row.trailer_material,
         "floor": row.floor,
@@ -307,6 +313,35 @@ def _required_axle_capacity_lbs_from_filters(slots: dict[str, Any], metadata_fil
     return _parse_number(
         metadata_filters.get("axle_capacity_lbs") or slots.get("axle_capacity_lbs")
     )
+
+
+def _required_total_axle_capacity_lbs_from_filters(
+    slots: dict[str, Any], metadata_filters: dict[str, Any]
+) -> Optional[float]:
+    """What the axles must carry BETWEEN them.
+
+    Falls back to the arithmetic when they gave a per-axle rating and a count but never
+    said a total - the same multiplication ingest does. Never the reverse: a total alone
+    says nothing about how many axles carry it.
+    """
+    stated = _parse_number(
+        metadata_filters.get("total_axle_capacity_lbs") or slots.get("total_axle_capacity_lbs")
+    )
+    if stated is not None:
+        return stated
+    per_axle = _required_axle_capacity_lbs_from_filters(slots, metadata_filters)
+    count = _required_axle_count_from_filters(slots, metadata_filters)
+    if per_axle is not None and count is not None:
+        return per_axle * count
+    return None
+
+
+def _required_axle_count_from_filters(
+    slots: dict[str, Any], metadata_filters: dict[str, Any]
+) -> Optional[int]:
+    """How many axles, as a whole number. A fractional axle is not a thing."""
+    value = _parse_number(metadata_filters.get("axle_count") or slots.get("axle_count"))
+    return None if value is None else int(round(value))
 
 
 def _required_width_ft_from_filters(slots: dict[str, Any], metadata_filters: dict[str, Any]) -> Optional[float]:
@@ -543,11 +578,16 @@ def _rerank_listings_by_fit(
     length_weight: float,
     missing_dim_penalty: float,
     required_axle_capacity_lbs: Optional[float] = None,
+    required_total_axle_capacity_lbs: Optional[float] = None,
+    required_axle_count: Optional[int] = None,
     retain_all: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     needs_present = any(
         x is not None
-        for x in (required_length_ft, required_payload_lbs, required_width_ft, required_height_ft, required_axle_capacity_lbs)
+        for x in (
+            required_length_ft, required_payload_lbs, required_width_ft, required_height_ft,
+            required_axle_capacity_lbs, required_total_axle_capacity_lbs, required_axle_count,
+        )
     )
     if not listings or not needs_present:
         return listings, {"applied": False, "reason": "missing_clear_requirements_or_no_listings"}
@@ -560,6 +600,9 @@ def _rerank_listings_by_fit(
         width_ft = _parse_length_ft(listing.get("width"))
         height_ft = _parse_length_ft(listing.get("height"))
         axle_capacity_lbs = _parse_number(listing.get("axle_capacity"))
+        # Already numeric on the card - see _row_to_listing.
+        total_axle_capacity_lbs = _parse_number(listing.get("total_axle_capacity"))
+        axle_count = _parse_number(listing.get("axle_count"))
 
         # Weight requirement can be satisfied by payload or gvwr if payload missing.
         weight_from = "payload_capacity"
@@ -589,6 +632,16 @@ def _rerank_listings_by_fit(
         height_ratio = (
             (height_ft / required_height_ft)
             if required_height_ft is not None and height_ft is not None and required_height_ft > 0
+            else None
+        )
+        # Both sides are TOTALS, so this compares like with like - and it is a different
+        # question from the per-axle one below: four 3,500 lb axles and two 7,000 lb axles
+        # both carry 14,000 lb, but only one of them satisfies "7,000 lb axles".
+        total_axle_ratio = (
+            (total_axle_capacity_lbs / required_total_axle_capacity_lbs)
+            if required_total_axle_capacity_lbs is not None
+            and total_axle_capacity_lbs is not None
+            and required_total_axle_capacity_lbs > 0
             else None
         )
         # Both sides are PER-AXLE ratings, so this compares like with like.
@@ -696,6 +749,38 @@ def _rerank_listings_by_fit(
                 if axle_ratio > extreme_ratio:
                     penalty += (axle_ratio - extreme_ratio) * 0.8
 
+        if required_total_axle_capacity_lbs is not None:
+            # Same shape and the same reasoning as the per-axle block above, and never
+            # fail_count for the same reason: a quarter of the catalogue carries no total,
+            # and culling those would empty the screen rather than order it.
+            if total_axle_ratio is None:
+                missing_count += 1
+                penalty += missing_dim_penalty
+            elif total_axle_ratio < 1.0:
+                # Axles that together carry less than the load cannot do the job.
+                penalty += (1.0 - total_axle_ratio) * 6.0
+            else:
+                over = total_axle_ratio - 1.0
+                penalty += over * 0.8
+                if total_axle_ratio > warn_ratio:
+                    penalty += (total_axle_ratio - warn_ratio) * 0.6
+                if total_axle_ratio > extreme_ratio:
+                    penalty += (total_axle_ratio - extreme_ratio) * 0.8
+
+        if required_axle_count is not None:
+            # Deliberately NOT a ratio. A count is categorical, not a magnitude: 4 axles is
+            # not "twice as much trailer" as 2 the way 20 ft is twice 10 ft, and a ratio
+            # would rank a quad as a mild over-spec of a tandem when it is a different
+            # trailer entirely. A flat step per axle away from the ask says that plainly.
+            if axle_count is None:
+                missing_count += 1
+                penalty += missing_dim_penalty
+            else:
+                off_by = abs(int(round(axle_count)) - required_axle_count)
+                # Under-supplying axles is worse than over-supplying: three axles will still
+                # carry what two would, two will not do the work of three.
+                penalty += off_by * (2.5 if axle_count < required_axle_count else 1.5)
+
         length_overage = (
             max(0.0, float(length_ratio) - 1.0)
             if required_length_ft is not None and length_ratio is not None
@@ -715,6 +800,8 @@ def _rerank_listings_by_fit(
                 "width_ratio": None if width_ratio is None else round(width_ratio, 6),
                 "height_ratio": None if height_ratio is None else round(height_ratio, 6),
                 "axle_ratio": None if axle_ratio is None else round(axle_ratio, 6),
+                "total_axle_ratio": None if total_axle_ratio is None else round(total_axle_ratio, 6),
+                "axle_count": None if axle_count is None else int(round(axle_count)),
                 "length_overage": round(length_overage, 6),
                 "fit_score": round(base_score - penalty, 6),
             }
@@ -745,7 +832,7 @@ def _rerank_listings_by_fit(
         decision_rank = {id(e): i for i, e in enumerate(ranked_entries, 1)}
         for e in entries:
             logger.info(
-                "rerank_score | fetched_pos=%s | decision_rank=%s | title=%r | base_score=%.6f | penalty=%.6f | fit_score=%.6f | length_ratio=%s | weight_ratio=%s | width_ratio=%s | height_ratio=%s | axle_ratio=%s | fail_count=%s | missing_count=%s",
+                "rerank_score | fetched_pos=%s | decision_rank=%s | title=%r | base_score=%.6f | penalty=%.6f | fit_score=%.6f | length_ratio=%s | weight_ratio=%s | width_ratio=%s | height_ratio=%s | axle_ratio=%s | total_axle_ratio=%s | axle_count=%s | fail_count=%s | missing_count=%s",
                 e["fetch_pos"],
                 decision_rank.get(id(e)),
                 e["listing"].get("title"),
@@ -757,17 +844,21 @@ def _rerank_listings_by_fit(
                 e["width_ratio"],
                 e["height_ratio"],
                 e["axle_ratio"],
+                e["total_axle_ratio"],
+                e["axle_count"],
                 e["fail_count"],
                 e["missing_count"],
             )
 
     logger.info(
-        "rerank_summary | applied=true | required_length_ft=%s | required_payload_lbs=%s | required_width_ft=%s | required_height_ft=%s | required_axle_capacity_lbs=%s | candidates=%s | kept_pool=%s",
+        "rerank_summary | applied=true | required_length_ft=%s | required_payload_lbs=%s | required_width_ft=%s | required_height_ft=%s | required_axle_capacity_lbs=%s | required_total_axle_capacity_lbs=%s | required_axle_count=%s | candidates=%s | kept_pool=%s",
         required_length_ft,
         required_payload_lbs,
         required_width_ft,
         required_height_ft,
         required_axle_capacity_lbs,
+        required_total_axle_capacity_lbs,
+        required_axle_count,
         len(entries),
         len(fallback_pool),
     )
@@ -779,6 +870,8 @@ def _rerank_listings_by_fit(
         "required_width_ft": required_width_ft,
         "required_height_ft": required_height_ft,
         "required_axle_capacity_lbs": required_axle_capacity_lbs,
+        "required_total_axle_capacity_lbs": required_total_axle_capacity_lbs,
+        "required_axle_count": required_axle_count,
         "candidate_count": len(entries),
         "retained_candidate_count": len(ranked_entries),
         "fit_entries": entries if retain_all else [],
@@ -920,6 +1013,8 @@ def _combined_feature_fit_rerank(
     metadata_filter: dict[str, Any] | None,
     query_text: str,
     required_axle_capacity_lbs: Optional[float] = None,
+    required_total_axle_capacity_lbs: Optional[float] = None,
+    required_axle_count: Optional[int] = None,
     semantic_rerank: ValidatedFeatureRerank | None = None,
     semantic_fallback_reason: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -945,6 +1040,8 @@ def _combined_feature_fit_rerank(
         required_width_ft=required_width_ft,
         required_height_ft=required_height_ft,
         required_axle_capacity_lbs=required_axle_capacity_lbs,
+        required_total_axle_capacity_lbs=required_total_axle_capacity_lbs,
+        required_axle_count=required_axle_count,
         warn_ratio=RERANK_WARN_RATIO,
         extreme_ratio=RERANK_EXTREME_RATIO,
         length_weight=RERANK_LENGTH_WEIGHT,
@@ -969,6 +1066,8 @@ def _combined_feature_fit_rerank(
                 "width_ratio": None,
                 "height_ratio": None,
                 "axle_ratio": None,
+                "total_axle_ratio": None,
+                "axle_count": None,
                 "length_overage": 999.0,
                 "fit_score": float(listing.get("relevance_score") or 0.0),
             }
@@ -1213,6 +1312,8 @@ def search_listing_result(
         required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
         required_height_ft = _required_height_ft_from_filters(slots, metadata_filters)
         required_axle_capacity_lbs = _required_axle_capacity_lbs_from_filters(slots, metadata_filters)
+        required_total_axle_capacity_lbs = _required_total_axle_capacity_lbs_from_filters(slots, metadata_filters)
+        required_axle_count = _required_axle_count_from_filters(slots, metadata_filters)
         semantic_rerank: ValidatedFeatureRerank | None = None
         semantic_fallback_reason: str | None = None
         if config.settings.feature_llm_rerank_enabled and listings:
@@ -1245,6 +1346,8 @@ def search_listing_result(
             required_width_ft=required_width_ft,
             required_height_ft=required_height_ft,
             required_axle_capacity_lbs=required_axle_capacity_lbs,
+        required_total_axle_capacity_lbs=required_total_axle_capacity_lbs,
+        required_axle_count=required_axle_count,
             metadata_filter=metadata_filter,
             query_text=filter_description,
             semantic_rerank=semantic_rerank,
@@ -1266,6 +1369,8 @@ def search_listing_result(
         required_width_ft = _required_width_ft_from_filters(slots, metadata_filters)
         required_height_ft = _required_height_ft_from_filters(slots, metadata_filters)
         required_axle_capacity_lbs = _required_axle_capacity_lbs_from_filters(slots, metadata_filters)
+        required_total_axle_capacity_lbs = _required_total_axle_capacity_lbs_from_filters(slots, metadata_filters)
+        required_axle_count = _required_axle_count_from_filters(slots, metadata_filters)
         listings, rerank_debug = _rerank_listings_by_fit(
             listings,
             required_length_ft=required_length_ft,
@@ -1273,6 +1378,8 @@ def search_listing_result(
             required_width_ft=required_width_ft,
             required_height_ft=required_height_ft,
             required_axle_capacity_lbs=required_axle_capacity_lbs,
+        required_total_axle_capacity_lbs=required_total_axle_capacity_lbs,
+        required_axle_count=required_axle_count,
             warn_ratio=RERANK_WARN_RATIO,
             extreme_ratio=RERANK_EXTREME_RATIO,
             length_weight=RERANK_LENGTH_WEIGHT,
