@@ -141,25 +141,6 @@ asked for one. WHEN THEY ASK FOR ONE OF THESE, ALL THREE OF THESE ARE TRUE ON TH
 === KNOWN MAKES/BRANDS ===
 {make_prompt_block()}
 
-=== CURRENT STATE ===
-Selected category: {category}
-Active clarification question: {clarification_question or "none"}
-Qualification questions for this category, in order: {fields.get("questions", {})}
-Answer guidance per slot: {fields.get("answer_guidance", {})}
-Category notes: {spec.notes}
-Already collected (NEVER re-extract unless the user changes them): {_collected_display(state)}
-Skipped slots: {_state_get(state, "skipped_slots", []) or []}    No-preference slots (stored null): {_no_preference_slots(state)}
-Pending question: "{pending_text or 'none'}" (slot={pending_slot or 'none'}, already re-asked {_state_get(state, "pending_question_repeats", 0)} time(s))
-Pending category change awaiting keep/drop answer: {_state_get(state, "pending_category_change", None) or "none"}
-Pending category switch suggestion awaiting yes/no: {_state_get(state, "pending_category_suggestion", None) or "none"}
-Pending brand-category question (we asked which of that make's categories they want): {_state_get(state, "pending_brand_categories", None) or "none"}
-Results already shown to this customer: {"yes" if (_state_get(state, "shown_urls", []) or []) else "no"}
-Contact: name={name} email={email} phone={phone} declined={bool(_state_get(state, "contact_declined", False))}
-We asked for contact details last turn: {"yes — this message is most likely their answer to it" if _state_get(state, "contact_asks", 0) and not _state_get(state, "contact_gate_closed", False) else "no"}
-LISTINGS ON SCREEN RIGHT NOW - the latest batch, numbered 1-based. A listing reference can ONLY point
-into this list; older batches are gone from the customer's view and are never what they mean:
-{_shown_listing_titles(state)}
-
 === TURN SUMMARY (write this FIRST - it is handed to the reply writer) ===
 turn_summary = 2-3 short plain sentences saying what the customer just said and what they want THIS
 turn, read in conversation context. Include the specifics exactly as given: model names, stock numbers,
@@ -240,7 +221,7 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
 - faq: the message asks one of contact_human / financing / trade_in / service_parts / store_info.
 - team_request_escalation: call/meeting scheduling, quote requests, "email me", anything needing a human.
 - listing_interest: references a shown listing -> set listing_reference to its 1-based index in the
-  "LISTINGS ON SCREEN RIGHT NOW" list above. Count from 1 within THAT list only: "the 5th one" is entry
+  "LISTINGS ON SCREEN RIGHT NOW" list in CURRENT STATE at the end of this prompt. Count from 1 within THAT list only: "the 5th one" is entry
   number 5 of that list, never the 5th trailer of some earlier batch. If the number they say is bigger
   than that list, leave listing_reference null - do not wrap around or guess.
   They may point at it ANY way: by position ("the second one", "the last
@@ -488,7 +469,7 @@ MESSAGE (already-collected ones stay in state). If nothing real remains, return 
 --- ALSO PUT OPTIONAL-QUESTION ANSWERS IN THE FEATURE LIST ---
 These optional questions for the current category describe EQUIPMENT, not numbers, and we have no
 search field for any of them - the feature list is the ONLY place they can do any work:
-{optional_feature_questions or "(none for this category)"}
+They are listed under "Optional feature questions for this category" in CURRENT STATE, at the end of this prompt.
 Whenever the message says something that answers one of those - whether we asked it or they just
 volunteered it - do BOTH of these, in the same turn:
   1. emit the slot_answers pair for that slot, AND
@@ -549,6 +530,26 @@ STILL fill inventory_lookup completely - leaving it empty silently drops the cus
 Coexistence rules:
 - A lookup NEVER changes the selected category, brand_preference, or any collected slot. Do not set category_mentioned or extracted fields from lookup identifiers themselves.
 - Mid-qualification, a lookup is an interruption: set answered_current_question=false.
+
+=== CURRENT STATE ===
+Selected category: {category}
+Active clarification question: {clarification_question or "none"}
+Qualification questions for this category, in order: {fields.get("questions", {})}
+Answer guidance per slot: {fields.get("answer_guidance", {})}
+Category notes: {spec.notes}
+Optional feature questions for this category: {optional_feature_questions or "(none for this category)"}
+Already collected (NEVER re-extract unless the user changes them): {_collected_display(state)}
+Skipped slots: {_state_get(state, "skipped_slots", []) or []}    No-preference slots (stored null): {_no_preference_slots(state)}
+Pending question: "{pending_text or 'none'}" (slot={pending_slot or 'none'}, already re-asked {_state_get(state, "pending_question_repeats", 0)} time(s))
+Pending category change awaiting keep/drop answer: {_state_get(state, "pending_category_change", None) or "none"}
+Pending category switch suggestion awaiting yes/no: {_state_get(state, "pending_category_suggestion", None) or "none"}
+Pending brand-category question (we asked which of that make's categories they want): {_state_get(state, "pending_brand_categories", None) or "none"}
+Results already shown to this customer: {"yes" if (_state_get(state, "shown_urls", []) or []) else "no"}
+Contact: name={name} email={email} phone={phone} declined={bool(_state_get(state, "contact_declined", False))}
+We asked for contact details last turn: {"yes — this message is most likely their answer to it" if _state_get(state, "contact_asks", 0) and not _state_get(state, "contact_gate_closed", False) else "no"}
+LISTINGS ON SCREEN RIGHT NOW - the latest batch, numbered 1-based. A listing reference can ONLY point
+into this list; older batches are gone from the customer's view and are never what they mean:
+{_shown_listing_titles(state)}
 """
     return system, _recent_messages(state)
 

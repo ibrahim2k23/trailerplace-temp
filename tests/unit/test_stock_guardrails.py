@@ -115,7 +115,7 @@ def test_listings_ending_rule_now_permits_the_sales_rep_line():
     """This rule used to ban "calls" outright after listings - the exact opposite of the new
     guardrail. If both survived, the model would be obeying a coin flip."""
     prompt = _respond_prompt()
-    ending = prompt[prompt.index("=== HOW TO END A REPLY THAT SHOWS LISTINGS ===") :][:600]
+    ending = prompt[prompt.index("-- 5D. HOW TO END A REPLY THAT SHOWS LISTINGS --") :][:600]
     assert "the SALES-REP LINE, then ONE closing question" in ending
     assert PHONE in ending
     # The old blanket ban listed "calls" among the forbidden extras; it must not still.
@@ -125,7 +125,7 @@ def test_listings_ending_rule_now_permits_the_sales_rep_line():
 
 def test_sales_rep_line_is_bounded_so_it_cannot_become_a_brush_off():
     prompt = _respond_prompt()
-    rule = prompt[prompt.index("=== THE SALES-REP LINE") :]
+    rule = prompt[prompt.index("-- 5G. THE SALES-REP LINE") :]
     assert "ONCE per reply, and never as the entire reply" in rule
     assert "Never on a plain qualification turn" in rule
     assert "never alongside the CLOSING line" in rule
@@ -185,4 +185,6 @@ def test_analyze_prompt_knows_which_types_are_unstocked():
 def test_closing_line_and_sales_rep_line_are_distinguished():
     """Two different phone lines with different triggers; without this they blur together."""
     prompt = _respond_prompt()
-    assert "This is the CLOSING line. The SALES-REP line below is a different" in prompt
+    # The two lines share section 5G, which opens by naming them as distinct.
+    assert "These are TWO DIFFERENT lines with different triggers" in prompt
+    assert "Use one or the other in a reply, NEVER both" in prompt
