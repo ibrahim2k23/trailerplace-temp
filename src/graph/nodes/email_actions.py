@@ -239,6 +239,15 @@ def email_actions_node(state: dict) -> dict:
         key = resolved.get("canned_key")
         if key and key not in outcome["canned_keys"]:
             outcome["canned_keys"].append(key)
+        # An escalation OWNS its turn. Someone reporting a problem - or asking something we
+        # cannot answer (a restock date, when new stock lands) - is not a sales opportunity,
+        # and qualification runs regardless of intent: with no category settled it always
+        # emits "What type of trailer are you looking for?". Seen live, "I have a complaint
+        # against you guys" was answered with the full category list and "which type do you
+        # want to go with?". This flag is read by qualification_node (which runs after us)
+        # and by the respond prompt. The alert email is unaffected - it still goes out.
+        if key == "escalation":
+            outcome["escalation_owns_turn"] = True
 
     stashed: list[dict[str, Any]] = list(state.get("pending_email_actions") or [])
     has_customer = any(not r["is_system"] for r in resolved_new)

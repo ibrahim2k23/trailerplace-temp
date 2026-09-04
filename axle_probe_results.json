@@ -1,0 +1,125 @@
+[
+ {
+  "probe": "count: tandem",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_count": 2
+  },
+  "features": [],
+  "reply": "You've chosen a utility trailer with tandem axles. What will you be hauling on the utility trailer?"
+ },
+ {
+  "probe": "count: single",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_count": 1
+  },
+  "features": [],
+  "reply": "Thank you for your choice, Ibrahim! A single axle utility trailer is great for various hauling needs. What will you be hauling on the utility trailer?"
+ },
+ {
+  "probe": "count: triple",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_count": 3
+  },
+  "features": [],
+  "reply": "We've noted you're looking for a flatbed trailer with triple axles. What will you be hauling on the flatbed?"
+ },
+ {
+  "probe": "count: quad",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_count": 4
+  },
+  "features": [],
+  "reply": "Currently, we do not stock that type of trailer with quad axles. However, we do carry different types of equipment trailers that might suit your needs"
+ },
+ {
+  "probe": "count: digits",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_count": 2
+  },
+  "features": [],
+  "reply": "You've chosen a dump trailer with two axles, which is a great option for your hauling needs.   What material will you be hauling (dirt, gravel, debris"
+ },
+ {
+  "probe": "cap: per-axle",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_capacity_lbs": 7000.0
+  },
+  "features": [],
+  "reply": "A utility trailer with 7000 lb axles is a solid choice for various hauling tasks. To ensure we find the right fit for you, could you let me know how m"
+ },
+ {
+  "probe": "cap: total",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "total_axle_capacity_lbs": 14000.0
+  },
+  "features": [],
+  "reply": "I understand you're looking for a flatbed trailer with a total axle capacity of 14,000 lbs.   What will you be hauling on the flatbed?"
+ },
+ {
+  "probe": "cap: unclear->ask",
+  "ok": true,
+  "problems": [],
+  "slots": {},
+  "features": [],
+  "reply": "For a utility trailer with an axle capacity of 14,000 lbs, I need to clarify: is that per axle, or the total across all the axles?"
+ },
+ {
+  "probe": "cap+count",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_capacity_lbs": 3500.0,
+   "total_axle_capacity_lbs": 7000.0,
+   "axle_count": 2
+  },
+  "features": [],
+  "reply": "I see you're looking for a utility trailer with two 3500 lb axles, Ibrahim. What will you be hauling on the utility trailer?"
+ },
+ {
+  "probe": "type: torsion",
+  "ok": true,
+  "problems": [],
+  "slots": {},
+  "features": [
+   "torsion axles"
+  ],
+  "reply": "You've selected a utility trailer with torsion axles, which is a great choice for a smooth ride and enhanced stability.   What will you be hauling on "
+ },
+ {
+  "probe": "type: spring+brakes",
+  "ok": true,
+  "problems": [],
+  "slots": {},
+  "features": [
+   "spring axles",
+   "electric brakes"
+  ],
+  "reply": "I appreciate your interest in a flatbed trailer with spring axles and electric brakes, Ibrahim. If you need further assistance or have any specific qu"
+ },
+ {
+  "probe": "type+cap together",
+  "ok": true,
+  "problems": [],
+  "slots": {
+   "axle_capacity_lbs": 5200.0
+  },
+  "features": [
+   "torsion axles"
+  ],
+  "reply": "Great choice on the utility trailer! To help narrow it down further, could you please specify how many axles the trailer should have - single, tandem,"
+ }
+]

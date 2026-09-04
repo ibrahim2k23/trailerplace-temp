@@ -1,0 +1,179 @@
+[
+ {
+  "probe": "faq/contact_human",
+  "expected": "faq",
+  "got": [
+   "team_request"
+  ],
+  "ok": false,
+  "reply": "Absolutely, Ibrahim. If you'd like to talk it through, give our sales team a call at 979-532-1486. They can assist you with your inquiries.   We carry a variety of trailers, including:   - **Aluminum*"
+ },
+ {
+  "probe": "faq/financing",
+  "expected": "faq",
+  "got": [
+   "faq"
+  ],
+  "ok": true,
+  "reply": "Yes, we do offer financing. Call 979-532-1486 to speak with our finance team, and I can keep helping narrow down the right trailer. We carry a variety of trailers including Equipment, Dump, Enclosed, "
+ },
+ {
+  "probe": "faq/trade_in",
+  "expected": "faq",
+  "got": [
+   "faq"
+  ],
+  "ok": true,
+  "reply": "Yes, you can trade in your old trailer! Our sales team handles trade-in appraisals. Call 979-532-1486 for more details.  We carry a variety of trailers, including: - **Aluminum** \u2014 best suited for lig"
+ },
+ {
+  "probe": "faq/service_parts",
+  "expected": "faq",
+  "got": [
+   "faq"
+  ],
+  "ok": true,
+  "reply": "Yes, we do offer repairs and sell parts. For specific inquiries or assistance, our service and parts team can help. Reach them at 979-532-1486.  We carry Equipment, Dump, Enclosed, Utility, Flatbed, L"
+ },
+ {
+  "probe": "faq/store_info",
+  "expected": "faq",
+  "got": [
+   "faq"
+  ],
+  "ok": true,
+  "reply": "We're located in Wharton, TX. Here\u2019s a list of the types of trailers we offer:  - **Aluminum** \u2014 lightweight and won't rust. - **Car Hauler** \u2014 designed for transporting cars without sides. - **Equipm"
+ },
+ {
+  "probe": "price haggling",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "I understand you're looking for the best price on a dump trailer and whether we can beat $8,000. For pricing inquiries like this, I recommend giving our sales team a call at 979-532-1486, as they can "
+ },
+ {
+  "probe": "delivery scheduling",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "I appreciate your inquiry, Ibrahim. I recommend reaching out to our sales team at 979-532-1486, as they can provide you with specific information about delivery options.  As for trailer types, we carr"
+ },
+ {
+  "probe": "paperwork/titling",
+  "expected": "team_request",
+  "got": [
+   "faq"
+  ],
+  "ok": false,
+  "reply": "Handling title paperwork for a trailer involves completing a few essential steps. Generally, you'll need to ensure you have the certificate of origin (if it's a new trailer) or the title from the prev"
+ },
+ {
+  "probe": "see it in person",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "Yes, you can definitely come see a trailer in person! I also encourage you to contact our sales team at 979-532-1486 to coordinate your visit or if you have specific models in mind that you'd like to "
+ },
+ {
+  "probe": "quote request",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "Thanks, I shared that request with the team so they can help you with it. If you'd rather not wait, our sales team is on 979-532-1486.  We carry a variety of trailer types including Equipment, Dump, E"
+ },
+ {
+  "probe": "call me back",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "I understand you'd like a call back today, Ibrahim. Thanks, I shared that request with the team so they can help you with it. If you'd rather not wait, our sales team is on 979-532-1486.  We carry a v"
+ },
+ {
+  "probe": "future stock A",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "I appreciate your inquiry, Ibrahim. As for the timing of our new stock arrivals, that information is typically managed by our team. If you'd like to discuss it further, a quick call to 979-532-1486 ca"
+ },
+ {
+  "probe": "future stock B",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "While I can't provide specific details on future arrivals, I\u2019ve made sure to pass your inquiry along to our team so they can assist you with it. If you'd rather not wait, our sales team is on 979-532-"
+ },
+ {
+  "probe": "future stock C",
+  "expected": "team_request",
+  "got": [],
+  "ok": false,
+  "reply": "I understand your interest regarding the sold unit. However, I'm unable to provide details about restock timing. For specific inquiries like this, it would be best to reach out to our sales team at 97"
+ },
+ {
+  "probe": "order one in",
+  "expected": "team_request",
+  "got": [
+   "team_request"
+  ],
+  "ok": true,
+  "reply": "Yes, we can help with the order of a 40 ft flatbed trailer for you. Thanks, I shared that request with the team so they can help you with it. If you'd rather not wait, our sales team is on 979-532-148"
+ },
+ {
+  "probe": "unstocked type",
+  "expected": "team_request",
+  "got": [],
+  "ok": false,
+  "reply": "Yes, a concession trailer would be a good fit for your BBQ business! These trailers are specifically designed for mobile food service and can accommodate your cooking and serving needs.  Based on what"
+ },
+ {
+  "probe": "escalation/complaint",
+  "expected": "escalation",
+  "got": [
+   "escalation"
+  ],
+  "ok": true,
+  "reply": "I'm sorry to hear that. I've noted it and passed it to our team - they'll reach out to you, and you can also reach them directly on 979-532-1486. And if you are looking for a trailer as well, I am hap"
+ },
+ {
+  "probe": "escalation/urgent",
+  "expected": "escalation",
+  "got": [
+   "escalation"
+  ],
+  "ok": true,
+  "reply": "I'm sorry to hear that. I've noted it and passed it to our team - they'll reach out to you, and you can also reach them directly on 979-532-1486. And if you are looking for a trailer as well, I am hap"
+ },
+ {
+  "probe": "escalation/manager",
+  "expected": "escalation",
+  "got": [
+   "escalation"
+  ],
+  "ok": true,
+  "reply": "I'm sorry to hear that. I've noted it and passed it to our team - they'll reach out to you, and you can also reach them directly on 979-532-1486. And if you are looking for a trailer as well, I am hap"
+ },
+ {
+  "probe": "listing_interest",
+  "expected": "listing_interest",
+  "got": [
+   "listing_interest",
+   "results_shown"
+  ],
+  "ok": true,
+  "reply": "Great choice, Ibrahim! Here are the details for the trailer you're interested in:  1. [2026 Galyean 32' Cattle Trailer W/ Butterfly Gates - 015087](https://www.trailerplace.com/inventory/2026-galyean-"
+ }
+]

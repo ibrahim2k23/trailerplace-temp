@@ -14,7 +14,13 @@ FAQ_CANNED_RESPONSES = {
 # always carried the number; these did not.
 NON_FAQ_CANNED_RESPONSES = {
     "generic_team_request": "Thanks, I shared that request with the team so they can help you with it. If you'd rather not wait, our sales team is on 979-532-1486.",
-    "escalation": "I've passed your query to our team, and you can reach them directly on 979-532-1486. In the meantime, I can keep helping you narrow down the right trailer.",
+    # NEVER offer to keep helping them shop here. This text used to end "In the meantime, I can
+    # keep helping you narrow down the right trailer" - and because canned text arrives at the
+    # respond model as an ORDER, a customer who opened with "I have a complaint against you guys"
+    # was answered with a 13-item trailer catalogue and "which type do you want to go with?".
+    # An escalation is someone telling us something went wrong, or asking something we cannot
+    # answer; the only appropriate reply is that it is recorded, and how a person reaches them.
+    "escalation": "I'm sorry to hear that. I've noted it and passed it to our team - they'll reach out to you, and you can also reach them directly on 979-532-1486.",
     "listing_interest_selected": "Your interest in the selected trailer has been logged. Our team can follow up. In the meantime, feel free to visit https://trailerplace.com or call 979-532-1486.",
     "listing_interest_unselected": "Your interest has been logged. Our team can follow up. In the meantime, feel free to visit https://trailerplace.com or call 979-532-1486.",
     "listing_interest_fallback": "Great, I shared your interest in that trailer with the team. They can follow up with you, or you can reach them on 979-532-1486.",

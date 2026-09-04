@@ -204,11 +204,37 @@ def mentions_an_axle(value: Any) -> bool:
     return bool(_AXLE_FEATURE_RE.search(str(value or "")))
 
 
+# An axle phrase is junk-as-a-feature UNLESS it names the axle's TYPE or construction.
+# Counts and capacities have fields of their own (axle_count, axle_capacity_lbs) and a
+# duplicate feature string can only score 0 in the ranker - feature_ranker strips the Axle
+# Capacity label from the evidence it shows the model. But the axle's TYPE has no field
+# anywhere, so "torsion axles" is a real requirement and the feature list is the only place
+# it can do any work; the old guard dropped every phrase containing "axle" and lost it.
+# A whitelist, not "anything without a number": "heavy duty axles" is a vague quality that
+# matches almost any tandem trailer and scores 0 just like a bare count would.
+_AXLE_TYPE_WORD_RE = re.compile(
+    r"\b(torsion|spring|leaf|drop|straight|lift|idler|greaseable|oil[- ]?bath|rubber(?:[- ]ride)?|electric|hydraulic|disc|drum|self[- ]adjusting)\b",
+    re.IGNORECASE,
+)
+
+
+def axle_phrase_is_count_or_capacity(value: Any) -> bool:
+    """True for an axle phrase we must NOT keep as a feature.
+
+    False only when the phrase names the axle's type or construction ("torsion axles",
+    "spring axles with electric brakes") - that is a requirement we hold no metadata for.
+    """
+    text = str(value or "")
+    if not mentions_an_axle(text):
+        return False
+    return not _AXLE_TYPE_WORD_RE.search(text)
+
+
 def _is_only_a_measurement_or_price(feature: str) -> bool:
     """True when the phrase says nothing beyond a size, a weight or a price.
 
     "18 ft long" and "$20,000 budget" are requirements, not features. "16 ft ramps" IS a
-    feature — after the number and the filler words, a real noun ("ramps") survives.
+    feature â€” after the number and the filler words, a real noun ("ramps") survives.
     """
     text = str(feature or "").strip().lower()
     if not text:
@@ -218,7 +244,7 @@ def _is_only_a_measurement_or_price(feature: str) -> bool:
     if not (is_measurement or is_price):
         return False
     remainder = _PRICE_RE.sub(" ", text)
-    remainder = re.sub(r"[\d.,'\"×x-]+", " ", remainder)
+    remainder = re.sub(r"[\d.,'\"Ã—x-]+", " ", remainder)
     remainder = _MEASUREMENT_WORDS.sub(" ", remainder)
     return not re.search(r"[a-z]", remainder)
 
@@ -238,14 +264,14 @@ def sanitize_non_metadata_features(features: Any) -> tuple[list[str], Any]:
         if found:
             hitch = hitch or found
         # After the hitch lift, so "gooseneck with 10k axles" still yields the hitch.
-        if mentions_an_axle(feature):
+        if axle_phrase_is_count_or_capacity(feature):
             continue
         if _is_only_a_measurement_or_price(feature):
             continue
         cleaned = _clean_feature_only_value(feature)
         if (
             cleaned
-            and not mentions_an_axle(cleaned)
+            and not axle_phrase_is_count_or_capacity(cleaned)
             and not _is_only_a_measurement_or_price(cleaned)
             and cleaned.casefold() not in {value.casefold() for value in kept}
         ):

@@ -43,6 +43,13 @@ def _axle_capacity_already_answers(state: dict, slot: str) -> bool:
 
 def qualification_node(state: dict) -> dict:
     outcome = state.setdefault("turn_outcome", {})
+    if outcome.get("escalation_owns_turn"):
+        # They reported a problem or asked something only a person can answer. Ask NOTHING
+        # this turn and run no search: the canned escalation text is the whole reply, and a
+        # qualification question tacked onto it reads as ignoring what they just said. The
+        # pending question is not lost - it is still pending, and comes back next turn.
+        state["qualification_complete"] = False
+        return state
     if not state.get("category"):
         # No category means nothing to search, whatever else happened this turn ("just show
         # me what you have" before they've told us what they want). An axle rating given

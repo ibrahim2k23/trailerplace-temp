@@ -11,6 +11,14 @@ Phase 2 (per category): contact -> one message with the category and every
 Phase 3 (per category): contact -> category select -> a mix of real answers,
     explicit "no preference" (stores null, not re-asked) and explicit declines
     ("skip that one" -> lands in skipped_slots) -> results.
+Phase 5 (per case): a turn the chatbot cannot settle itself - a complaint, an
+    FAQ, a price/restock/unstocked-type question - asserting WHICH email the
+    team gets, plus one case that must email nobody.
+Phase 6 (per case): axle count words (single/tandem/triple/quad -> 1/2/3/4),
+    per-axle vs total capacity and the clarifying question, and axle TYPE
+    (torsion, spring) landing in non_metadata_features while counts and
+    capacities never do.
+
 Phase 4 (single conversation): switches category mid-Q&A more than once,
     mixes declines/no-preference/real answers, and checks results after each
     category before switching again.
@@ -377,6 +385,176 @@ def build_phase4() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 - email tool calls
+# ---------------------------------------------------------------------------
+# Every turn here is one the chatbot CANNOT settle itself, so the team has to be
+# told. The reason strings are the ones email_actions builds (see
+# _CUSTOMER_KIND_META and _resolve_customer_trigger): "Escalation",
+# "Team Request", and "FAQ - <faq_key>" with an EN DASH. The last case is the
+# opposite assertion - a category we stock is an ordinary customer shopping and
+# must NOT email anyone.
+
+EMAIL_CASES: list[dict] = [
+    {
+        "name": "email-escalation-complaint",
+        "message": "Not looking for a trailer but I have a complaint against you guys.",
+        "emails": ["Escalation"],
+        # A complaint must not be answered with a sales pitch or a category list.
+        "reply_not_contains": ["which type", "we carry equipment", "narrow down"],
+    },
+    {
+        "name": "email-escalation-urgent",
+        "message": "This is urgent - my trailer arrived damaged and nobody is helping me.",
+        "emails": ["Escalation"],
+    },
+    {
+        "name": "email-faq-financing",
+        "message": "Do you guys offer financing?",
+        "emails": ["FAQ \u2013 financing"],
+    },
+    {
+        "name": "email-faq-contact-human",
+        "message": "Can I speak to a real person please?",
+        "emails": ["FAQ \u2013 contact_human"],
+    },
+    {
+        "name": "email-team-request-price",
+        "message": "What's your best price on a dump trailer? Can you beat 8k?",
+        "emails": ["Team Request"],
+    },
+    {
+        "name": "email-team-request-future-stock",
+        "message": "When will your new stock of trailers come in?",
+        "emails": ["Team Request"],
+    },
+    {
+        "name": "email-team-request-restock",
+        "message": "Is the livestock trailer that sold coming back in stock?",
+        "emails": ["Team Request"],
+    },
+    {
+        "name": "email-team-request-unstocked-type",
+        "message": "Do you have a diesel tank trailer for my fuel delivery business?",
+        "emails": ["Team Request"],
+        "reply_contains_any": ["do not have", "don't have", "not have that type"],
+    },
+    {
+        "name": "email-no-trigger-for-a-stocked-category",
+        # Concession IS stocked. Wanting a trailer we carry is never a team request -
+        # an email here is noise in the team's inbox.
+        "message": "I need a concession trailer for my BBQ business.",
+        "emails": [],
+    },
+]
+
+
+def build_phase5(case: dict) -> dict:
+    turn = {
+        "user": case["message"],
+        "label": f"Phase 5 | email | {case['name']}",
+        "expect_emails_sent": case["emails"],
+    }
+    if case.get("reply_contains_any"):
+        turn["expect_reply_contains_any"] = case["reply_contains_any"]
+    if case.get("reply_not_contains"):
+        turn["expect_reply_not_contains"] = case["reply_not_contains"]
+    return {
+        "name": case["name"],
+        "tags": ["category_pipeline"],
+        "phase": 5,
+        "category": "email",
+        # Contact first, so the trigger sends on this turn instead of being stashed
+        # behind the contact gate - that is what makes the assertion meaningful.
+        "turns": [_contact_turn(5, "email"), turn],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 - axle count, axle capacity, and axle type
+# ---------------------------------------------------------------------------
+# Three different facts share the word "axle" and must land in three different
+# places: the COUNT in axle_count (single/tandem/triple/quad -> 1/2/3/4), the
+# CAPACITY in axle_capacity_lbs (per axle) or total_axle_capacity_lbs, and the
+# axle's TYPE (torsion, spring, drop) in non_metadata_features - it has no
+# metadata field of its own, so the feature list is the only place it can work.
+# A count or a capacity must NEVER appear as a feature.
+
+AXLE_CASES: list[dict] = [
+    {"name": "axle-count-tandem",  "message": "I want a utility trailer with tandem axles.",
+     "state": {"slot:axle_count": 2}},
+    {"name": "axle-count-single",  "message": "I need a utility trailer, single axle.",
+     "state": {"slot:axle_count": 1}},
+    {"name": "axle-count-triple",  "message": "Looking for a flatbed with triple axles.",
+     "state": {"slot:axle_count": 3}},
+    {"name": "axle-count-quad",    "message": "Do you have an equipment trailer with quad axles?",
+     "state": {"slot:axle_count": 4}},
+    {"name": "axle-count-digits",  "message": "I want a dump trailer with 2 axles.",
+     "state": {"slot:axle_count": 2}},
+    {"name": "axle-capacity-per-axle", "message": "I need a utility trailer with 7000 lb axles.",
+     "state": {"slot:axle_capacity_lbs": 7000.0}},
+    {"name": "axle-capacity-total", "message": "I need 14,000 lbs total across the axles on a flatbed.",
+     "state": {"slot:total_axle_capacity_lbs": 14000.0}},
+    {"name": "axle-capacity-and-count", "message": "A utility trailer with two 3500 lb axles.",
+     "state": {"slot:axle_count": 2, "slot:axle_capacity_lbs": 3500.0}},
+    {"name": "axle-type-torsion-is-a-feature",
+     "message": "I want a utility trailer with torsion axles.",
+     "state": {"non_metadata_features_contains": "torsion axles"}},
+    {"name": "axle-type-and-capacity-together",
+     # One phrase, two destinations: the number to its slot, the type to the features.
+     "message": "A utility trailer with 5200 lb torsion axles.",
+     "state": {"slot:axle_capacity_lbs": 5200.0,
+               "non_metadata_features_contains": "torsion axles"}},
+]
+
+# An unclear capacity ("14,000 lbs of axle capacity" - per axle or total?) must be
+# asked about rather than guessed, so it gets a two-turn scenario of its own.
+AXLE_CLARIFIER = {
+    "name": "axle-capacity-unclear-asks-per-axle-or-total",
+    "trigger": "I want a utility trailer with 14,000 lbs of axle capacity.",
+    "answer": "That's the total across both axles.",
+}
+
+
+def build_phase6(case: dict) -> dict:
+    return {
+        "name": case["name"],
+        "tags": ["category_pipeline"],
+        "phase": 6,
+        "category": "axles",
+        "turns": [
+            _contact_turn(6, "axles"),
+            {
+                "user": case["message"],
+                "label": f"Phase 6 | axles | {case['name']}",
+                "expect_state": case["state"],
+            },
+        ],
+    }
+
+
+def build_phase6_clarifier() -> dict:
+    return {
+        "name": AXLE_CLARIFIER["name"],
+        "tags": ["category_pipeline"],
+        "phase": 6,
+        "category": "axles",
+        "turns": [
+            _contact_turn(6, "axles"),
+            {
+                "user": AXLE_CLARIFIER["trigger"],
+                "label": "Phase 6 | axles | unclear capacity -> must ask per-axle or total",
+                "expect_reply_contains_any": ["per axle", "each axle", "total", "combined"],
+            },
+            {
+                "user": AXLE_CLARIFIER["answer"],
+                "label": "Phase 6 | axles | clarifier answered -> stored as a TOTAL",
+                "expect_state": {"slot:total_axle_capacity_lbs": 14000.0},
+            },
+        ],
+    }
+
+
 def _write(scenario: dict) -> None:
     path = OUT_DIR / f"{scenario['name']}.yaml"
     header = (
@@ -394,7 +572,12 @@ def main() -> None:
         _write(build_phase2(category, data))
         _write(build_phase3(category, data))
     _write(build_phase4())
-    total = len(CATEGORY_DATA) * 3 + 1
+    for case in EMAIL_CASES:
+        _write(build_phase5(case))
+    for case in AXLE_CASES:
+        _write(build_phase6(case))
+    _write(build_phase6_clarifier())
+    total = len(CATEGORY_DATA) * 3 + 1 + len(EMAIL_CASES) + len(AXLE_CASES) + 1
     print(f"Wrote {total} scenario files to {OUT_DIR}")
 
 

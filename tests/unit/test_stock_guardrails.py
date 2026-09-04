@@ -56,9 +56,11 @@ def test_concession_has_its_own_qualification_spec():
     """Without one it silently falls back to _DEFAULT_SPEC's "what will you be hauling?"."""
     spec = get_trailer_fields("Concession")
     assert spec.category == "Concession"
-    # Length rather than cargo_size: concession trailers are bought by length.
-    assert spec.required == ["use_case", "trailer_length_ft"]
-    assert "serving" in spec.questions["use_case"]
+    # Length rather than cargo_size: concession trailers are bought by length, and length
+    # is the ONLY required slot - use_case was dropped so the flow stays one question long.
+    assert spec.required == ["trailer_length_ft"]
+    assert "length" in spec.questions["trailer_length_ft"].lower()
+    assert "serving" in spec.questions["ac_windows_cabinets"]
 
 
 # --- Guardrail 1: not in stock -------------------------------------------------
@@ -163,11 +165,14 @@ def test_analyze_prompt_requires_an_alert_when_we_cannot_help():
     state = new_session_state("s1")
     state["category"] = "Dump"
     system, _ = build_analyze_prompt(state)
-    assert "ANYTHING WE CANNOT DO FOR THEM ALWAYS RAISES A TRIGGER" in system
+    assert "ANYTHING WE CANNOT ANSWER RAISES A TRIGGER" in system
+    # both halves must survive: the concrete list AND the catch-all test behind it
+    assert "AND ANYTHING ELSE THAT PASSES THIS TEST" in system
     for case in ("can you beat 8k", "delivery scheduling", "trade-in -> faq/trade_in"):
         assert case in system
     # escalation must stay the complaint/urgency signal, not the label for every price question.
-    assert "keep\n  escalation for complaints and urgency" in system
+    # Asserted whitespace-insensitively: the meaning matters, not where the line wraps.
+    assert "keep escalation for complaints and urgency" in " ".join(system.split()).lower()
 
 
 def test_analyze_prompt_knows_which_types_are_unstocked():
@@ -188,3 +193,116 @@ def test_closing_line_and_sales_rep_line_are_distinguished():
     # The two lines share section 5G, which opens by naming them as distinct.
     assert "These are TWO DIFFERENT lines with different triggers" in prompt
     assert "Use one or the other in a reply, NEVER both" in prompt
+
+
+# --- A complaint is not a sales opportunity -------------------------------------
+
+
+def test_escalation_canned_text_never_offers_to_keep_selling():
+    """Seen live: "I have a complaint against you guys" was answered with the full 13-item
+    category list and "which type do you want to go with?". The canned text itself carried
+    "In the meantime, I can keep helping you narrow down the right trailer", and canned text
+    reaches the respond model as an order."""
+    from src.domain.canned_responses import CANNED_RESPONSES
+
+    escalation = CANNED_RESPONSES["escalation"].lower()
+    for pitch in ("narrow down", "keep helping", "right trailer"):
+        assert pitch not in escalation, f"escalation text still pitches a trailer: {pitch!r}"
+    assert PHONE in CANNED_RESPONSES["escalation"]
+
+
+def test_escalation_turn_asks_no_qualification_question():
+    """qualification_node emits "What type of trailer are you looking for?" whenever no
+    category is settled - regardless of what the customer actually said."""
+    from src.graph.nodes.qualification import qualification_node
+
+    state = {"category": None, "slots": {}, "turn_outcome": {"escalation_owns_turn": True}}
+    qualification_node(state)
+    assert not state["turn_outcome"].get("next_question")
+    assert state["qualification_complete"] is False
+
+    # ...and the ordinary no-category turn is untouched.
+    plain = {"category": None, "slots": {}, "turn_outcome": {}}
+    qualification_node(plain)
+    assert plain["turn_outcome"]["next_question"] == "What type of trailer are you looking for?"
+
+
+def test_escalation_owns_the_reply_in_the_respond_prompt():
+    from src.llm.respond import build_respond_prompt
+    from tests.unit.llm_helpers import sample_analysis
+
+    state = {"messages": [{"role": "user", "content": "I have a complaint"}], "slots": {}}
+    system, _ = build_respond_prompt(
+        state, sample_analysis(), {"escalation_owns_turn": True, "canned_keys": ["escalation"]}
+    )
+    assert "THIS OWNS THE REPLY" in system
+    assert "do NOT list, recommend, or bullet trailer types" in system
+    # ...but the door is left open, as a statement rather than a question.
+    assert "if they are looking for a trailer as well" in system
+
+
+def test_analyze_prompt_requires_a_trigger_for_future_stock_questions():
+    """Seen live: "when will your new stock of trailers come" was labelled general_question
+    and raised NO email trigger, so the lead vanished - the customer then handed over name
+    and email and the team was never told. The trigger table was a closed list of examples
+    and this case was not on it."""
+    from src.llm.analyze import build_analyze_prompt
+
+    system, _ = build_analyze_prompt(new_session_state("s1"))
+    assert "AND ANYTHING ELSE THAT PASSES THIS TEST" in system
+    assert "when new stock arrives" in system
+    assert "paperwork, titling, registration" in system
+    assert "seeing, viewing, visiting" in system
+    # the other half: an ordinary request for a category we stock must NOT alert the team
+    assert "DO NOT RAISE ONE WHEN THE ANSWER IS ALREADY YOURS TO GIVE" in system
+    assert "no trigger" in system
+    # the intent that let it slip must point at the rule
+    assert "This intent still raises an email trigger" in system
+
+
+# --- Axles: count and capacity are fields; the axle's TYPE is a feature ---------
+
+
+def test_axle_count_words_map_to_numbers():
+    from src.domain.slot_map import parse_axle_count_answer
+
+    for word, expected in (
+        ("single", 1), ("SA", None), ("one axle", 1),
+        ("tandem", 2), ("double", 2), ("dual", 2), ("two axles", 2),
+        ("triple", 3), ("tri", 3), ("three axles", 3),
+        ("quad", 4), ("quadruple", 4), ("four axles", 4),
+    ):
+        if expected is not None:
+            assert parse_axle_count_answer(word) == expected, f"{word!r} -> {expected}"
+
+
+def test_axle_count_and_capacity_never_become_features():
+    from src.domain.slot_map import sanitize_non_metadata_features
+
+    for junk in ("10k axles", "tandem axles", "single axle", "triple axles",
+                 "two 3500 lb axles", "axle capacity", "7000 lb axle"):
+        kept, _ = sanitize_non_metadata_features([junk])
+        assert kept == [], f"{junk!r} leaked into non_metadata_features as {kept}"
+
+
+def test_axle_type_survives_as_a_feature():
+    """We hold NO metadata field for the axle's construction, so the feature list is the only
+    place "torsion axles" can do any work. The old guard dropped every phrase containing the
+    word "axle" and threw it away with the counts."""
+    from src.domain.slot_map import sanitize_non_metadata_features
+
+    for real in ("torsion axles", "drop axles", "spring axles"):
+        kept, _ = sanitize_non_metadata_features([real])
+        assert kept, f"{real!r} was discarded but it is a real feature"
+
+    # one phrase can carry both: the count/capacity goes to its field, the type stays a feature
+    kept, _ = sanitize_non_metadata_features(["torsion axles", "7000 lb axles"])
+    assert kept == ["torsion axles"]
+
+
+def test_electric_brakes_are_not_read_as_a_triple_axle_count():
+    """Without word boundaries "tri" matches inside "electric" and "one" inside "stone"."""
+    from src.domain.slot_map import axle_phrase_is_count_or_capacity
+
+    assert axle_phrase_is_count_or_capacity("torsion axles with electric brakes") is False
+    assert axle_phrase_is_count_or_capacity("tandem axles") is True

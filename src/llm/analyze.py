@@ -131,12 +131,15 @@ qualify or search for something we do not have. They are here so you can TELL th
 asked for one. WHEN THEY ASK FOR ONE OF THESE, ALL THREE OF THESE ARE TRUE ON THIS TURN:
   - category_mentioned stays null (it is not a category we can put them into), and
   - email_triggers MUST contain one entry, kind=team_request, whose description names the type
-    they asked for and what they said they need it for ("wants a food/concession trailer for a
-    BBQ business"), and
+    they asked for and what they said they need it for ("wants a diesel tank trailer for a fuel
+    delivery business"), and
   - that trigger is required even when the message is phrased as a QUESTION ("do you have any
-    food trailers?"). A customer asking for something we do not sell is the single lead most
+    fuel trailers?"). A customer asking for something we do not sell is the single lead most
     likely to be lost, and the reply can only tell them no - the team hearing about it is the
     only way it turns into a sale.
+  THE LIST ABOVE IS THE WHOLE LIST. A category that IS in the TRAILER CATEGORIES block is stocked
+  and is handled normally - qualify and search, no trigger. Do not carry an idea of what we stock
+  from anywhere else: the blocks above are current and they decide it.
 
 === KNOWN MAKES/BRANDS ===
 {make_prompt_block()}
@@ -153,6 +156,10 @@ shown: they now want to see Diamond C LPX models.").
 === INTENT RULES ===
 Interpret the message by intent; do NOT assume it answers the pending question.
 - general_question: towing, payload, dimensions, axles, features, use cases, or dealership questions.
+  This intent still raises an email trigger whenever the question is one we cannot answer from what
+  this prompt gives you - future/incoming stock above all. Seen live: "when will your new stock of
+  trailers come" was labelled general_question, raised NO trigger, and the team never heard about a
+  customer who then handed over their name and email.
 - category_exploration: the user ASKS what trailer type fits a job ("which trailer is best for a tractor?").
   A statement of need is NOT exploration: "I'm looking for a trailer to haul a tractor" is a WANT -
   the cargo names the category for them. Use category_selection (or category_change if one is already
@@ -241,21 +248,35 @@ Each category has TYPE TERMS (the trailer type itself) and CARGO TERMS (loads it
   An inventory lookup ("I am looking for Iron Bull DTB", "do you have the fmax?") is NOT a team_request or
   escalation either - the system records shown results itself. Emit an email trigger for a lookup turn ONLY
   when the message separately asks for a human, a call, a quote, or one of the faq topics.
-- ANYTHING WE CANNOT DO FOR THEM ALWAYS RAISES A TRIGGER - never leave the team unaware that we came up
-  short. If the message asks for something only a person can settle, an email trigger is REQUIRED on this
-  turn, because the reply can only hand them a phone number and someone has to know to pick it up:
+- ANYTHING WE CANNOT ANSWER RAISES A TRIGGER - never leave the team unaware that we came up
+  short. These ALWAYS raise one, whatever the wording, and a QUESTION counts the same as a request:
     * a price, a discount, or any haggling ("what's your best price", "can you beat 8k") -> team_request
-    * delivery scheduling, paperwork/titling, or seeing a unit in person                  -> team_request
-    * a quote, a call back, or a meeting                                                  -> team_request
+    * delivery scheduling                                                                -> team_request
+    * paperwork, titling, registration, or how the sale itself works                     -> team_request
+    * seeing, viewing, visiting, or coming to look at a unit in person                   -> team_request
+    * a quote, a call back, or a meeting                                                 -> team_request
+    * ANY question about stock not on the lot today: when new stock arrives, when something is
+      restocked, "will you get more of these", whether a sold unit is coming back, whether we can
+      order one in, when a model or brand lands                                          -> team_request
+    * a trailer TYPE we do not stock (see the not-in-stock block)                        -> team_request
     * financing -> faq/financing; trade-in -> faq/trade_in; service or parts -> faq/service_parts;
-      asking for a person -> faq/contact_human
-    * a complaint, an urgent problem, or demanding a manager/human NOW                    -> escalation
-    * they ask for a trailer TYPE we do not stock (see the categories block) and they have said what
-      they need it for                                                                    -> team_request
-  Put what they actually asked for in `description` ("wants best price on a dump trailer, asked us to
-  beat $8k") so the team can act without reading the transcript. The kind rules above still hold: keep
-  escalation for complaints and urgency, so it stays the signal that something is going wrong rather
-  than the label for every routine price question.
+      where we are or when we are open -> faq/store_info
+    * asking to speak to / talk to / be put through to a person, human, rep, or agent, however
+      politely ("can I speak to a real person?")                          -> faq, faq_key=contact_human
+    * a complaint, an urgent problem, or demanding a manager/human NOW                   -> escalation
+  AND ANYTHING ELSE THAT PASSES THIS TEST, even if it is not listed above: to answer this honestly,
+  do I need a fact this prompt did not give me? You know ONLY what is on the lot right now - nothing
+  about the future, nothing sold, no prices beyond the listed ones, no schedules, no paperwork. If
+  yes -> team_request. An intent of general_question does NOT excuse the test: a question can be
+  perfectly ordinary and still be one we cannot answer, and those are the leads that vanish silently.
+  DO NOT RAISE ONE WHEN THE ANSWER IS ALREADY YOURS TO GIVE. Asking for a category we stock, or
+  answering a qualification question, is an ordinary customer shopping - qualification and the search
+  handle it, and an email there is noise in the team's inbox. "I need a concession trailer for my BBQ
+  business" names a category we carry: no trigger. Wanting a trailer is never itself a team request.
+  Put what they actually asked for in `description` ("wants best price on a dump trailer, asked us
+  to beat $8k") so the team can act without reading the transcript. Keep escalation for complaints
+  and urgency, so it stays the signal that something is going wrong rather than the label for
+  every routine price question.
 - If intent is faq/team_request_escalation/listing_interest, that request must also appear in email_triggers.
 - If mid-qualification and the message is an interruption: answered_current_question=false and put the interruption verbatim in user_question_to_answer.
 
@@ -460,8 +481,15 @@ NEVER include, alone or attached to a real feature:
 - trailer identity nouns ("trailer", model year, stock number, model name), any known make/brand,
   any category or synonym from TRAILER CATEGORIES ("enclosed", "utility", "tilt", "aluminum", ...)
 - a hitch type -> extracted.hitch_type; a length/width/height -> extracted.trailer_*_ft;
-  a weight/payload/GVWR -> extracted.payload_lbs; ANY mention of axles ("10k axles", "axle
-  capacity", "7000 lb axle") -> extracted.axle_capacity_lbs and NEVER a feature
+  a weight/payload/GVWR -> extracted.payload_lbs
+- an axle COUNT or an axle CAPACITY, however worded ("10k axles", "axle capacity", "7000 lb axle",
+  "tandem axles", "two axles") -> those go to axle_count / axle_capacity_lbs / total_axle_capacity_lbs
+  and are NEVER a feature.
+  THE EXCEPTION IS THE AXLE'S TYPE OR CONSTRUCTION, which is a real feature and has no field of its
+  own: torsion, spring, leaf spring, drop, straight, lift/drop axle, electric brakes, self-adjusting
+  brakes. Keep those AS features, worded as given ("torsion axles" -> ["torsion axles"]). One phrase
+  can do both: "tandem 5200 lb torsion axles" -> axle_count 2, axle_capacity_lbs 5200,
+  non_metadata_features ["torsion axles"]. A number or a count word is what makes it NOT a feature.
 - a colour, price, or budget
 Output "insulated", never "insulated enclosed". Extract only features newly stated in the LATEST USER
 MESSAGE (already-collected ones stay in state). If nothing real remains, return an empty list.

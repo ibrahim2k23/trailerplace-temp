@@ -62,12 +62,17 @@ class _Tee:
             stream.flush()
 
 
-def run_pipeline(base_url: str, scenarios: list[dict[str, Any]]) -> bool:
+def run_pipeline(base_url: str, scenarios: list[dict[str, Any]], transcript: list | None = None) -> bool:
+    """Run every scenario. When `transcript` is given, each turn is appended to it as a
+    dict so the caller can write a readable Markdown record of the whole conversation -
+    the console log interleaves turns with assertion noise and is awkward to read back.
+    """
     all_passed = True
     for scenario in scenarios:
         session_id = str(uuid.uuid4())
         print(f"\n===== [{scenario['name']}] (phase={scenario.get('phase')}, "
               f"category={scenario.get('category')}, session={session_id}) =====")
+        turns_record: list[dict[str, Any]] = []
         for turn in scenario.get("turns", []):
             label = turn.get("label", "(no label)")
             user_message = turn.get("user", "")
@@ -92,12 +97,72 @@ def run_pipeline(base_url: str, scenarios: list[dict[str, Any]]) -> bool:
                 print(f"    LISTINGS: {len(listings)} returned")
             for failure in failures:
                 print(f"    FAILURE: {failure}")
+            turns_record.append({
+                "label": label, "user": user_message, "reply": reply_text,
+                "listings": len(listings), "status": status, "failures": failures,
+                "emails_sent": state.get("emails_sent") or [],
+                "slots": state.get("slots") or {},
+                "features": state.get("non_metadata_features") or [],
+            })
+        if transcript is not None:
+            transcript.append({
+                "name": scenario["name"], "phase": scenario.get("phase"),
+                "category": scenario.get("category"), "session": session_id,
+                "turns": turns_record,
+            })
     return all_passed
+
+
+def write_markdown(transcript: list[dict[str, Any]], path: Path) -> None:
+    """A readable record of every conversation, for auditing the replies by eye."""
+    total = sum(len(s["turns"]) for s in transcript)
+    failed = [s for s in transcript if any(t["failures"] for t in s["turns"])]
+    out = [
+        "# Category pipeline run",
+        "",
+        f"- Run at: {dt.datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"- Scenarios: {len(transcript)}   turns: {total}",
+        f"- Scenarios with at least one failed assertion: {len(failed)}",
+        "",
+    ]
+    if failed:
+        out += ["## Scenarios with failures", ""]
+        for s in failed:
+            bad = [t for t in s["turns"] if t["failures"]]
+            out.append(f"- [{s['name']}](#{s['name']}) - {len(bad)} turn(s)")
+        out.append("")
+    out += ["---", ""]
+    for s in transcript:
+        mark = "FAIL" if any(t["failures"] for t in s["turns"]) else "PASS"
+        out += [f"<a id=\"{s['name']}\"></a>",
+                f"## [{mark}] {s['name']}",
+                "",
+                f"`phase {s['phase']}` · `{s['category']}` · session `{s['session']}`",
+                ""]
+        for t in s["turns"]:
+            out += [f"**{t['status']}** - {t['label']}", "",
+                    f"> **User:** {t['user']}", ""]
+            reply = (t["reply"] or "").strip() or "(empty reply)"
+            out += ["```", reply, "```", ""]
+            bits = []
+            if t["listings"]:
+                bits.append(f"listings: {t['listings']}")
+            if t["emails_sent"]:
+                bits.append(f"emails: {t['emails_sent']}")
+            if t["features"]:
+                bits.append(f"features: {t['features']}")
+            if bits:
+                out += ["<sub>" + " · ".join(bits) + "</sub>", ""]
+            for f in t["failures"]:
+                out += [f"> FAILURE: {f}", ""]
+        out += ["---", ""]
+    path.write_text(chr(10).join(out), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--phase", choices=["1", "2", "3", "4"], help="Only run this phase's scenarios.")
+    parser.add_argument("--phase", choices=["1", "2", "3", "4", "5", "6"],
+                        help="Only run this phase's scenarios (5=email tool calls, 6=axles).")
     parser.add_argument("--category", help="Only run this category's scenarios (e.g. Dump, 'Car Hauler').")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"Backend base URL (default {DEFAULT_BASE_URL}).")
     args = parser.parse_args(argv)
@@ -117,18 +182,25 @@ def main(argv: list[str] | None = None) -> int:
 
     logs_dir = ROOT / "logs"
     logs_dir.mkdir(exist_ok=True)
-    log_path = logs_dir / f"category_pipeline_{dt.datetime.now():%Y%m%d_%H%M%S}.log"
+    stamp = f"{dt.datetime.now():%Y%m%d_%H%M%S}"
+    log_path = logs_dir / f"category_pipeline_{stamp}.log"
+    md_path = logs_dir / f"category_pipeline_{stamp}.md"
 
+    transcript: list[dict[str, Any]] = []
     real_stdout = sys.stdout
     with log_path.open("w", encoding="utf-8") as log_file:
         sys.stdout = _Tee(real_stdout, log_file)
         try:
             print(f"Running {len(scenarios)} scenario(s) against {args.base_url}")
-            passed = run_pipeline(args.base_url, scenarios)
+            passed = run_pipeline(args.base_url, scenarios, transcript)
         finally:
             sys.stdout = real_stdout
 
-    print(f"\n{'ALL PASSED' if passed else 'SOME FAILED'} -- log written to {log_path}")
+    write_markdown(transcript, md_path)
+    print("")
+    print("ALL PASSED" if passed else "SOME FAILED")
+    print(f"  console log : {log_path}")
+    print(f"  transcript  : {md_path}")
     return 0 if passed else 1
 
 
