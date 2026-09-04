@@ -11,6 +11,11 @@ STATE_SCHEMA_VERSION = 1
 
 class SessionState(TypedDict, total=False):
     session_id: str
+    # Mirrors chatbot_conversations.state_version for the turn that produced this
+    # state. _run_turn compares it against the stored row to tell whether this
+    # process is holding a stale copy - the case that matters when more than one
+    # instance serves the same customer.
+    persisted_state_version: int
     lead_id: str | None
     customer_name: str | None
     customer_email: str | None

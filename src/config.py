@@ -89,6 +89,32 @@ class Settings:
     chat_stream_chunk_pause_seconds: float = 0.45
     # Append-only JSONL of per-turn records; scripts/cost_report.py reads it (M9).
     turn_log_path: str = ""
+    # ---- Facebook Messenger ------------------------------------------------
+    # Off unless a page token is configured, so the webhook routes 404 in every
+    # deployment that is not the Messenger one.
+    messenger_enabled: bool = False
+    # Echoed back during Meta's GET verification handshake. Any string you choose.
+    messenger_verify_token: str = ""
+    # App Secret, used to verify the X-Hub-Signature-256 HMAC on every POST. Without
+    # it anyone who learns the URL can put words in the bot's mouth.
+    messenger_app_secret: str = ""
+    # Page Access Token for the Send API.
+    messenger_page_access_token: str = ""
+    messenger_graph_api_version: str = "v21.0"
+    messenger_send_timeout_seconds: float = 15.0
+    # Pause between the bubbles of one reply, so a multi-card answer reads as typing
+    # rather than a dump. Mirrors CHAT_STREAM_CHUNK_PAUSE_SECONDS for the web UI.
+    messenger_chunk_pause_seconds: float = 0.8
+    # How many delivered message ids to remember per process for retry suppression.
+    messenger_seen_mid_cache_size: int = 2048
+    # Messenger dismisses a typing indicator after roughly 20 seconds, and a turn takes
+    # 25-30, so it is refreshed on this interval for as long as the turn runs. Without
+    # that the customer watches typing stop and then nothing happen. 0 disables it.
+    messenger_typing_refresh_seconds: float = 10.0
+    # While a turn runs, the search node publishes the line the web UI shows ("Let me see
+    # what we have on the lot for you."). Sending it turns a 30 s silence into an answer
+    # within a second. 0 disables it; only turns that actually search publish one.
+    messenger_send_search_status: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -149,6 +175,16 @@ class Settings:
             chat_stream_delta_seconds=_float(os.getenv("CHAT_STREAM_DELTA_SECONDS"), 0.035),
             chat_stream_chunk_pause_seconds=_float(os.getenv("CHAT_STREAM_CHUNK_PAUSE_SECONDS"), 0.45),
             turn_log_path=os.getenv("TURN_LOG_PATH", ""),
+            messenger_enabled=_bool(os.getenv("MESSENGER_ENABLED")),
+            messenger_verify_token=os.getenv("MESSENGER_VERIFY_TOKEN", ""),
+            messenger_app_secret=os.getenv("MESSENGER_APP_SECRET", ""),
+            messenger_page_access_token=os.getenv("MESSENGER_PAGE_ACCESS_TOKEN", ""),
+            messenger_graph_api_version=os.getenv("MESSENGER_GRAPH_API_VERSION", "v21.0"),
+            messenger_send_timeout_seconds=_float(os.getenv("MESSENGER_SEND_TIMEOUT_SECONDS"), 15.0),
+            messenger_chunk_pause_seconds=_float(os.getenv("MESSENGER_CHUNK_PAUSE_SECONDS"), 0.8),
+            messenger_seen_mid_cache_size=_int(os.getenv("MESSENGER_SEEN_MID_CACHE_SIZE"), 2048),
+            messenger_typing_refresh_seconds=_float(os.getenv("MESSENGER_TYPING_REFRESH_SECONDS"), 10.0),
+            messenger_send_search_status=_bool(os.getenv("MESSENGER_SEND_SEARCH_STATUS"), True),
         )
 
 

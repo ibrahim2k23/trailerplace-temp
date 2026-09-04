@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import copy
 import json
@@ -57,6 +58,47 @@ class GraphFailure(Exception):
     """A graph run raised or timed out. Contained into a 200 apology, never a 500."""
 
 
+class TurnSuperseded(Exception):
+    """The customer said more while we were answering, so this turn is thrown away.
+
+    Raised INSIDE durable_turn, which is the whole point: everything the turn wrote -
+    the state snapshot, the conversation, the turn receipt, and the queued alert emails -
+    is in that one transaction, so the rollback erases all of it. The caller then reruns
+    the turn with the new messages appended, and only THAT reply reaches the customer.
+    """
+
+
+# Set by a channel that can tell when a customer has said more mid-turn (the Messenger
+# webhook). A contextvar rather than a request field because it is a callable, and
+# because it must not appear on the public /chat contract.
+_ABANDON_CHECK: contextvars.ContextVar = contextvars.ContextVar("turn_abandon_check", default=None)
+
+
+@contextlib.contextmanager
+def abandon_turn_if(predicate):
+    """Run the turn inside this to have it discarded when `predicate()` becomes true.
+
+    Pass None to disable - which is how the caller stops retrying and lets an answer
+    through after the customer has interrupted too many times.
+    """
+    token = _ABANDON_CHECK.set(predicate)
+    try:
+        yield
+    finally:
+        _ABANDON_CHECK.reset(token)
+
+
+def _turn_was_superseded() -> bool:
+    check = _ABANDON_CHECK.get()
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:  # noqa: BLE001 - a failed check must not lose the customer's reply
+        logger.exception("abandon check failed; keeping the reply")
+        return False
+
+
 def set_graph_client(client: LLMClient) -> None:
     global _GRAPH
     _GRAPH = build_graph(client)
@@ -84,6 +126,22 @@ def _require_uuid(value: str, field: str) -> uuid.UUID:
         return uuid.UUID(str(value))
     except (ValueError, AttributeError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"{field} must be a UUID") from exc
+
+
+def _require_session_id(value: str) -> str:
+    """Session ids are NOT required to be UUIDs — Messenger's are PSIDs.
+
+    Streamlit sends a uuid4; Messenger sends "9876543210987654". Both are legal here
+    because conversation_store.as_session_uuid maps whatever arrives onto the UUID the
+    tables are keyed by, while chatbot_leads.psid keeps the raw value. The only real
+    constraint is the length of that psid column.
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="session_id must not be empty")
+    if len(text) > 255:
+        raise HTTPException(status_code=422, detail="session_id must be at most 255 characters")
+    return text
 
 
 def _error_response(session_id: str) -> dict[str, Any]:
@@ -116,7 +174,7 @@ def health(response: Response) -> dict[str, object]:
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
-    _require_uuid(request.session_id, "session_id")
+    _require_session_id(request.session_id)
     turn_id = request.turn_id or str(uuid.uuid4())
     _require_uuid(turn_id, "turn_id")
 
@@ -246,7 +304,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         raise HTTPException(status_code=404, detail="Streaming is disabled")
     # Both ids are validated HERE rather than inside the generator: once the first byte is
     # written the status code can no longer be changed, so a malformed id must still 422.
-    _require_uuid(request.session_id, "session_id")
+    _require_session_id(request.session_id)
     turn_id = request.turn_id or str(uuid.uuid4())
     _require_uuid(turn_id, "turn_id")
     request = request.model_copy(update={"turn_id": turn_id})
@@ -308,13 +366,50 @@ def _log_turn(
     )
 
 
+def _restore_session(session_id: str, pre_turn: dict | None) -> None:
+    """Put the in-memory session back exactly as the discarded turn found it."""
+    if pre_turn is None:
+        _sessions.pop(session_id, None)
+    else:
+        _sessions[session_id] = pre_turn
+
+
 def _run_turn(request: ChatRequest, turn_id: str) -> ChatResponse:
     if not conversation_store.persistence_enabled():
-        return ChatResponse(**_handle_chat_in_memory(request))
+        # No transaction to roll back, so the in-memory state is restored by hand. The
+        # copy is taken before the graph runs because the graph mutates it in place.
+        pre_turn = copy.deepcopy(_sessions.get(request.session_id))
+        body = _handle_chat_in_memory(request)
+        if _turn_was_superseded():
+            _restore_session(request.session_id, pre_turn)
+            raise TurnSuperseded(request.session_id)
+        return ChatResponse(**body)
     with conversation_store.durable_turn(request.session_id, turn_id, request.message) as (db_session, row, receipt):
         if receipt:
             return ChatResponse(**receipt.response)
-        if request.session_id not in _sessions and row and row.state_snapshot:
+        # Reload whenever the DATABASE is ahead of this process, not merely when this
+        # process has never seen the session.
+        #
+        # The old check was `session_id not in _sessions`, which is only correct on one
+        # instance. Run two, and turns alternate: instance A answers turn 1 and caches the
+        # state, B answers turn 2 (cache empty, so it loads the snapshot correctly and
+        # writes turn 2), then turn 3 lands back on A - which still HAS the session in
+        # memory, skips the reload, and answers from state frozen before turn 2 existed.
+        # The customer watches the bot forget an answer it already acknowledged.
+        #
+        # row.state_version is the fencing token: it is incremented on every committed
+        # turn below, and stamped into the state so the two are comparable. row itself was
+        # read AFTER durable_turn took the advisory lock, so it cannot be stale here.
+        stored_version = int(getattr(row, "state_version", 0) or 0) if row else 0
+        cached = _sessions.get(request.session_id)
+        cached_version = int((cached or {}).get("persisted_state_version") or 0)
+        if row and row.state_snapshot and (cached is None or cached_version < stored_version):
+            if cached is not None:
+                logger.info(
+                    "session %s reloaded: this process was %d turn(s) behind",
+                    request.session_id,
+                    stored_version - cached_version,
+                )
             _sessions[request.session_id] = from_snapshot(row.state_snapshot)
         lead_id = conversation_store.create_or_get_soft_lead(
             session_id=request.session_id,
@@ -325,18 +420,33 @@ def _run_turn(request: ChatRequest, turn_id: str) -> ChatResponse:
         state = _get_session(request.session_id)
         if lead_id:
             state["lead_id"] = lead_id
+        # Taken before the graph runs: the graph mutates the session dict in place, and
+        # the database rollback below cannot undo that.
+        pre_turn = copy.deepcopy(_sessions.get(request.session_id))
         body = _handle_chat_in_memory(request)
+        if _turn_was_superseded():
+            # Leaving durable_turn by exception rolls the transaction back, so this turn
+            # leaves nothing behind: no snapshot, no receipt, and no queued email. The
+            # outbox drain is called only after a successful commit, further down.
+            _restore_session(request.session_id, pre_turn)
+            logger.info("turn superseded by a newer message | session=%s", request.session_id)
+            raise TurnSuperseded(request.session_id)
         # Persist snapshot + receipt only when a lead row backs the FK; without
         # one we cannot write a conversation/turn row, so degrade gracefully.
         lead_uuid = state.get("lead_id")
         if lead_uuid:
-            sid = uuid.UUID(request.session_id)
+            sid = conversation_store.as_session_uuid(request.session_id)
             if row is None:
                 row = ChatbotConversation(session_id=sid, lead_id=uuid.UUID(lead_uuid), conversation=[])
                 db_session.add(row)
                 # The turn and outbox rows below reference this session_id. Land the parent
                 # first so their INSERTs can never race ahead of it inside one flush.
                 db_session.flush()
+            # Stamp the version this turn is about to become BEFORE snapshotting, so the
+            # snapshot carries it and the comparison above works on the next turn -
+            # whichever instance handles it.
+            next_version = int(row.state_version or 0) + 1
+            _get_session(request.session_id)["persisted_state_version"] = next_version
             snapshot = to_snapshot(_get_session(request.session_id))
             row.state_snapshot = copy.deepcopy(snapshot)
             row.state_schema_version = snapshot["state_schema_version"]
@@ -344,7 +454,7 @@ def _run_turn(request: ChatRequest, turn_id: str) -> ChatResponse:
                 row.conversation,
                 conversation_store._messages_to_conversation(snapshot.get("messages", [])),
             )
-            row.state_version = int(row.state_version or 0) + 1
+            row.state_version = next_version
             db_session.add(ChatbotTurn(session_id=sid, turn_id=uuid.UUID(turn_id), request_message=request.message, response=body))
             # Queue gate-approved email events + upgrade the lead, all inside the
             # durable transaction (M7 step 3). The post-commit drain sends them.

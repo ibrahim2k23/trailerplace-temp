@@ -1,0 +1,408 @@
+[
+ {
+  "md": 343,
+  "scenario": "car-hauler-phase1-full-qna",
+  "msg": "expect_state.category: expected 'Car Hauler', got 'Enclosed'",
+  "log": 239,
+  "bucket": "A. category flipped / not set"
+ },
+ {
+  "md": 345,
+  "scenario": "car-hauler-phase1-full-qna",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 240,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 347,
+  "scenario": "car-hauler-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 241,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 382,
+  "scenario": "diesel-tank-phase1-full-qna",
+  "msg": "expect_state.category: expected 'Diesel Tank', got None",
+  "log": 258,
+  "bucket": "A. category flipped / not set"
+ },
+ {
+  "md": 450,
+  "scenario": "diesel-tank-phase1-full-qna",
+  "msg": "expect_state.category: expected 'Diesel Tank', got None",
+  "log": 297,
+  "bucket": "A. category flipped / not set"
+ },
+ {
+  "md": 452,
+  "scenario": "diesel-tank-phase1-full-qna",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 298,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 454,
+  "scenario": "diesel-tank-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 299,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 779,
+  "scenario": "enclosed-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 552,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 848,
+  "scenario": "equipment-phase1-full-qna",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 578,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 850,
+  "scenario": "equipment-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 579,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 998,
+  "scenario": "fiber-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 692,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 1422,
+  "scenario": "race-trailer-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1017,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 1521,
+  "scenario": "roll-off-phase1-full-qna",
+  "msg": "expect_state.category: expected 'Roll Off', got 'Flatbed'",
+  "log": 1075,
+  "bucket": "A. category flipped / not set"
+ },
+ {
+  "md": 1523,
+  "scenario": "roll-off-phase1-full-qna",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1076,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 1525,
+  "scenario": "roll-off-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1077,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 1578,
+  "scenario": "tilt-phase1-full-qna",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1097,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 1580,
+  "scenario": "tilt-phase1-full-qna",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1098,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2024,
+  "scenario": "diesel-tank-phase2-prefilled",
+  "msg": "expect_state.category: expected 'Diesel Tank', got None",
+  "log": 1459,
+  "bucket": "A. category flipped / not set"
+ },
+ {
+  "md": 2026,
+  "scenario": "diesel-tank-phase2-prefilled",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1460,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2028,
+  "scenario": "diesel-tank-phase2-prefilled",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1461,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2149,
+  "scenario": "enclosed-phase2-prefilled",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1548,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2151,
+  "scenario": "enclosed-phase2-prefilled",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1549,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2182,
+  "scenario": "equipment-phase2-prefilled",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1562,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2184,
+  "scenario": "equipment-phase2-prefilled",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1563,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2498,
+  "scenario": "race-trailer-phase2-prefilled",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1811,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2500,
+  "scenario": "race-trailer-phase2-prefilled",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1812,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2530,
+  "scenario": "roll-off-phase2-prefilled",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1824,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2532,
+  "scenario": "roll-off-phase2-prefilled",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1825,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2561,
+  "scenario": "tilt-phase2-prefilled",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 1836,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2563,
+  "scenario": "tilt-phase2-prefilled",
+  "msg": "expect_listings: expected True, got False",
+  "log": 1837,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2832,
+  "scenario": "aluminum-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'sleeping_need' not in skipped_slots=[]",
+  "log": 2057,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 2962,
+  "scenario": "car-hauler-phase3-declines-and-no-preference",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 2148,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 2964,
+  "scenario": "car-hauler-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2149,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 2999,
+  "scenario": "diesel-tank-phase3-declines-and-no-preference",
+  "msg": "expect_state.category: expected 'Diesel Tank', got None",
+  "log": 2166,
+  "bucket": "A. category flipped / not set"
+ },
+ {
+  "md": 3057,
+  "scenario": "diesel-tank-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'deck_style' not in skipped_slots=[]",
+  "log": 2204,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 3083,
+  "scenario": "diesel-tank-phase3-declines-and-no-preference",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 2224,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 3085,
+  "scenario": "diesel-tank-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2225,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 3203,
+  "scenario": "dump-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'dump_mechanism' not in skipped_slots=[]",
+  "log": 2311,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 3205,
+  "scenario": "dump-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2312,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 3326,
+  "scenario": "enclosed-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'ac_windows_cabinets' not in skipped_slots=[]",
+  "log": 2401,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 3338,
+  "scenario": "enclosed-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2405,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 3399,
+  "scenario": "equipment-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'haul_length_ft' not in skipped_slots=['haul_weight_lbs']",
+  "log": 2435,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 3591,
+  "scenario": "fiber-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'fiber_amenities' not in skipped_slots=[]",
+  "log": 2583,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 3593,
+  "scenario": "fiber-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2584,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 3777,
+  "scenario": "flatbed-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'deck_style' not in skipped_slots=[]",
+  "log": 2735,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 3990,
+  "scenario": "livestock-phase3-declines-and-no-preference",
+  "msg": "expect_state.slot:gate_preferences: expected None, got 'no preference'",
+  "log": 2914,
+  "bucket": "B. 'no preference' stored as text"
+ },
+ {
+  "md": 4041,
+  "scenario": "race-trailer-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'race_amenities' not in skipped_slots=['haul_weight_lbs']",
+  "log": 2934,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 4043,
+  "scenario": "race-trailer-phase3-declines-and-no-preference",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 2935,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 4045,
+  "scenario": "race-trailer-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2936,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 4134,
+  "scenario": "roll-off-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'deck_style' not in skipped_slots=[]",
+  "log": 2989,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 4146,
+  "scenario": "roll-off-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 2993,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 4197,
+  "scenario": "tilt-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'tilt_style' not in skipped_slots=['haul_weight_lbs']",
+  "log": 3013,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 4199,
+  "scenario": "tilt-phase3-declines-and-no-preference",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 3014,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 4201,
+  "scenario": "tilt-phase3-declines-and-no-preference",
+  "msg": "expect_listings: expected True, got False",
+  "log": 3015,
+  "bucket": "E. listings missing"
+ },
+ {
+  "md": 4450,
+  "scenario": "utility-phase3-declines-and-no-preference",
+  "msg": "expect_state.skipped_slots_contains: 'trailer_size' not in skipped_slots=[]",
+  "log": 3230,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 4658,
+  "scenario": "phase4-multi-category-switch-mixed",
+  "msg": "expect_state.skipped_slots_contains: 'haul_length_ft' not in skipped_slots=['item_or_trailer_width_ft']",
+  "log": 3395,
+  "bucket": "C. decline not recorded as skipped"
+ },
+ {
+  "md": 4668,
+  "scenario": "phase4-multi-category-switch-mixed",
+  "msg": "expect_state.qualification_complete: expected True, got False",
+  "log": 3399,
+  "bucket": "D. qualification not complete"
+ },
+ {
+  "md": 4670,
+  "scenario": "phase4-multi-category-switch-mixed",
+  "msg": "expect_listings: expected True, got False",
+  "log": 3400,
+  "bucket": "E. listings missing"
+ }
+]

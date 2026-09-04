@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from src import conversation_store, db, tracing
 from src.api import readiness
+from src.api.messenger import router as messenger_router
 from src.api.routes import ensure_graph, router
 from src.config import settings
 from src.domain.brands import load_make_inventory
@@ -94,6 +95,10 @@ def create_app() -> FastAPI:
     configure_trailerplace_logging()
     app = FastAPI(title="TrailerPlace Chatbot API", lifespan=lifespan)
     app.include_router(router)
+    # Always mounted; both routes 404 themselves unless MESSENGER_ENABLED is set and the
+    # app secret + page token are configured. Mounting conditionally would mean a config
+    # change could not be picked up without editing code.
+    app.include_router(messenger_router)
     # Wire the transactional-outbox drain to the email sender (M7).
     conversation_store.register_default_outbox_handlers()
     return app

@@ -8,10 +8,18 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sqlalchemy import func, select
+from sqlalchemy import true as sa_true
+from sqlalchemy.exc import IntegrityError
 
 from src import db
 from src.config import settings
-from src.db_models import ChatbotConversation, ChatbotLead, ChatbotOutbox, ChatbotTurn
+from src.db_models import (
+    ChatbotConversation,
+    ChatbotInboundMessage,
+    ChatbotLead,
+    ChatbotOutbox,
+    ChatbotTurn,
+)
 
 logger = logging.getLogger(__name__)
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat_persist")
@@ -49,8 +57,34 @@ def register_default_outbox_handlers() -> None:
         register_outbox_handler(event_type, _handler)
 
 
-def _as_uuid(value: str | uuid.UUID) -> uuid.UUID:
-    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+# Fixed for the life of the deployment. Regenerating it would remap every PSID and
+# orphan every stored Messenger conversation, so it is a literal - never computed.
+SESSION_ID_NAMESPACE = uuid.UUID("e893cdad-ec15-5fbd-80ae-7ef40a19fa55")
+
+
+def as_session_uuid(value: str | uuid.UUID) -> uuid.UUID:
+    """Coerce a session or turn id to the UUID the chatbot_* tables are keyed by.
+
+    Streamlit sends a uuid4 string, so it round-trips unchanged and existing rows keep
+    their ids. Messenger sends a PSID ("9876543210987654"), which is not a UUID and
+    would otherwise raise inside durable_turn on the customer's very first message.
+    uuid5 maps it to a stable UUID - the same PSID always yields the same one, which is
+    what lets a conversation survive a serverless cold start.
+
+    The raw PSID is NOT lost: create_or_get_soft_lead stores it verbatim in
+    chatbot_leads.psid, because this coercion sits below the lead layer.
+    """
+    if isinstance(value, uuid.UUID):
+        return value
+    text = str(value)
+    try:
+        return uuid.UUID(text)
+    except (ValueError, AttributeError, TypeError):
+        return uuid.uuid5(SESSION_ID_NAMESPACE, text)
+
+
+# Kept as the old private name so existing call sites in this module stay valid.
+_as_uuid = as_session_uuid
 
 
 def _session():
@@ -258,6 +292,28 @@ def durable_turn(session_id: str, turn_id: str | uuid.UUID, request_message: str
             raise
 
 
+def turn_already_handled(session_id: str | uuid.UUID, turn_id: str | uuid.UUID) -> bool:
+    """Has this exact turn already been answered and committed?
+
+    The Messenger webhook asks this before it does any work. durable_turn's own receipt
+    check would also catch a replay, but it returns the stored reply - and the webhook
+    would then SEND that reply to the customer a second time. Here the answer is used to
+    skip the delivery entirely.
+
+    Unlike the in-process seen-mid cache this survives a restart, which is the case that
+    matters: a serverless container that dies mid-turn takes its cache with it, and Meta
+    redelivers to a cold one.
+    """
+    if not persistence_enabled():
+        return False
+    try:
+        with _session() as session:
+            return session.get(ChatbotTurn, (_as_uuid(session_id), _as_uuid(turn_id))) is not None
+    except Exception:  # noqa: BLE001 - a dedupe check must never drop a customer message
+        logger.exception("turn_already_handled check failed for session %s", session_id)
+        return False
+
+
 def enqueue_outbox_event(session, *, session_id: str | uuid.UUID, turn_id: str | uuid.UUID, event_key: str, event_type: str, payload: dict[str, Any]) -> ChatbotOutbox:
     event = ChatbotOutbox(
         session_id=_as_uuid(session_id),
@@ -425,3 +481,173 @@ def enqueue_save_user_feedback(session_id: str, turn_idx: int, text: str, timest
             logger.exception("Background feedback persistence failed")
 
     _pool.submit(_run)
+
+
+# ---------------------------------------------------------------------------
+# Inbound message queue (shared ordering across instances)
+# ---------------------------------------------------------------------------
+# A per-process queue can only order the messages one process happened to receive.
+# Behind a load balancer a customer's two messages can land on two instances, and
+# nothing decides which is answered first. These functions make the ordering shared:
+# the webhook records every message, and the instance holding the per-customer drain
+# lock answers them oldest first, by the timestamp Facebook assigned.
+
+# Deliberately NOT the key durable_turn locks on. That one is an xact lock taken on the
+# turn's own connection; the drain lock is held on a different connection for the whole
+# drain, so sharing a key would have the drain block on itself the moment a turn started.
+_DRAIN_LOCK_PREFIX = "inbound-drain:"
+
+
+def record_inbound_message(
+    *,
+    session_id: str,
+    external_id: str,
+    body: str,
+    sent_at: datetime,
+    channel: str = "messenger",
+) -> bool:
+    """Record a customer message. False if this exact delivery was already recorded.
+
+    The duplicate answer comes from the unique constraint on (channel, external_id)
+    rather than a read-then-write, so two instances handed the same retry cannot both
+    conclude it is new.
+    """
+    if not persistence_enabled():
+        return True
+    with _session() as session:
+        session.add(ChatbotInboundMessage(
+            channel=channel,
+            session_id=session_id,
+            external_id=external_id,
+            body=body,
+            sent_at=sent_at,
+        ))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return False
+    return True
+
+
+@contextmanager
+def inbound_drain_lock(session_id: str):
+    """Hold the exclusive right to answer this customer's messages, across all instances.
+
+    Yields False rather than waiting when another instance already holds it: that
+    instance drains until the queue is empty, so it will pick up whatever we just
+    recorded. Blocking here would only pile up threads waiting to do nothing.
+
+    A session-level lock, not an xact one, because it has to span several transactions -
+    one per turn. Released in the finally, and by Postgres itself if the process dies.
+    """
+    if not persistence_enabled():
+        yield True
+        return
+    key = func.hashtext(f"{_DRAIN_LOCK_PREFIX}{session_id}")
+    with _session() as session:
+        acquired = bool(session.execute(select(func.pg_try_advisory_lock(key))).scalar())
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    session.execute(select(func.pg_advisory_unlock(key)))
+                    session.commit()
+                except Exception:  # noqa: BLE001 - the lock dies with the connection anyway
+                    logger.exception("failed to release inbound drain lock for %s", session_id)
+
+
+def pending_inbound_batch(session_id: str, channel: str = "messenger") -> list[dict[str, Any]]:
+    """Every unanswered message from this customer, oldest first.
+
+    A BATCH rather than one message: messages sent while we were busy are answered
+    together, as a single combined turn, so the customer gets one reply that read all of
+    them instead of one reply per message that each ignore the others.
+
+    Ordered by sent_at - when the customer pressed send - not created_at, which only
+    records when the delivery reached us.
+    """
+    if not persistence_enabled():
+        return []
+    with _session() as session:
+        rows = session.execute(
+            select(ChatbotInboundMessage)
+            .where(
+                ChatbotInboundMessage.session_id == session_id,
+                ChatbotInboundMessage.channel == channel,
+                ChatbotInboundMessage.status == "pending",
+            )
+            .order_by(ChatbotInboundMessage.sent_at, ChatbotInboundMessage.created_at)
+        ).scalars().all()
+        return [
+            {
+                "message_id": row.message_id,
+                "session_id": row.session_id,
+                "external_id": row.external_id,
+                "body": row.body,
+                "sent_at": row.sent_at,
+            }
+            for row in rows
+        ]
+
+
+def has_inbound_beyond(session_id: str, known_ids, channel: str = "messenger") -> bool:
+    """Has the customer sent anything we were NOT already answering?
+
+    This is the question the running turn asks itself before it commits. True means the
+    reply being prepared is already out of date and the turn should be discarded.
+    """
+    if not persistence_enabled():
+        return False
+    with _session() as session:
+        return session.execute(
+            select(ChatbotInboundMessage.message_id)
+            .where(
+                ChatbotInboundMessage.session_id == session_id,
+                ChatbotInboundMessage.channel == channel,
+                ChatbotInboundMessage.status == "pending",
+                ChatbotInboundMessage.message_id.notin_(list(known_ids)) if known_ids else sa_true(),
+            )
+            .limit(1)
+        ).first() is not None
+
+
+def mark_inbound_answered(message_ids, *, turn_id=None, error: str | None = None) -> None:
+    """Close off every message the answered turn covered, in one transaction.
+
+    A failure is marked answered WITH the error, not left pending: a message that cannot
+    be answered would otherwise sit at the head of the queue and block every later
+    message from that customer forever.
+    """
+    if not persistence_enabled():
+        return
+    ids = list(message_ids)
+    if not ids:
+        return
+    with _session() as session:
+        for message_id in ids:
+            row = session.get(ChatbotInboundMessage, message_id)
+            if row is None:
+                continue
+            row.status = "done"
+            row.answered_at = datetime.now(timezone.utc)
+            if turn_id is not None:
+                row.turn_id = _as_uuid(turn_id)
+            if error:
+                row.last_error = error[:2000]
+        session.commit()
+
+
+def has_pending_inbound(session_id: str, channel: str = "messenger") -> bool:
+    """Used after the drain lock is released, to catch a message that arrived in the gap."""
+    if not persistence_enabled():
+        return False
+    with _session() as session:
+        return session.execute(
+            select(ChatbotInboundMessage.message_id).where(
+                ChatbotInboundMessage.session_id == session_id,
+                ChatbotInboundMessage.channel == channel,
+                ChatbotInboundMessage.status == "pending",
+            ).limit(1)
+        ).first() is not None

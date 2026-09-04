@@ -179,6 +179,49 @@ class TrailerListingRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class ChatbotInboundMessage(Base):
+    """Every customer message, recorded before it is answered.
+
+    Exists for ORDER. The webhook can be hit on any instance behind the load balancer,
+    so a per-process queue cannot promise that a customer's second message is answered
+    after their first. This table is the shared queue: the webhook writes the message
+    here, and whichever instance holds the per-customer advisory lock drains it oldest
+    first, by the timestamp FACEBOOK assigned - which is the customer's true send order,
+    whatever order the deliveries reached us in.
+
+    It doubles as the durable inbox: a message recorded but not yet answered when a
+    container dies is picked up by the next drain rather than lost.
+    """
+
+    __tablename__ = "chatbot_inbound_messages"
+    __table_args__ = (
+        # The idempotency key. Meta reuses `mid` on every retry, so a duplicate delivery
+        # collides here and is discarded before any work is done.
+        UniqueConstraint("channel", "external_id", name="uq_chatbot_inbound_external_id"),
+        # Covers the drain's only query: oldest unanswered message for one customer.
+        Index("ix_chatbot_inbound_pending", "session_id", "status", "sent_at"),
+    )
+
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, default="messenger", server_default="messenger")
+    # The raw channel identity - a Messenger PSID. NOT the UUID the chatbot_* tables are
+    # keyed by; conversation_store.as_session_uuid derives that from this.
+    session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Meta's `mid`, or a synthesised id for events that carry none (postbacks).
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Assigned by Facebook when the customer pressed send. Ordering key, in preference to
+    # created_at, which only records when the delivery happened to reach us.
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    # pending -> done. A message that failed is marked done with last_error set: retrying
+    # it forever would block every later message from the same customer.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ChatbotOutbox(Base):
     __tablename__ = "chatbot_outbox"
     __table_args__ = (UniqueConstraint("session_id", "turn_id", "event_key", name="uq_chatbot_outbox_event"),)
