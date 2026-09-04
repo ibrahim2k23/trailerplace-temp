@@ -43,7 +43,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from src import conversation_store, turn_status
 from src.api.schemas import ChatRequest
 from src.config import settings
-from src.domain.reply_chunks import split_reply_into_chunks
+from src.domain.reply_chunks import parse_listing_card, split_reply_into_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -389,13 +389,32 @@ def _handle_message(psid: str, text: str, turn_id: str) -> None:
     # the same split the web UI streams. reply_chunks guarantees a non-empty list for
     # non-empty text, so the `or [reply]` only covers a reply that was empty anyway.
     chunks = split_reply_into_chunks(reply) or [reply]
-    for index, chunk in enumerate(chunks):
+    bubbles = [bubble for chunk in chunks for bubble in _bubbles_for_chunk(chunk)]
+    for index, bubble in enumerate(bubbles):
         if index:
             time.sleep(max(0.0, settings.messenger_chunk_pause_seconds))
-        for part in _split_for_messenger(chunk):
+        for part in _split_for_messenger(bubble):
             _send_text(psid, part)
     # The answer has landed, so the next question starts with a clean slate.
     _clear_status_line(psid)
+
+
+def _bubbles_for_chunk(chunk: str) -> list[str]:
+    """One chunk -> the bubbles it is sent as. A listing card becomes three.
+
+    Messenger renders no markdown: "[title](url)" would arrive as those literal characters,
+    so the card is taken apart instead - the numbered title, then the bare URL (which
+    Messenger turns into a tappable preview of the trailer), then the spec bullets. Anything
+    that is not a card - the intro, the closing question - is one bubble, unchanged.
+    """
+    card = parse_listing_card(chunk)
+    if not card:
+        return [chunk]
+    marker, title, url, body = card
+    bubbles = [f"{marker} {title}".strip() if marker else title, url]
+    if body:
+        bubbles.append(body)
+    return bubbles
 
 
 def _split_for_messenger(text: str) -> list[str]:

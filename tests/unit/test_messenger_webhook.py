@@ -303,3 +303,61 @@ def test_a_multi_card_reply_is_sent_as_several_bubbles(configured, monkeypatch):
     messenger._handle_message("PSID", "show me gooseneck trailers", messenger._turn_id_for("m.1"))
     assert len(sent) > 1
     assert "".join(sent).count("Big Tex") == 1
+
+
+# ---------------------------------------------------------------------------
+# A listing card arrives as three bubbles
+# ---------------------------------------------------------------------------
+
+_CARD = (
+    "1. [2026 Galyean CATTLE TRAILER 32' - 15079](https://trailerplace.com/inventory/galyean/)\n"
+    "   - Category: Livestock\n   - Price: $32,250"
+)
+
+
+def test_a_card_becomes_title_then_url_then_specs():
+    assert messenger._bubbles_for_chunk(_CARD) == [
+        "1. 2026 Galyean CATTLE TRAILER 32' - 15079",
+        "https://trailerplace.com/inventory/galyean/",
+        "- Category: Livestock\n- Price: $32,250",
+    ]
+
+
+def test_no_bubble_carries_markdown_link_syntax():
+    assert not any("](" in bubble for bubble in messenger._bubbles_for_chunk(_CARD))
+
+
+def test_a_card_with_no_specs_is_two_bubbles():
+    bubbles = messenger._bubbles_for_chunk("1. [2025 Iron Bull DTB](https://x.test/a/)")
+    assert bubbles == ["1. 2025 Iron Bull DTB", "https://x.test/a/"]
+
+
+def test_prose_stays_a_single_bubble():
+    assert messenger._bubbles_for_chunk("Thank you for contacting TrailerPlace.") == \
+        ["Thank you for contacting TrailerPlace."]
+
+
+def test_the_reply_is_sent_card_by_card_in_order(configured, monkeypatch):
+    reply = (
+        "Here are two that fit.\n\n"
+        + _CARD
+        + "\n\n2. [2025 Iron Bull DTB - 15081](https://trailerplace.com/inventory/dtb/)\n"
+        "   - Category: Dump\n   - Price: $9,995\n\n"
+        "Do any of these look like a fit?"
+    )
+    sent = []
+    monkeypatch.setattr("src.api.routes.chat", lambda r: _FakeResponse(reply))
+    monkeypatch.setattr(messenger, "_send", lambda p: sent.append(p["message"]["text"]) if "message" in p else None)
+    monkeypatch.setattr(messenger.conversation_store, "turn_already_handled", lambda *a: False)
+    monkeypatch.setattr(messenger.time, "sleep", lambda *_: None)
+    messenger._handle_message("PSID", "show me livestock trailers", messenger._turn_id_for("m.1"))
+    assert sent == [
+        "Here are two that fit.",
+        "1. 2026 Galyean CATTLE TRAILER 32' - 15079",
+        "https://trailerplace.com/inventory/galyean/",
+        "- Category: Livestock\n- Price: $32,250",
+        "2. 2025 Iron Bull DTB - 15081",
+        "https://trailerplace.com/inventory/dtb/",
+        "- Category: Dump\n- Price: $9,995",
+        "Do any of these look like a fit?",
+    ]

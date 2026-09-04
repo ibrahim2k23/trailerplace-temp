@@ -1,7 +1,7 @@
 """The reply -> message-bubbles split that the streaming UI sends a turn in."""
 from __future__ import annotations
 
-from src.domain.reply_chunks import split_reply_into_chunks, urls_in_chunk
+from src.domain.reply_chunks import parse_listing_card, split_reply_into_chunks, urls_in_chunk
 
 LISTING_REPLY = """Here are some options for livestock trailers, including those around 20 ft:
 
@@ -90,3 +90,42 @@ def test_urls_in_chunk_finds_the_listing_link():
     chunks = split_reply_into_chunks(LISTING_REPLY)
     assert urls_in_chunk(chunks[1]) == ["https://trailerplace.com/a"]
     assert urls_in_chunk(chunks[0]) == []
+
+
+# ---------------------------------------------------------------------------
+# Taking a card apart, for channels with no markdown
+# ---------------------------------------------------------------------------
+
+
+def test_a_card_splits_into_marker_title_url_and_body():
+    card = (
+        "1. [2026 Galyean CATTLE TRAILER 32' - 15079](https://trailerplace.com/inventory/galyean/)\n"
+        "   - Category: Livestock\n   - Price: $32,250"
+    )
+    marker, title, url, body = parse_listing_card(card)
+    assert marker == "1."
+    assert title == "2026 Galyean CATTLE TRAILER 32' - 15079"
+    assert url == "https://trailerplace.com/inventory/galyean/"
+    assert body == "- Category: Livestock\n- Price: $32,250"
+
+
+def test_a_bold_wrapped_title_still_parses():
+    marker, title, url, _ = parse_listing_card("**2. [2025 Iron Bull DTB - 15081](https://x.test/a/)**")
+    assert (marker, title, url) == ("2.", "2025 Iron Bull DTB - 15081", "https://x.test/a/")
+
+
+def test_a_card_with_no_number_keeps_an_empty_marker():
+    marker, title, _, _ = parse_listing_card("[2025 Iron Bull DTB](https://x.test/a/)")
+    assert marker == "" and title == "2025 Iron Bull DTB"
+
+
+def test_prose_is_not_a_card():
+    assert parse_listing_card("Thank you for contacting TrailerPlace.") is None
+
+
+def test_a_bullet_linking_out_is_not_a_card():
+    assert parse_listing_card("- [our website](https://trailerplace.com)") is None
+
+
+def test_an_empty_chunk_is_not_a_card():
+    assert parse_listing_card("   ") is None

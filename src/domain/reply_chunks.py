@@ -26,7 +26,7 @@ import re
 # A card's first line: an optional "1." / "1)" marker, optional bold/italic wrappers, then a
 # markdown link. A bullet ("- [foo](url)") is deliberately NOT a card start - bullets are card
 # BODY, and treating one as a start would cut a card in half.
-_CARD_START_RE = re.compile(r"^(?:\d+[.)]\s*)?[*_]{0,2}\[[^\]]+\]\(\s*https?://[^)\s]+", re.IGNORECASE)
+_CARD_START_RE = re.compile(r"^[*_]{0,2}(?:\d+[.)]\s*)?[*_]{0,2}\[[^\]]+\]\(\s*https?://[^)\s]+", re.IGNORECASE)
 _BULLET_RE = re.compile(r"^[-*+\u2022]\s")
 
 
@@ -90,3 +90,28 @@ _URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
 def urls_in_chunk(chunk: str) -> list[str]:
     """Every listing URL a chunk links to, so the UI can put that trailer's card under it."""
     return _URL_RE.findall(str(chunk or ""))
+
+
+# A card's title line, taken apart: the "1." marker, the linked title, and the URL it opens.
+# Same shape _CARD_START_RE matches, anchored at both ends so a line carrying anything else
+# is left alone rather than half-parsed.
+_CARD_TITLE_RE = re.compile(
+    r"^[*_]{0,2}(?P<marker>\d+[.)])?\s*[*_]{0,2}\[(?P<title>[^\]]+)\]\(\s*(?P<url>https?://[^)\s]+)\s*\)[*_]{0,2}\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_listing_card(chunk: str):
+    """Split one card chunk into (marker, title, url, body) - or None if it is not a card.
+
+    Channels that cannot render a markdown hyperlink need the three pieces separately;
+    everything that can render one keeps using the chunk as it stands.
+    """
+    lines = str(chunk or "").strip().split("\n")
+    if not lines:
+        return None
+    match = _CARD_TITLE_RE.match(lines[0].strip())
+    if not match:
+        return None
+    body = "\n".join(line.strip() for line in lines[1:]).strip()
+    return match.group("marker") or "", match.group("title").strip(), match.group("url"), body
