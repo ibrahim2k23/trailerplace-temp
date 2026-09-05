@@ -438,6 +438,8 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     raw_condition = col("condition")
     title = col("title")
     url = col("url")
+    # Written by the scraper as the first gallery image, already absolute.
+    image_url = col("image_url", "image url") or None
 
     condition = normalize_condition(raw_condition)
     category = normalize_category(raw_category)
@@ -534,8 +536,15 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
     evidence_text = build_flattened_evidence_text(
         evidence_info, title, features
     )
+    # Hashed, but deliberately not in evidence_info above: a URL is not evidence
+    # the feature reranker can use, yet it must still reach the hash. Without it
+    # every existing row keeps its old hash when the image column is first
+    # populated, and an incremental re-ingest skips the lot - the same trap the
+    # axle columns hit.
     content_hash = canonical_content_hash(
-        evidence_info, title, features
+        {**evidence_info, "image_url": image_url} if image_url else evidence_info,
+        title,
+        features,
     )
 
     sub_norm = normalize_subcategory(raw_subcategory)
@@ -550,6 +559,7 @@ def build_record(row: pd.Series, row_idx: int) -> dict:
         "stock_number": col("stock_number") or None,
         "title": title or None,
         "url": url or None,
+        "image_url": image_url,
         "condition": condition,
         "category": category,
         "subcategory": subcategory,

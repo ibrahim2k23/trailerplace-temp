@@ -118,6 +118,10 @@ class TrailerListingRow(Base):
     stock_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The listing's lead photo, absolute. Messenger renders no link preview for a
+    # URL a bot sends, so a card has to be built from parts and needs the picture
+    # handed to it. Nullable like the rest: not every listing has one.
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     condition: Mapped[str | None] = mapped_column(String(64), nullable=True)
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)

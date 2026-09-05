@@ -226,3 +226,39 @@ def test_the_scrapers_total_is_used_when_the_workbook_carries_one():
 def test_an_older_workbook_without_the_column_still_gets_a_total():
     record = build_record(_row(axle_count=2, axle_capacity="7500 lbs"), 0)
     assert record["total_axle_capacity_lbs_num"] == 15000.0
+
+
+_IMAGE = "https://www.trailerplace.com/wp-content/uploads/2026/04/lead.jpg"
+
+
+def test_image_url_is_ingested_from_the_workbook_column():
+    """Messenger builds a card from parts, and the picture is one of them."""
+    record = build_record(_row(image_url=_IMAGE), 0)
+    assert record["image_url"] == _IMAGE
+
+
+def test_a_listing_without_a_photo_ingests_a_null_image():
+    for blank in ("", None):
+        assert build_record(_row(image_url=blank), 0)["image_url"] is None
+
+
+def test_gaining_an_image_changes_the_content_hash():
+    """Otherwise the first run that populates the column skips every existing
+    row as unchanged and the catalogue never receives a single image."""
+    without = build_record(_row(), 0)["content_hash"]
+    with_image = build_record(_row(image_url=_IMAGE), 0)["content_hash"]
+    assert without != with_image
+
+
+def test_a_changed_image_changes_the_content_hash():
+    first = build_record(_row(image_url=_IMAGE), 0)["content_hash"]
+    second = build_record(_row(image_url=_IMAGE.replace("lead", "other")), 0)["content_hash"]
+    assert first != second
+
+
+def test_the_image_url_stays_out_of_the_evidence_text():
+    """A URL is not evidence the feature reranker can reason about, and putting
+    it there only invites the model to quote it into a reply."""
+    record = build_record(_row(image_url=_IMAGE), 0)
+    assert _IMAGE not in record["match_evidence_text"]
+    assert "wp-content" not in record["match_evidence_text"]
