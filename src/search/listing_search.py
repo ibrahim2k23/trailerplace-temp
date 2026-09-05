@@ -248,6 +248,11 @@ def _row_to_listing(row: TrailerListingRow) -> dict[str, Any]:
         raw_features = [raw_features]
     return {
         "title": row.title or "",
+        # The lead photo, for channels that build a card rather than render a link.
+        # None on a listing with no photo, and on every row until the scrape that
+        # first populated the column has been ingested - a card without a picture
+        # still renders, so neither case needs special handling here.
+        "image_url": row.image_url,
         "condition": row.condition or "New",
         "price": row.price_display or price,
         "price_display": row.price_display or (f"${price:,.0f}" if price else None),

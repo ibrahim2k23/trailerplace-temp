@@ -289,7 +289,7 @@ def test_public_search_results_strip_internal_features_and_evidence(monkeypatch)
 def _row(**fields):
     """A TrailerListingRow stub carrying only what _row_to_listing reads."""
     defaults = {
-        "title": "", "url": "", "condition": None, "category": "", "subcategory": None,
+        "title": "", "url": "", "image_url": None, "condition": None, "category": "", "subcategory": None,
         "make": "", "color": None, "hitch_type": None, "price": None, "price_display": None,
         "year": None, "model": None, "trim": None, "stock_number": None,
         "length": None, "width": None, "height": None, "axles": None, "gvwr": None,

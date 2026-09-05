@@ -389,32 +389,120 @@ def _handle_message(psid: str, text: str, turn_id: str) -> None:
     # the same split the web UI streams. reply_chunks guarantees a non-empty list for
     # non-empty text, so the `or [reply]` only covers a reply that was empty anyway.
     chunks = split_reply_into_chunks(reply) or [reply]
-    bubbles = [bubble for chunk in chunks for bubble in _bubbles_for_chunk(chunk)]
-    for index, bubble in enumerate(bubbles):
+    listings = _listings_by_url(getattr(response, "listings", None))
+    sends = [send for chunk in chunks for send in _sends_for_chunk(chunk, listings)]
+    for index, (kind, payload) in enumerate(sends):
         if index:
             time.sleep(max(0.0, settings.messenger_chunk_pause_seconds))
-        for part in _split_for_messenger(bubble):
+        if kind == "card":
+            _send_card(psid, payload)
+            continue
+        for part in _split_for_messenger(payload):
             _send_text(psid, part)
     # The answer has landed, so the next question starts with a clean slate.
     _clear_status_line(psid)
 
 
-def _bubbles_for_chunk(chunk: str) -> list[str]:
-    """One chunk -> the bubbles it is sent as. A listing card becomes three.
+# Messenger truncates past these itself, mid-word and with no ellipsis, so we cut them.
+_CARD_TITLE_MAX = 80
+_CARD_SUBTITLE_MAX = 80
 
-    Messenger renders no markdown: "[title](url)" would arrive as those literal characters,
-    so the card is taken apart instead - the numbered title, then the bare URL (which
-    Messenger turns into a tappable preview of the trailer), then the spec bullets. Anything
-    that is not a card - the intro, the closing question - is one bubble, unchanged.
+
+def _url_key(url: Any) -> str:
+    """Match the reply's URL to a listing's. Same normalisation llm/respond.py uses."""
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def _listings_by_url(listings: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """The turn's listings, keyed by URL.
+
+    These came from the database, not from the model - the search returns them, the prompt
+    is shown them, and they come back out untouched. So every value a card prints is the
+    row's own, and the reply's text is used only to work out WHICH trailer a chunk is about.
+    """
+    index: dict[str, dict[str, Any]] = {}
+    for listing in listings or []:
+        key = _url_key(listing.get("url"))
+        if key:
+            index.setdefault(key, listing)
+    return index
+
+
+def _clip(text: Any, limit: int) -> str:
+    value = " ".join(str(text or "").split())
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
+def _card_subtitle(listing: dict[str, Any]) -> str:
+    """The one line under the title. Price first - it is what customers ask for."""
+    parts: list[str] = []
+    price = listing.get("price_display") or listing.get("price")
+    if str(price or "").strip():
+        parts.append(str(price).strip())
+    for key in ("length", "category"):
+        value = str(listing.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    return _clip(" · ".join(parts), _CARD_SUBTITLE_MAX)
+
+
+def _card_element(listing: dict[str, Any], fallback_title: str, fallback_url: str) -> dict[str, Any]:
+    """One generic-template element: the card Messenger draws for a trailer.
+
+    image_url is omitted rather than sent empty when a listing has no photo - Meta fetches
+    the URL server-side and rejects the element if it cannot, and a card with a title, a
+    subtitle and a button is still a card. That is also what every row looks like until the
+    scrape that first populated the column has been ingested.
+    """
+    url = str(listing.get("url") or fallback_url or "").strip()
+    element: dict[str, Any] = {
+        "title": _clip(listing.get("title") or fallback_title, _CARD_TITLE_MAX),
+        "default_action": {"type": "web_url", "url": url, "webview_height_ratio": "full"},
+        "buttons": [{"type": "web_url", "url": url, "title": "View Trailer"}],
+    }
+    subtitle = _card_subtitle(listing)
+    if subtitle:
+        element["subtitle"] = subtitle
+    image = str(listing.get("image_url") or "").strip()
+    if image:
+        element["image_url"] = image
+    return element
+
+
+def _sends_for_chunk(chunk: str, listings: dict[str, dict[str, Any]]) -> list[tuple[str, Any]]:
+    """One chunk -> the ordered sends it becomes: ("text", str) or ("card", element).
+
+    Messenger renders no markdown, so "[title](url)" would arrive as those literal
+    characters and the card has to be taken apart either way. It used to become three text
+    bubbles - the numbered title, the bare URL, the bullets - on the assumption that
+    Messenger would preview the URL into a card. It does not: that preview is the Messenger
+    app's courtesy to a link a PERSON pastes, and a link the Send API delivers stays plain
+    text. So the title and the URL become an actual card, and the bullets follow it.
+
+    Anything that is not a card - the intro, the closing question - is one bubble, unchanged.
     """
     card = parse_listing_card(chunk)
     if not card:
-        return [chunk]
+        return [("text", chunk)]
     marker, title, url, body = card
-    bubbles = [f"{marker} {title}".strip() if marker else title, url]
+    listing = listings.get(_url_key(url)) if settings.messenger_listing_cards else None
+    if listing is None:
+        # No row to build a card from - cards switched off, or a URL the turn did not
+        # present. Fall back to the three text bubbles: worse than a card, but the trailer
+        # still reaches the customer with a tappable link.
+        bubbles: list[tuple[str, Any]] = [
+            ("text", f"{marker} {title}".strip() if marker else title),
+            ("text", url),
+        ]
+        if body:
+            bubbles.append(("text", body))
+        return bubbles
+    sends: list[tuple[str, Any]] = [("card", _card_element(listing, title, url))]
     if body:
-        bubbles.append(body)
-    return bubbles
+        # The bullets and the sales sentence: the part of the reply the model actually
+        # wrote. The title and price it copied are on the card above.
+        sends.append(("text", body))
+    return sends
 
 
 def _split_for_messenger(text: str) -> list[str]:
@@ -472,6 +560,25 @@ def _send_text(psid: str, text: str) -> None:
         "recipient": {"id": psid},
         "messaging_type": "RESPONSE",
         "message": {"text": text},
+    })
+
+
+def _send_card(psid: str, element: dict[str, Any]) -> None:
+    """One trailer, as a generic template.
+
+    Sent one element at a time rather than as a carousel: the reply interleaves each card
+    with that trailer's own bullets, and a carousel would have to hoist every card above
+    all of the text to group them.
+    """
+    _send({
+        "recipient": {"id": psid},
+        "messaging_type": "RESPONSE",
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {"template_type": "generic", "elements": [element]},
+            }
+        },
     })
 
 

@@ -115,6 +115,11 @@ class Settings:
     # what we have on the lot for you."). Sending it turns a 30 s silence into an answer
     # within a second. 0 disables it; only turns that actually search publish one.
     messenger_send_search_status: bool = True
+    # Send each trailer as a generic-template card instead of a title bubble and a bare
+    # URL. Messenger renders no preview for a link a BOT sends -- that is a courtesy the
+    # app extends to links a person pastes -- so the bare URL arrived as bare text. Off
+    # restores the three text bubbles, without a deploy, if a card ever renders wrong.
+    messenger_listing_cards: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -185,6 +190,7 @@ class Settings:
             messenger_seen_mid_cache_size=_int(os.getenv("MESSENGER_SEEN_MID_CACHE_SIZE"), 2048),
             messenger_typing_refresh_seconds=_float(os.getenv("MESSENGER_TYPING_REFRESH_SECONDS"), 10.0),
             messenger_send_search_status=_bool(os.getenv("MESSENGER_SEND_SEARCH_STATUS"), True),
+            messenger_listing_cards=_bool(os.getenv("MESSENGER_LISTING_CARDS"), True),
         )
 
 

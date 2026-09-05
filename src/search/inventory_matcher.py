@@ -278,6 +278,10 @@ def _row_to_listing(row: pd.Series | dict[str, Any], score: float | None = None)
     listing = {
         "title": _clean_scalar(get("title")),
         "url": _clean_scalar(get("url")),
+        # Card-shape parity with listing_search: a stock-number lookup and a search
+        # must hand the channel the same keys, or a card built from one is missing
+        # the picture a card built from the other has.
+        "image_url": _clean_scalar(get("image_url")),
         "year": _clean_scalar(get("year")),
         "make": _clean_scalar(get("make")),
         "model": _clean_scalar(get("model")),
