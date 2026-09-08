@@ -429,7 +429,67 @@ def test_single_history_url_answering_a_question_is_left_alone():
     llm = FakeLLM(outputs=[ok])
     reply = respond_with_all_listings(llm, state, analysis, {"listings": []})
     assert len(llm.calls) == 1
-    assert "https://example.test/dump-1" in reply.assistant_text
+    # Kept, not stripped as a foreign card - but named in plain text, since a turn with no
+    # listings of its own is talking about a trailer already on the customer's screen.
+    assert "Trailer 1" in reply.assistant_text
+    assert "](" not in reply.assistant_text
+    assert reply.cited_listing_urls == ["https://example.test/dump-1"]
+
+
+def test_no_listings_turn_names_the_referenced_trailer_in_plain_text():
+    # Messenger renders no markdown, so a linked title arrives as literal brackets and a raw
+    # URL. The prompt orders plain text; this is the guarantee when the model ignores it.
+    analysis = sample_analysis()
+    state = {
+        "category": "Livestock",
+        "messages": [{"role": "user", "content": "I'm interested in the first one"}],
+        "shown_listings": _listings("https://example.test/cattle-1"),
+    }
+    linked = ReplyOutput(
+        assistant_text=(
+            "I see you are interested in the 2026 Galyean Cattle Trailer - 15131:\n"
+            "1. [2026 Galyean Cattle Trailer - 15131](https://example.test/cattle-1)\n"
+            "   - Price: $35,250\n"
+            "Feel free to check out our website at https://trailerplace.com."
+        ),
+        cited_listing_urls=["https://example.test/cattle-1"],
+    )
+    llm = FakeLLM(outputs=[linked])
+    reply = respond_with_all_listings(llm, state, analysis, {"listings": []})
+    assert "](" not in reply.assistant_text
+    assert "https://example.test/cattle-1" not in reply.assistant_text
+    # The numbered marker goes with the link - a lone "1." reads like a list that never comes.
+    assert "\n2026 Galyean Cattle Trailer - 15131\n" in reply.assistant_text
+    assert "$35,250" in reply.assistant_text
+    # The channel still gets the URL to build its own card from.
+    assert reply.cited_listing_urls == ["https://example.test/cattle-1"]
+
+
+def test_unlinking_spares_the_website_link_and_the_trailer_type_list():
+    analysis = sample_analysis()
+    state = {"messages": [{"role": "user", "content": "what types do you have?"}]}
+    reply_in = ReplyOutput(
+        assistant_text=(
+            "Based on what you need to haul, here are the types worth looking at:\n"
+            "1. **Equipment Trailer** - for machinery.\n"
+            "2. **Dump Trailer** - for loose material.\n"
+            "See [our website](https://trailerplace.com) for more."
+        ),
+        cited_listing_urls=[],
+    )
+    llm = FakeLLM(outputs=[reply_in])
+    reply = respond_with_all_listings(llm, state, analysis, {"listings": []})
+    assert reply.assistant_text == reply_in.assistant_text
+
+
+def test_a_turn_that_presents_listings_keeps_its_hyperlinked_cards():
+    # The card link is how the customer opens the trailer, and it is what Messenger turns
+    # into a generic-template card. Only turns with NO listings are unlinked.
+    analysis = sample_analysis()
+    state = {"category": "Dump", "messages": [{"role": "user", "content": "show me dump trailers"}]}
+    llm = FakeLLM(outputs=[_reply("https://example.test/dump-1")])
+    reply = respond_with_all_listings(llm, state, analysis, {"listings": _listings("https://example.test/dump-1")})
+    assert "[Trailer 1](https://example.test/dump-1)" in reply.assistant_text
 
 
 def test_contact_only_turn_gets_a_plain_type_question_not_recommendations():

@@ -419,6 +419,15 @@ def _decision_lines(state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> li
             "one, and do not quote a trailer from an earlier batch. Quote only its real fields, and put ONLY its "
             "URL in cited_listing_urls."
         )
+        lines.append(
+            "  WRITE ITS TITLE AS PLAIN TEXT - never as a markdown link, never bold, and never followed by the "
+            f'URL: "I see you are interested in the {_listing_get(referenced, "title")}:" and NOT '
+            f'"[{_listing_get(referenced, "title")}](...)". They already have the link from the batch on screen, '
+            "and the channel they are reading this on does not render markdown, so a link here arrives as raw "
+            "brackets and parentheses. The URL belongs in cited_listing_urls ONLY - it must not appear anywhere "
+            "in the reply text. This overrides the hyperlink rule in 5C, which applies only to the NEW listing "
+            "cards in 5A."
+        )
     if _outcome_get(turn_outcome, "search_ran") and not _outcome_get(turn_outcome, "result_count", 0):
         seen_before = bool(_state_get(state, "shown_urls", None))
         reason = (
@@ -765,7 +774,9 @@ shape exactly, keeping this field order:
 
 - THE TITLE IS ALWAYS A MARKDOWN HYPERLINK to that listing's exact URL from 5A:
   [2026 Iron Bull DTB - 15081](https://...). A bare or merely bold title with no link is a failed
-  card - the link is how the customer opens the trailer.
+  card - the link is how the customer opens the trailer. This applies ONLY to the NEW listings in
+  5A. A trailer the customer is merely REFERRING BACK to (they picked one, asked about one, or we
+  are logging their interest) is named as PLAIN TEXT - no link, no bold, no URL beside it.
 - COPY THE TITLE EXACTLY as it appears after "TITLE:", including the stock number on the end
   ("2026 Gooseneck Livestock - 91632", not "2026 Gooseneck Livestock") - the stock number is how
   everyone refers to that exact trailer. Never read a spec out of the title ("15K" in a title is
@@ -1029,7 +1040,60 @@ def _pending_suggestion_question(state: Any) -> str | None:
     )
 
 
+# "[title](url)" anywhere in the reply text, so a title can be unlinked back to plain text.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(\s*(https?://[^)\s]+)\s*\)")
+# The "1." / "1)" marker left behind on a line that was nothing but a linked title.
+_LONE_MARKER_RE = re.compile(r"^(\s*)\d+[.)]\s+")
+
+
+def _unlink_listing_titles(reply: Any) -> Any:
+    """On a turn that presents NO listings, name any trailer in PLAIN TEXT.
+
+    The prompt orders this - the trailer they pointed at is already on their screen with its
+    link - but the small model still writes the odd markdown card, and Messenger renders no
+    markdown: the customer gets literal brackets and a raw URL mid-sentence. So the guarantee
+    is made here rather than left to the model.
+
+    Only listing links are unlinked, and only on the lines they appear on: a link to the store
+    website keeps its URL (the canned closing lines rely on it), and a numbered list that never
+    held a link - the recommended trailer TYPES - keeps its numbering. cited_listing_urls is
+    untouched, so the URL still reaches the channels that build their own cards from it.
+    """
+    text = str(_outcome_get(reply, "assistant_text", "") or "")
+    if "](" not in text:
+        return reply
+    site = {
+        _url_key(settings.trailerplace_website or "https://trailerplace.com"),
+        _url_key("https://trailerplace.com"),
+    }
+
+    def unlink(match: re.Match) -> str:
+        return match.group(0) if _url_key(match.group(2)) in site else match.group(1).strip()
+
+    lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = _MD_LINK_RE.sub(unlink, line)
+        if stripped != line:
+            # "1. [Trailer](url)" -> "1. Trailer" -> "Trailer": a numbered card with nothing
+            # left to open reads like the first of a list that never comes.
+            stripped = _LONE_MARKER_RE.sub(r"\1", stripped)
+        lines.append(stripped)
+    unlinked = "\n".join(lines)
+    if unlinked == text:
+        return reply
+    logger.warning("no-listings turn linked a listing title; unlinked it for channels without markdown")
+    return reply.model_copy(update={"assistant_text": unlinked})
+
+
 def respond_with_all_listings(client: LLMClient, state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> ReplyOutput:
+    """Reply, then unlink any listing title if this turn presents no listings of its own."""
+    reply = _respond_and_repair(client, state, analysis, turn_outcome)
+    if _outcome_get(turn_outcome, "listings", None):
+        return reply
+    return _unlink_listing_titles(reply)
+
+
+def _respond_and_repair(client: LLMClient, state: Any, analysis: TurnAnalysis, turn_outcome: Any) -> ReplyOutput:
     """Reply, and repair the two ways a small model betrays the LISTINGS block.
 
     It silently DROPS listings it judges a poor fit (ranking is the reranker's job, so a short

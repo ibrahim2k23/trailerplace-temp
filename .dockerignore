@@ -1,0 +1,12 @@
+# Build context only. Everything here is rebuilt inside the image or never read by it;
+# without this the context uploaded to ACR is ~630 MB instead of ~7 MB.
+#
+# .env is deliberately NOT excluded: the running containers still take several settings
+# from the baked-in file rather than from Container App env vars.
+.venv/
+.git/
+logs/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
